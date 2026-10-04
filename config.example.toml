@@ -1,0 +1,84 @@
+[paths]
+# Windows の実機では "C:/Users/<ユーザー名>/iCloudDrive/Recordings/inbox" を書く。
+# 区切りは / で書く（Python では / でも動き、TOML のエスケープを避けられる）。
+inbox      = "./data/inbox"
+processed  = "./data/processed"
+transcripts = "./data/transcripts"
+db         = "./data/kijun.duckdb"
+
+[settings]
+# ファイル名の <形式>。この2つ以外は解析を失敗させる。
+formats = ["f2f", "call"]
+# ファイル名の <種類>。運用しながら追加する。ここに無い種類は、警告を出したうえでそのまま記録する
+# （拒否しない理由は、CLAUDE.md 4-2 に「運用しながら追加」と書いてあるため）。
+kinds = ["teirei", "sagyou", "zatsudan"]
+
+[bundle]
+# CLAUDE.md 4-7。前のファイルの終了時刻から次のファイルの開始時刻までが
+# この分数以内で、かつ同じ日であれば、同じ conversation_id にする。
+gap_minutes = 30
+# 形式または種類が違うファイルは束ねない。false にすると形式・種類を無視して束ねる。
+require_same_setting = true
+
+[transcribe]
+backend = "faster_whisper"
+model = "large-v3"
+# faster-whisper の compute_type。RTX 4070 Ti では float16 を使う。
+# VRAM が足りない場合は int8_float16 にする。
+compute_type = "float16"
+device = "cuda"
+language = "ja"
+# faster-whisper の VAD（無音区間の除去）。会議の録音では有効にする。
+vad_filter = true
+# 1つの発話として扱う最小の長さ（秒）。これより短い区間は前の発話に結合する。
+min_utterance_sec = 0.4
+
+[diarize]
+backend = "pyannote"
+model = "pyannote/speaker-diarization-3.1"
+device = "cuda"
+# 話者数が分かっている場合に指定する。null なら pyannote が推定する。
+num_speakers = 0
+
+[extract]
+# "ollama" または "claude"
+provider = "ollama"
+# 1チャンクの長さ（分）。CLAUDE.md 4-4 の「20〜30分ごとに区切り」。
+chunk_minutes = 25
+# 前後の重複（分）。CLAUDE.md 4-4 の「前後を2分程度重ねて」。
+overlap_minutes = 2
+
+[extract.ollama]
+base_url = "http://localhost:11434"
+# 実機で `ollama list` を実行し、実際に入っているタグに合わせて書き換える。
+# CLAUDE.md 4-4 の候補は qwen3:14b（4bit量子化で約9GB）と qwen3:30b-a3b（約18GB）。
+# このクラウド環境から ollama.com は egress proxy でブロックされているため、
+# 最新のタグ名は確認できていない。ユーザーが実機で確認して書き換える。
+model = "qwen3:14b"
+# 1回の抽出が終わったらモデルを VRAM からアンロードさせる（第1節の理由）。
+keep_alive = 0
+# 1リクエストの上限（秒）。25分のチャンクで余裕を持たせる。
+timeout_sec = 900
+
+[extract.claude]
+model = "claude-sonnet-5-5"
+# CLAUDE.md 4-4 の「Sonnet クラス」に対応するモデルID。
+max_tokens = 16000
+# 抽出は分類寄りの作業なので low から始め、承認件数を見て上げる。
+effort = "low"
+timeout_sec = 600
+
+[match]
+backend = "e5"
+model = "intfloat/multilingual-e5-large"
+# e5 系のモデルは入力に接頭辞が必要。付け忘れると類似度の精度が落ちる。
+# ruri に差し替える場合は、ruri の規約に合わせてこの2つを書き換える。
+query_prefix = "query: "
+passage_prefix = "passage: "
+# CLAUDE.md 4-5 の閾値。これ以上なら既存項目の根拠として紐付け、未満なら新規候補。
+similarity_threshold = 0.85
+device = "cuda"
+
+[retention]
+# 文字起こしが完了してからこの日数が経った音声を削除する（CLAUDE.md 2章）。
+audio_days = 30

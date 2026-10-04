@@ -1,0 +1,59 @@
+[project]
+name = "kijun"
+version = "0.1.0"
+description = "会話録音から判断基準を抽出し、チェックリスト化する仕組み"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.1",
+    "pydantic>=2.9",
+    "typer>=0.12",
+    "mutagen>=1.47",
+    "numpy>=2.0",
+]
+
+# 重い依存は用途別の extra に分ける。`uv sync` の既定では入らない。
+[project.optional-dependencies]
+transcribe = ["faster-whisper>=1.0", "pyannote.audio>=3.3", "torch>=2.4", "torchaudio>=2.4"]
+extract-ollama = ["httpx>=0.27"]
+extract-claude = ["anthropic>=0.40"]
+match = ["sentence-transformers>=3.0"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+kijun = "kijun.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kijun"]
+
+# Windows で torch を CUDA 版にするための設定。既定では無効（コメントアウト）にしてある。
+# 理由: uv は `uv sync` のたびにロックファイルを作るために、ここに書いた index へ接続して
+# 全 extra のパッケージ情報を取得する。download.pytorch.org に接続できない環境
+# （例: 外向き通信を制限したクラウドコンテナ）では、extra を使わない場合でも
+# `uv sync` 自体が失敗する。
+# Windows の実機で `uv sync --extra transcribe` を行う前に、下の 8 行のコメントを外す。
+# タグ cu126 が現在も正しいかは https://pytorch.org/get-started/locally/ で確認し、
+# 違う場合は index の name と url、sources の index 名の 3 か所を書き換える。
+#
+# [[tool.uv.index]]
+# name = "pytorch-cu126"
+# url = "https://download.pytorch.org/whl/cu126"
+# explicit = true
+#
+# [tool.uv.sources]
+# torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
+# torchaudio = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not requires_gpu and not requires_network'"
+testpaths = ["tests"]
+markers = [
+    "requires_gpu: GPU と大きなモデルファイルが必要。クラウド環境では実行しない",
+    "requires_network: 外部サービス（Ollama、Claude API、Hugging Face）への通信が必要",
+]

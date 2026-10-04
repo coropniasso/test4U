@@ -1,0 +1,9 @@
+config.toml
+data/
+__pycache__/
+.venv/
+*.duckdb
+*.duckdb.wal
+.pytest_cache/
+*.egg-info/
+dist/
