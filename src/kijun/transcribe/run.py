@@ -17,7 +17,7 @@ import duckdb
 
 from kijun.config import Config
 from kijun.db import repo
-from kijun.models import Utterance
+from kijun.models import Conversation, Utterance
 from kijun.transcribe.base import Diarizer, Transcriber
 from kijun.transcribe.merge import merge_segments
 
@@ -34,19 +34,29 @@ def transcribe_to_utterances(
     return merge_segments(segments, turns, min_utterance_sec)
 
 
-def utterances_to_json(
-    conversation_id: str | None,
+def transcript_to_json(
+    conversation: Conversation | None,
     source_files: list[str],
-    duration_sec: float | None,
     transcribed_at: datetime,
     utterances: list[Utterance],
 ) -> str:
-    """文字起こしの JSON 文字列を作る。DuckDB を壊したときに文字起こしをやり直さずに済むよう保存する。"""
+    """文字起こしの JSON 文字列を作る。
+
+    DuckDB を壊したときに、`kijun restore-transcript` が conversations と utterances を復元できるよう、
+    conversations の行を再構成するのに必要な項目をすべて入れる（構造は計画書 6-5）。
+    日時は、DuckDB の TIMESTAMP と同じ精度（マイクロ秒）で往復できるよう、秒未満も含めて書く。
+    conversation が None のとき（`transcribe --audio` の単発の試し実行）は、会議に属さないので
+    conversation_id を null にする。この JSON は復元の対象にならない。
+    """
     payload = {
-        "conversation_id": conversation_id,
+        "conversation_id": conversation.conversation_id if conversation else None,
+        "recorded_at": conversation.recorded_at.isoformat() if conversation else None,
+        "setting_format": conversation.setting_format if conversation else None,
+        "setting_kind": conversation.setting_kind if conversation else None,
         "source_files": source_files,
-        "duration_sec": duration_sec,
-        "transcribed_at": transcribed_at.isoformat(timespec="seconds"),
+        "duration_sec": conversation.duration_sec if conversation else None,
+        "created_at": conversation.created_at.isoformat() if conversation else None,
+        "transcribed_at": transcribed_at.isoformat(),
         "utterances": [asdict(u) for u in utterances],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -93,7 +103,7 @@ def transcribe_conversation(
     cfg.paths.transcripts.mkdir(parents=True, exist_ok=True)
     json_path = cfg.paths.transcripts / f"{conversation_id}.json"
     json_path.write_text(
-        utterances_to_json(conversation_id, conv.source_files, conv.duration_sec, now, utterances),
+        transcript_to_json(conv, conv.source_files, now, utterances),
         encoding="utf-8",
     )
     repo.mark_transcribed(con, conversation_id, str(json_path), conv.duration_sec, now)
@@ -120,6 +130,6 @@ def transcribe_single_audio(
     )
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(
-        utterances_to_json(None, [audio_path.name], None, now, utterances), encoding="utf-8"
+        transcript_to_json(None, [audio_path.name], now, utterances), encoding="utf-8"
     )
     return utterances

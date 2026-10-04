@@ -86,7 +86,8 @@ Console で月額の上限金額を設定してから使うこと。秘密情報
   - ビュー `v_weekly_metrics` は `CREATE OR REPLACE` なので、`kijun db init` をもう一度実行すれば新しい定義になる。
   - `embeddings` は、再計算できるキャッシュにすぎない。次の2コマンドで、他のテーブルの内容を残したまま作り直せる。
     `uv run python -c "import duckdb; duckdb.connect('data/kijun.duckdb').execute('DROP TABLE embeddings')"` を実行してから、`uv run kijun db init` を実行する（DB のパスは `[paths].db` に合わせる）。
-  - 試しに作っただけの DB なら、DB ファイルを削除して `kijun db init` をやり直してもよい。文字起こしの JSON（`[paths].transcripts`）は DB ファイルとは別に残る。ただし、JSON から DB の `utterances` を読み込み直すコマンドは、この版には無い。文字起こし済みの会議が入った DB を削除すると、その会議は `kijun transcribe` をやり直さない限り DB に戻らない。GPU 時間を無駄にしないよう、文字起こし済みのデータがある DB は、削除せず上の方法で直すこと。
+  - DB ファイルを削除してしまった場合は、`uv run kijun db init` でスキーマを作り直してから、`uv run kijun restore-transcript --all` で `conversations` と `utterances` を文字起こしの JSON（`[paths].transcripts`）から復元する。文字起こしをやり直す必要は無い（GPU 時間を使わない）。
+  - ただし、`extracted_requests`、`knowledge_items`、`item_evidence`、`speaker_map` などは JSON に入っていないので復元されない。復元後に `kijun extract` と `kijun match` をやり直すこと。レビュー済みの `knowledge_items` を失うので、DB ファイルの削除は最後の手段にする（先に上の `DROP TABLE embeddings` で直す）。
 - 手順4の10テーブルは、CLAUDE.md 5章の8テーブルに、`schema_version` と `embeddings` の2テーブルを足したものである。ビューは `v_weekly_metrics`（抽出モデルごとの週次の指標）の1つ。
 - 手順7の `--audio` は DuckDB に書かず、結果を標準出力と JSON に出すだけである。VRAM 使用量は、実行中に別の端末で `nvidia-smi` を実行して記録する。
 - 手順7、9で記録した処理時間と VRAM 使用量は、CLAUDE.md 7章の未検証事項「Qwen の最新版と、VRAM 12GB での実際のメモリ使用量・処理時間」と「pyannote.audio が Windows + CUDA 環境で問題なく動くか」への回答になる。結果を CLAUDE.md 7章に書き込む。
@@ -105,6 +106,8 @@ uv run kijun db init                                   # スキーマを適用�
 uv run kijun ingest [--dry-run]                        # inbox を走査し、会議単位に束ねて conversations に登録
 uv run kijun transcribe --conversation <ID>            # 文字起こしと話者分離。utterances に書く
 uv run kijun transcribe --audio <ファイル>              # 単発の試し実行（作業表 #4 の用途）
+uv run kijun restore-transcript (--conversation <ID> | --all) [--force] [--dry-run]
+                                                       # 文字起こしの JSON から conversations と utterances を復元
 uv run kijun extract --conversation <ID> --provider {ollama,claude}
 uv run kijun compare --conversation <ID> [--out <パス>]  # Qwen と Claude の対照表（作業表 #5）
 uv run kijun match --conversation <ID> [--dry-run]     # 既存項目との照合
@@ -119,6 +122,7 @@ uv run kijun purge-audio [--execute]                   # 音声の30日削除
 | `ingest` | `[paths].inbox` のファイルを `yyyyMMdd_HHmm_<形式>_<種類>.m4a` として解析し、同じ日で、前のファイルの終了から30分以内のものを同じ会議にまとめて `conversations` に登録する。`--dry-run` は登録せず、束ねた結果を表で出す。解析できないファイルは、削除も移動もせず、一覧に出す。 |
 | `transcribe --conversation <ID>` | 登録済みの会議の音声を文字起こしして話者を付け、`utterances` に書く。同じ内容を `[paths].transcripts/<ID>.json` に保存し、音声を `[paths].processed` に移す。 |
 | `transcribe --audio <ファイル>` | 1本の音声を試す。DuckDB には書かない。 |
+| `restore-transcript` | `[paths].transcripts` の JSON から、`conversations` と `utterances` を復元する（DB を失ったときに、文字起こしをやり直さずに済む）。`--conversation <ID>` で1会議、`--all` で全部。`conversations` に同じ会議が既にあれば、上書きせずスキップする（`--force` で上書き）。`extracted_requests`、`knowledge_items`、`item_evidence` は復元されないので、`extract` と `match` をやり直す。`--dry-run` は書かずに、復元される内容を出す。 |
 | `extract` | 発話を25分ごと（前後2分重ねる）に分け、Ollama または Claude API で要求・指摘を抽出し、`extracted_requests` に書く。`--provider` を省略すると設定の `extract.provider`。失敗したチャンクは記録して次に進む。 |
 | `compare` | 同じ会議の Qwen と Claude の抽出結果を、数字の表と、左右に並べた対照表の Markdown にする。 |
 | `match` | `reusable = true` の抽出結果を、既存のチェック項目とコサイン類似度で照合する。閾値（既定 0.85）以上なら既存項目に紐付け、未満なら `status = 'candidate'` の新規候補を作る。`--dry-run` は書かず、類似度の降順の表を出す。`--provider` で、どのモデルの抽出結果を対象にするかを選ぶ（省略すると設定の `extract.provider`）。 |

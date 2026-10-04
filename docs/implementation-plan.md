@@ -89,7 +89,8 @@ test4U/
 │   │   ├── base.py                  # Protocol: Transcriber, Diarizer
 │   │   ├── faster_whisper_impl.py   # faster-whisper large-v3
 │   │   ├── pyannote_impl.py         # pyannote speaker-diarization-3.1
-│   │   └── merge.py                 # 文字起こしの区間と話者区間の突き合わせ
+│   │   ├── merge.py                 # 文字起こしの区間と話者区間の突き合わせ
+│   │   └── restore.py               # 文字起こしの JSON から conversations と utterances を復元（6-5）
 │   ├── extract/
 │   │   ├── __init__.py
 │   │   ├── base.py                  # Protocol: Extractor
@@ -498,6 +499,31 @@ annotation = pipeline(str(path), num_speakers=n or None)
 
 - `utterances` テーブルに書き込む。
 - 同じ内容を `[paths].transcripts/<conversation_id>.json` に保存する。DuckDB を壊したときに文字起こしをやり直さずに済むようにするため。`conversations.transcript_path` にこのパスを入れる。
+- JSON は、`conversations` の行を再構成するのに必要な項目をすべて持つ。構造は次のとおり。日時は ISO 8601 で、DuckDB の TIMESTAMP と同じ精度（マイクロ秒）で往復できるよう、秒未満も書く。
+
+  ```json
+  {
+    "conversation_id": "20260920_1930_f2f_teirei",
+    "recorded_at": "2026-09-20T19:30:00",
+    "setting_format": "f2f",
+    "setting_kind": "teirei",
+    "source_files": ["20260920_1930_f2f_teirei.m4a"],
+    "duration_sec": 3600.5,
+    "created_at": "2026-09-20T23:30:15.123456",
+    "transcribed_at": "2026-09-21T00:10:05.987654",
+    "utterances": [
+      {"seq": 0, "speaker_label": "SPEAKER_00", "start_sec": 0.0, "end_sec": 4.0, "text": "..."}
+    ]
+  }
+  ```
+
+  `conversations.transcript_path` は JSON ファイル自身のパスなので、JSON には入れず、復元時に読み込んだファイルのパスを入れる。`duration_sec` と `speaker_label` は null になり得る。`transcribe --audio`（単発の試し実行）が書く JSON は会議に属さないので、`conversation_id` が null で、他の会議の項目も null になる。この JSON は復元の対象外。
+- `uv run kijun restore-transcript` が、この JSON から `conversations` と `utterances` を復元する。
+  - `conversations` に同じ `conversation_id` の行が既にあれば、上書きせずスキップし、`utterances` にも触らない（既にある正しい行を JSON で踏み潰さないため）。`--force` を付けたときだけ上書きする。
+  - `utterances` は、その会議の行を削除してから JSON の内容を入れ直す。
+  - `extracted_requests`、`knowledge_items`、`item_evidence` は JSON に入っていないので復元できない。復元後に `extract` と `match` をやり直す。このことをコマンドの出力にも書く。
+  - データを消さずに足す操作なので、既定で実行する。`--dry-run` は、何件復元されるかを先に見るための任意の指定。
+  - JSON の項目が欠けている場合は、ファイル名・会議ID・欠けた項目名を出してエラーにする（`--all` では、そのファイルだけをエラーにして他を続け、終了コードを 1 にする）。
 - `conversations.transcribed_at` に完了時刻を入れる。#9 の削除判定がこの列を見る。
 - 音声ファイルを `[paths].processed` に移す。
 
@@ -748,6 +774,8 @@ uv run kijun db init                                   # スキーマを適用�
 uv run kijun ingest [--dry-run]                        # inbox を走査し、会議単位に束ねて conversations に登録
 uv run kijun transcribe --conversation <ID>            # 文字起こしと話者分離。utterances に書く
 uv run kijun transcribe --audio <ファイル>              # 単発の試し実行（作業表 #4 の用途）
+uv run kijun restore-transcript (--conversation <ID> | --all) [--force] [--dry-run]
+                                                       # 文字起こしの JSON から conversations と utterances を復元
 uv run kijun extract --conversation <ID> --provider {ollama,claude}
 uv run kijun compare --conversation <ID> [--out <パス>]  # Qwen と Claude の対照表（作業表 #5）
 uv run kijun match --conversation <ID> [--dry-run]     # 既存項目との照合

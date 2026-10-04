@@ -236,6 +236,61 @@ def transcribe(
         )
 
 
+# --- restore-transcript ------------------------------------------------------
+
+
+@app.command("restore-transcript")
+def restore_transcript_cmd(
+    ctx: typer.Context,
+    conversation: Annotated[
+        str | None, typer.Option("--conversation", help="復元する会議ID。")
+    ] = None,
+    all_: Annotated[
+        bool, typer.Option("--all", help="[paths].transcripts の JSON をすべて復元する。")
+    ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="conversations に同じ会議が既にあっても上書きする。")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="DB に書かず、復元される内容だけを出す。")
+    ] = False,
+) -> None:
+    """文字起こしの JSON から、conversations と utterances を復元する。"""
+    from kijun.transcribe.restore import (
+        STATUS_ERROR,
+        STATUS_OVERWRITTEN,
+        STATUS_RESTORED,
+        restore_transcripts,
+    )
+
+    if (conversation is None) == (not all_):
+        raise _fail("--conversation と --all のどちらか一方を指定してください。")
+    with _errors():
+        cfg = _config(ctx)
+        con = _open_db(cfg)
+        outcomes = restore_transcripts(con, cfg, conversation, force=force, dry_run=dry_run)
+        con.close()
+        done = 0
+        for o in outcomes:
+            label = o.conversation_id or o.path.name
+            if o.status in (STATUS_RESTORED, STATUS_OVERWRITTEN):
+                done += 1
+                verb = "復元します" if dry_run else "復元しました"
+                if o.status == STATUS_OVERWRITTEN:
+                    verb = "上書きします" if dry_run else "上書きしました"
+                typer.echo(f"{label}: {verb}（発話 {o.utterance_count} 件）")
+            else:
+                typer.echo(f"{label}: {o.message}", err=o.status == STATUS_ERROR)
+        suffix = "（--dry-run のため、DB には書いていません）" if dry_run else ""
+        typer.echo(f"\n復元 {done} 件 / 対象 {len(outcomes)} 件{suffix}。")
+        typer.echo(
+            "extracted_requests、knowledge_items、item_evidence は復元されません。"
+            "必要なら `kijun extract` と `kijun match` をやり直してください。"
+        )
+        if any(o.status == STATUS_ERROR for o in outcomes):
+            raise typer.Exit(code=1)
+
+
 # --- extract -----------------------------------------------------------------
 
 

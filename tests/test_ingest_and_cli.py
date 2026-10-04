@@ -110,13 +110,13 @@ db = "{(tmp_path / 'data' / 'kijun.duckdb').as_posix()}"
 def test_kijun_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("db", "ingest", "transcribe", "extract", "compare", "match", "purge-audio"):
+    for cmd in ("db", "ingest", "transcribe", "restore-transcript", "extract", "compare", "match", "purge-audio"):
         assert cmd in result.output
 
 
 @pytest.mark.parametrize(
     "args",
-    [["db"], ["db", "init"], ["ingest"], ["transcribe"], ["extract"], ["compare"], ["match"], ["purge-audio"]],
+    [["db"], ["db", "init"], ["ingest"], ["transcribe"], ["restore-transcript"], ["extract"], ["compare"], ["match"], ["purge-audio"]],
 )
 def test_各サブコマンドの_help(args):
     result = runner.invoke(app, [*args, "--help"])

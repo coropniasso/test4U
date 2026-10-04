@@ -119,6 +119,12 @@ def insert_conversation(con: duckdb.DuckDBPyConnection, conv: Conversation) -> N
     )
 
 
+def replace_conversation(con: duckdb.DuckDBPyConnection, conv: Conversation) -> None:
+    """同じ conversation_id の行があれば消してから入れ直す（restore-transcript --force 用）。"""
+    con.execute("DELETE FROM conversations WHERE conversation_id = ?", [conv.conversation_id])
+    insert_conversation(con, conv)
+
+
 def _to_conversation(row: tuple) -> Conversation:
     return Conversation(
         conversation_id=row[0],
