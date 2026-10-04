@@ -274,3 +274,50 @@ def test_抽出から照合までつながる(con, cfg, conv):
     run_extraction(con, cfg, CID, extractor, now=NOW)
     results = link_requests(con, cfg, CID, FakeEmbedder(), now=NOW)
     assert len(results) == 1 and results[0].action == "new_candidate"
+
+
+# --- テキストの編集への追従 ----------------------------------------------------------------
+
+
+def _unlink_all(con, keep_item: str = "item_0001") -> None:
+    """抽出結果を未紐付けに戻して、照合をやり直せる状態にする。"""
+    con.execute("DELETE FROM item_evidence")
+    con.execute("DELETE FROM knowledge_items WHERE item_id != ?", [keep_item])
+
+
+def test_同じテキストなら再計算しない_check_text_を編集したら再計算する(con, cfg, conv):
+    add_item(con, "item_0001", SUMMARY_B)
+    add_request(con, "r1", SUMMARY_A)
+    embedder = FakeEmbedder()
+    link_requests(con, cfg, conv, embedder, now=NOW)
+    assert embedder.passage_texts == [SUMMARY_B]
+
+    # テキストが同じなら、照合し直してもベクトルを再計算しない
+    _unlink_all(con)
+    link_requests(con, cfg, conv, embedder, now=NOW)
+    assert embedder.passage_texts == [SUMMARY_B] and embedder.query_texts == [SUMMARY_A]
+
+    # ユーザーがレビューで check_text を修正した。古いベクトルは使わず、新しいテキストで再計算する
+    con.execute("UPDATE knowledge_items SET check_text = ? WHERE item_id = 'item_0001'", [SUMMARY_A])
+    _unlink_all(con)
+    results = link_requests(con, cfg, conv, embedder, now=NOW)
+    assert embedder.passage_texts == [SUMMARY_B, SUMMARY_A]
+    assert embedder.query_texts == [SUMMARY_A]  # 抽出結果の要約は変わっていないので再計算しない
+    # 修正後の文言と同じ要約なので、類似度 1.0 で紐付く（古いベクトルのままなら新規候補になってしまう）
+    assert results[0].action == "linked" and results[0].similarity == pytest.approx(1.0)
+    # 保存されているハッシュも新しいテキストのもの
+    stored = con.execute(
+        "SELECT text_hash FROM embeddings WHERE owner_type = 'knowledge_item' AND owner_id = 'item_0001'"
+    ).fetchone()[0]
+    assert stored == repo.text_hash(SUMMARY_A)
+
+
+def test_全角半角の違いだけの編集では再計算しない(con, cfg, conv):
+    add_item(con, "item_0001", "ABC 123")
+    add_request(con, "r1", SUMMARY_A)
+    embedder = FakeEmbedder()
+    link_requests(con, cfg, conv, embedder, now=NOW)
+    con.execute("UPDATE knowledge_items SET check_text = ? WHERE item_id = 'item_0001'", ["ＡＢＣ　１２３"])
+    _unlink_all(con)
+    link_requests(con, cfg, conv, embedder, now=NOW)
+    assert embedder.passage_texts == ["ABC 123"]  # NFKC で同じなので、再計算しない

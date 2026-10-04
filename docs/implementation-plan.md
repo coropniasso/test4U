@@ -237,7 +237,7 @@ CLAUDE.md 5章の8テーブルをそのまま作る。そのうえで、CLAUDE.m
 |---|---|---|
 | `conversations.setting` を2列に分ける | `setting_format`（`f2f` / `call`）と `setting_kind`（`teirei` など） | CLAUDE.md 6章の評価指標に「対面と通話それぞれの抽出精度」がある。1列に結合して入れると、集計のたびに文字列を分解することになる |
 | `extracted_requests` に `speaker_from_label` と `speaker_to_label` を追加し、`direction` を NULL 許容にする | 抽出の時点では話者ラベル（`SPEAKER_00` など）しか分からない | CLAUDE.md 4-8 の処理順では、話者と人物の対応付けを Discord に依頼するのは抽出（手順6）より後の手順8である。つまり抽出の時点で「自分→相手」か「相手→自分」かは確定できない。話者ラベルを記録しておき、`speaker_map` が埋まった後に `direction` を導出する |
-| `embeddings` テーブルを追加 | `(owner_type, owner_id, model_name, dim, vector FLOAT[])` | CLAUDE.md 4-5 の照合にベクトルの保存先が必要。`knowledge_items` と `extracted_requests` の両方のベクトルを1つの表に入れ、`owner_type` で区別する |
+| `embeddings` テーブルを追加 | `(owner_type, owner_id, model_name, text_hash, dim, vector FLOAT[])` | CLAUDE.md 4-5 の照合にベクトルの保存先が必要。`knowledge_items` と `extracted_requests` の両方のベクトルを1つの表に入れ、`owner_type` で区別する。`text_hash` は、ベクトル化した元テキストの NFKC 正規化後の SHA-256（16進）。`check_text` はユーザーがレビューで文言を修正する前提の列（CLAUDE.md 4-6）なので、編集されたことを検出して古いベクトルを使い続けないために持つ |
 | `schema_version` テーブルを追加 | `(version INTEGER, applied_at TIMESTAMP)` | スキーマを後から変更したときに、どのバージョンが適用済みか分かるようにする |
 
 列挙型の値は英数字で持ち、画面表示のときに日本語にする。CLAUDE.md 4-2 でファイル名を英数字にする理由として「Windows と Python での文字化けを避けるため」と書かれているので、同じ方針をデータベースの値にも適用する。対応は次のとおり。
@@ -350,6 +350,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
     owner_type VARCHAR NOT NULL,           -- knowledge_item / extracted_request
     owner_id   VARCHAR NOT NULL,
     model_name VARCHAR NOT NULL,
+    text_hash  VARCHAR NOT NULL,           -- ベクトル化した元テキストの NFKC 正規化後の SHA-256（16進）。テキストの編集を検出する
     dim        INTEGER NOT NULL,
     vector     FLOAT[] NOT NULL,
     created_at TIMESTAMP NOT NULL,
@@ -657,7 +658,7 @@ class Embedder(Protocol):
 
 1. 対象の `extracted_requests` のうち `reusable = true` のものについて、`request_summary` を `encode_queries` でベクトル化する（`reusable = false` は項目にならないので照合しない）。
 2. `knowledge_items` のうち `status` が `candidate` / `approved` / `held` のものについて、`check_text` を `encode_passages` でベクトル化する。`rejected` は照合対象から外す。
-3. ベクトルは `embeddings` テーブルに保存し、2回目以降は再計算しない（`model_name` が設定と一致する行があればそれを使う）。
+3. ベクトルは `embeddings` テーブルに保存し、2回目以降は再計算しない。保存済みとみなすのは、`model_name` が設定と一致し、かつ `text_hash` が現在のテキストから計算したハッシュと一致する行だけである。`check_text` はユーザーがレビューで修正する前提の列なので、編集されていれば（`text_hash` が一致しなければ）再計算して上書きする。`text_hash` は、元テキストを NFKC で正規化したうえでの SHA-256 の16進文字列で、計算は `repo.text_hash` の1か所で行う（全角と半角の違いだけではベクトルを作り直さないため）。
 4. 各抽出結果について、最も類似度が高い既存項目を求める。
    - 類似度が `[match].similarity_threshold`（既定 0.85）以上なら、`item_evidence` に `(item_id, request_id, similarity)` を入れる。
    - 未満なら、`knowledge_items` に `status = 'candidate'`、`version = 1` の行を新しく作り、`check_text` には `pass_criterion`（無ければ `request_summary`）を入れ、`item_evidence` に `similarity = NULL` で紐付ける。`reason` と `applies_when` は、抽出結果の `stated_reason` / `applies_when` をそのまま入れる（LLM が推測で埋めていないので、NULL のままになることが多い。それが正しい状態である）。

@@ -65,7 +65,7 @@ def test_knowledge_items_と_embeddings_の列(con):
         "not_applies_when", "importance", "status", "version", "updated_at",
     ]
     assert columns(con, "embeddings") == [
-        "owner_type", "owner_id", "model_name", "dim", "vector", "created_at",
+        "owner_type", "owner_id", "model_name", "text_hash", "dim", "vector", "created_at",
     ]
 
 
@@ -131,16 +131,47 @@ def test_ベクトルは次元数が違っても保存できる(con):
     import numpy as np
 
     now = datetime.now()
-    repo.put_embeddings(con, "knowledge_item", "m", {"a": np.array([1, 2, 3], dtype=np.float32)}, now)
-    repo.put_embeddings(con, "knowledge_item", "m2", {"a": np.arange(1024, dtype=np.float32)}, now)
-    got = repo.get_embeddings(con, "knowledge_item", ["a", "b"], "m")
+    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("テキストA", np.array([1, 2, 3], dtype=np.float32))}, now)
+    repo.put_embeddings(con, "knowledge_item", "m2", {"a": ("テキストA", np.arange(1024, dtype=np.float32))}, now)
+    got = repo.get_embeddings(con, "knowledge_item", {"a": "テキストA", "b": "テキストB"}, "m")
     assert list(got) == ["a"] and got["a"].tolist() == [1.0, 2.0, 3.0]
     assert con.execute("SELECT dim FROM embeddings ORDER BY dim").fetchall() == [(3,), (1024,)]
-    # model_name が違う行は返さない
-    assert repo.get_embeddings(con, "knowledge_item", ["a"], "other") == {}
     # 上書き
-    repo.put_embeddings(con, "knowledge_item", "m", {"a": np.array([9, 9, 9], dtype=np.float32)}, now)
-    assert repo.get_embeddings(con, "knowledge_item", ["a"], "m")["a"].tolist() == [9.0, 9.0, 9.0]
+    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("テキストA", np.array([9, 9, 9], dtype=np.float32))}, now)
+    assert repo.get_embeddings(con, "knowledge_item", {"a": "テキストA"}, "m")["a"].tolist() == [9.0, 9.0, 9.0]
+    assert con.execute("SELECT count(*) FROM embeddings WHERE model_name = 'm'").fetchone()[0] == 1
+
+
+def test_モデル名が違うベクトルは返さない(con):
+    import numpy as np
+
+    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("T", np.ones(3, dtype=np.float32))}, datetime.now())
+    assert repo.get_embeddings(con, "knowledge_item", {"a": "T"}, "other") == {}
+
+
+def test_テキストが変わったベクトルは返さない(con):
+    import numpy as np
+
+    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("古い文言", np.ones(3, dtype=np.float32))}, datetime.now())
+    assert "a" in repo.get_embeddings(con, "knowledge_item", {"a": "古い文言"}, "m")
+    assert repo.get_embeddings(con, "knowledge_item", {"a": "修正後の文言"}, "m") == {}
+
+
+def test_text_hash_は_NFKC_で正規化した_SHA256(con):
+    import hashlib
+
+    # 全角と半角の違い、合成済みと結合文字の違いでは、ハッシュが変わらない
+    assert repo.text_hash("ＡＢＣ１２３ ｶﾀｶﾅ") == repo.text_hash("ABC123 カタカナ")
+    assert repo.text_hash("が") == repo.text_hash("か\u3099")
+    assert repo.text_hash("a") != repo.text_hash("b")
+    assert repo.text_hash("abc") == hashlib.sha256(b"abc").hexdigest()
+    assert len(repo.text_hash("x")) == 64
+
+    import numpy as np
+
+    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("ＡＢＣ", np.ones(3, dtype=np.float32))}, datetime.now())
+    assert con.execute("SELECT text_hash FROM embeddings").fetchone()[0] == repo.text_hash("ABC")
+    assert "a" in repo.get_embeddings(con, "knowledge_item", {"a": "ABC"}, "m")  # 全角と半角の違いでは再計算しない
 
 
 def test_review_log_の連番とビューが使える(con):

@@ -8,6 +8,8 @@ DELETE と INSERT を別々に実行する（自動コミット）。
 
 from __future__ import annotations
 
+import hashlib
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -381,37 +383,62 @@ def get_linked_request_ids(con: duckdb.DuckDBPyConnection, request_ids: list[str
 # --- embeddings --------------------------------------------------------------
 
 
+def text_hash(text: str) -> str:
+    """ベクトル化した元テキストのハッシュ（NFKC で正規化した文字列の SHA-256、16進）。
+
+    embeddings.text_hash に保存し、テキストが編集されたかどうかの判定に使う。
+    NFKC で正規化する理由は、全角と半角の違いだけでベクトルを作り直さないため。
+    ハッシュの計算はこの関数に一本化する（get_embeddings、put_embeddings、match/link.py が使う）。
+    """
+    return hashlib.sha256(unicodedata.normalize("NFKC", text).encode("utf-8")).hexdigest()
+
+
 def get_embeddings(
-    con: duckdb.DuckDBPyConnection, owner_type: str, owner_ids: list[str], model_name: str
+    con: duckdb.DuckDBPyConnection, owner_type: str, texts: dict[str, str], model_name: str
 ) -> dict[str, np.ndarray]:
-    """保存済みのベクトルを owner_id をキーにして返す。model_name が違う行は返さない。"""
-    if not owner_ids:
+    """保存済みのベクトルを owner_id をキーにして返す。
+
+    texts は {owner_id: 現在のテキスト}。次の行だけを返す。
+    - model_name が一致する。
+    - text_hash が、現在のテキストから計算したハッシュと一致する（テキストが編集されていない）。
+    一致しない行は返さない。呼び出し側が再計算して put_embeddings で上書きする。
+    """
+    if not texts:
         return {}
+    owner_ids = list(texts)
     placeholders = ", ".join("?" for _ in owner_ids)
     rows = con.execute(
-        "SELECT owner_id, vector FROM embeddings "
+        "SELECT owner_id, text_hash, vector FROM embeddings "
         f"WHERE owner_type = ? AND model_name = ? AND owner_id IN ({placeholders})",
         [owner_type, model_name, *owner_ids],
     ).fetchall()
-    return {owner_id: np.asarray(vec, dtype=np.float32) for owner_id, vec in rows}
+    return {
+        owner_id: np.asarray(vec, dtype=np.float32)
+        for owner_id, stored_hash, vec in rows
+        if stored_hash == text_hash(texts[owner_id])
+    }
 
 
 def put_embeddings(
     con: duckdb.DuckDBPyConnection,
     owner_type: str,
     model_name: str,
-    vectors: dict[str, np.ndarray],
+    entries: dict[str, tuple[str, np.ndarray]],
     created_at: datetime,
 ) -> None:
-    """ベクトルを保存する。同じ (owner_type, owner_id, model_name) の行があれば入れ替える。"""
-    for owner_id, vec in vectors.items():
+    """ベクトルを保存する。
+
+    entries は {owner_id: (ベクトル化した元テキスト, ベクトル)}。text_hash も書き込む。
+    同じ (owner_type, owner_id, model_name) の行があれば入れ替える。
+    """
+    for owner_id, (text, vec) in entries.items():
         arr = np.asarray(vec, dtype=np.float32)
         con.execute(
             "DELETE FROM embeddings WHERE owner_type = ? AND owner_id = ? AND model_name = ?",
             [owner_type, owner_id, model_name],
         )
         con.execute(
-            "INSERT INTO embeddings (owner_type, owner_id, model_name, dim, vector, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [owner_type, owner_id, model_name, int(arr.shape[0]), arr.tolist(), created_at],
+            "INSERT INTO embeddings (owner_type, owner_id, model_name, text_hash, dim, vector, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [owner_type, owner_id, model_name, text_hash(text), int(arr.shape[0]), arr.tolist(), created_at],
         )

@@ -3,6 +3,7 @@
 コサイン類似度は DuckDB の array_cosine_similarity ではなく numpy で計算する。
 array_cosine_similarity は固定長の FLOAT[N] を要求し、埋め込みモデルを替えて次元数が変わると
 スキーマを書き換える必要が出るため。ベクトルは可変長の FLOAT[] で embeddings テーブルに保存する。
+テキストの編集に追従するため、元テキストのハッシュ（text_hash）も一緒に保存する。
 """
 
 from __future__ import annotations
@@ -62,17 +63,26 @@ def _vectors_with_cache(
 ) -> np.ndarray:
     """owner_ids に対応するベクトルを返す。embeddings に保存済みのものは再計算しない。
 
-    保存済みとみなすのは、model_name が embedder.model_name と一致する行だけ。
+    保存済みとみなすのは、model_name が embedder.model_name と一致し、かつ text_hash が現在の
+    テキストと一致する行だけ。テキスト（check_text など）が編集されていれば再計算して上書きする。
     save が False のときは、新しく計算したベクトルを保存しない（dry-run 用）。
     """
-    cached = repo.get_embeddings(con, owner_type, owner_ids, embedder.model_name)
+    cached = repo.get_embeddings(
+        con, owner_type, dict(zip(owner_ids, texts)), embedder.model_name
+    )
     missing = [i for i, oid in enumerate(owner_ids) if oid not in cached]
     if missing:
         computed = encode([texts[i] for i in missing])
         new_vectors = {owner_ids[i]: computed[k] for k, i in enumerate(missing)}
         cached.update(new_vectors)
         if save:
-            repo.put_embeddings(con, owner_type, embedder.model_name, new_vectors, now)
+            repo.put_embeddings(
+                con,
+                owner_type,
+                embedder.model_name,
+                {owner_ids[i]: (texts[i], new_vectors[owner_ids[i]]) for i in missing},
+                now,
+            )
     if not owner_ids:
         return np.zeros((0, embedder.dim), dtype=np.float32)
     return np.stack([cached[oid] for oid in owner_ids])

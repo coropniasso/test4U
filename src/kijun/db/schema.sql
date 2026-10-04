@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
     owner_type VARCHAR NOT NULL,           -- knowledge_item / extracted_request
     owner_id   VARCHAR NOT NULL,
     model_name VARCHAR NOT NULL,
+    text_hash  VARCHAR NOT NULL,           -- ベクトル化した元テキストの NFKC 正規化後の SHA-256（16進）。テキストの編集を検出する
     dim        INTEGER NOT NULL,
     vector     FLOAT[] NOT NULL,
     created_at TIMESTAMP NOT NULL,
