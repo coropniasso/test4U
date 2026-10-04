@@ -365,19 +365,35 @@ CREATE SEQUENCE IF NOT EXISTS review_log_seq START 1;
 
 CLAUDE.md 6章の「毎週記録する指標」を SQL で出せるように、`schema.sql` の末尾にビューを作る。
 
+ビューは `model_name` ごとに行を分ける。パイロットの最初の3週は同じ会議を Qwen と Claude の両方で抽出する（CLAUDE.md 4-4）ので、`model_name` で分けないと、その会議の件数を二重に数えてしまい、指標が必要な時期に壊れるため。
+
 ```sql
--- 会議ごとの抽出件数と reusable の割合、形式別の比較に使う
+-- 会議ごと・抽出モデルごとの抽出件数と reusable の割合、形式別の比較に使う。
+-- model_name で分けるのは、Qwen と Claude の両方で抽出した会議が二重に数えられないようにするため。
+-- 1つの会議を2モデルで抽出すると2行になり、各行がその会議を1回だけ数える。
+-- 抽出が1件も無い会議は、model_name が NULL、requests が 0 の行になる。
 CREATE OR REPLACE VIEW v_weekly_metrics AS
+WITH per_model AS (
+    SELECT
+        date_trunc('week', c.recorded_at) AS week,
+        c.setting_format,
+        r.model_name,
+        count(DISTINCT c.conversation_id)              AS conversations,
+        count(r.request_id)                            AS requests,
+        sum(CASE WHEN r.reusable THEN 1 ELSE 0 END)    AS reusable_requests
+    FROM conversations c
+    LEFT JOIN extracted_requests r USING (conversation_id)
+    GROUP BY 1, 2, 3
+)
 SELECT
-    date_trunc('week', c.recorded_at)                       AS week,
-    c.setting_format,
-    count(DISTINCT c.conversation_id)                       AS conversations,
-    count(r.request_id)                                     AS requests,
-    count(r.request_id) / nullif(count(DISTINCT c.conversation_id), 0) AS requests_per_conversation,
-    sum(CASE WHEN r.reusable THEN 1 ELSE 0 END) / nullif(count(r.request_id), 0) AS reusable_ratio
-FROM conversations c
-LEFT JOIN extracted_requests r USING (conversation_id)
-GROUP BY 1, 2;
+    week,
+    setting_format,
+    model_name,                                        -- 抽出していない会議では NULL
+    conversations,
+    requests,
+    requests / nullif(conversations, 0) AS requests_per_conversation,
+    reusable_requests / nullif(requests, 0) AS reusable_ratio
+FROM per_model;
 ```
 
 「LLM の提案文言を修正せず承認した割合」と「1日のレビュー所要時間」は `review_log` と `discord_posts` に記録が入ってからでないと計算できない。第2弾で Discord を実装したときにビューを追加する。
@@ -749,7 +765,7 @@ README にこの順序で書く。
 | 1 | Python 3.12 と uv を入れる | `uv --version` が出る |
 | 2 | `uv sync` | `uv run kijun --help` がサブコマンド一覧を出す |
 | 3 | `uv run pytest` | すべて通る（GPU とネットワークが要るテストはスキップされる） |
-| 4 | `uv run kijun db init` | `data/kijun.duckdb` ができ、テーブルが8＋3個ある |
+| 4 | `uv run kijun db init` | `data/kijun.duckdb` ができ、テーブルが10個（CLAUDE.md 5章の8テーブルに `schema_version` と `embeddings` を足したもの）と、ビュー `v_weekly_metrics` が1つある |
 | 5 | `pyproject.toml` の torch のインデックスを確認して `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
 | 6 | Hugging Face で pyannote の2つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
 | 7 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する（CLAUDE.md 7章の未検証事項） |

@@ -146,5 +146,49 @@ def test_ベクトルは次元数が違っても保存できる(con):
 def test_review_log_の連番とビューが使える(con):
     assert con.execute("SELECT nextval('review_log_seq')").fetchone()[0] == 1
     repo.insert_conversation(con, make_conversation())
-    rows = con.execute("SELECT conversations, requests, reusable_ratio FROM v_weekly_metrics").fetchall()
-    assert rows == [(1, 0, None)]
+    rows = con.execute("SELECT model_name, conversations, requests, reusable_ratio FROM v_weekly_metrics").fetchall()
+    assert rows == [(None, 1, 0, None)]
+
+
+def _req(conv: str, request_id: str, model: str, reusable: bool) -> repo.RequestRow:
+    return repo.RequestRow(
+        request_id=request_id, conversation_id=conv, seq_from=1, seq_to=1, speaker_from_label="SPEAKER_00",
+        speaker_to_label=None, direction=None, counterpart_role=None, artifact_type=None, quote="q",
+        request_summary="s", stated_reason=None, applies_when=None, reusable=reusable, pass_criterion=None,
+        source_type="live_conversation", model_name=model, extracted_at=datetime(2026, 9, 21),
+    )
+
+
+def test_ビューは抽出モデルごとに分かれ_会議を二重に数えない(con):
+    # 同じ会議を Qwen と Claude の両方で抽出した場合（パイロットの最初の3週）
+    repo.insert_conversation(con, make_conversation("c1"))
+    repo.insert_requests(
+        con,
+        [
+            _req("c1", "c1#qwen#1", "qwen", True),
+            _req("c1", "c1#qwen#2", "qwen", True),
+            _req("c1", "c1#qwen#3", "qwen", False),
+            _req("c1", "c1#claude#1", "claude", True),
+            _req("c1", "c1#claude#2", "claude", False),
+        ],
+    )
+    rows = con.execute(
+        "SELECT model_name, conversations, requests, requests_per_conversation, reusable_ratio "
+        "FROM v_weekly_metrics ORDER BY model_name"
+    ).fetchall()
+    assert len(rows) == 2  # 1つの会議を2モデルで抽出すると2行
+    claude, qwen = rows
+    assert claude == ("claude", 1, 2, 2.0, 0.5)  # 各行が、その会議を1回だけ数える
+    assert qwen[:4] == ("qwen", 1, 3, 3.0)
+    assert qwen[4] == pytest.approx(2 / 3)  # モデルごとに正しい割合（小数）
+
+
+def test_抽出が0件の会議は_model_name_が_NULL_の行として出る(con):
+    repo.insert_conversation(con, make_conversation("c1"))
+    repo.insert_conversation(con, make_conversation("c2"))
+    repo.insert_requests(con, [_req("c1", "c1#qwen#1", "qwen", True)])
+    rows = con.execute(
+        "SELECT setting_format, model_name, conversations, requests, reusable_ratio "
+        "FROM v_weekly_metrics ORDER BY model_name NULLS LAST"
+    ).fetchall()
+    assert rows == [("f2f", "qwen", 1, 1, 1.0), ("f2f", None, 1, 0, None)]

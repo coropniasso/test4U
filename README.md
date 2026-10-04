@@ -71,7 +71,7 @@ Console で月額の上限金額を設定してから使うこと。秘密情報
 | 1 | Python 3.12 と uv を入れる | `uv --version` が出る |
 | 2 | `uv sync` | `uv run kijun --help` がサブコマンド一覧を出す |
 | 3 | `uv run pytest` | すべて通る（GPU とネットワークが要るテストはスキップされる） |
-| 4 | `uv run kijun db init` | `data/kijun.duckdb` ができ、テーブルが8＋3個ある |
+| 4 | `uv run kijun db init` | `data/kijun.duckdb` ができ、テーブルが10個とビューが1つある |
 | 5 | `pyproject.toml` の torch のインデックスを確認して `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
 | 6 | Hugging Face で pyannote の2つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
 | 7 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する（CLAUDE.md 7章の未検証事項） |
@@ -82,7 +82,7 @@ Console で月額の上限金額を設定してから使うこと。秘密情報
 
 補足:
 
-- 手順4の「8＋3個」は、計画書の記述である。実際には、CLAUDE.md 5章の8テーブルに、`schema_version` と `embeddings` の2テーブルを足した10テーブルと、ビュー `v_weekly_metrics` が1つできる。
+- 手順4の10テーブルは、CLAUDE.md 5章の8テーブルに、`schema_version` と `embeddings` の2テーブルを足したものである。ビューは `v_weekly_metrics`（抽出モデルごとの週次の指標）の1つ。
 - 手順7の `--audio` は DuckDB に書かず、結果を標準出力と JSON に出すだけである。VRAM 使用量は、実行中に別の端末で `nvidia-smi` を実行して記録する。
 - 手順7、9で記録した処理時間と VRAM 使用量は、CLAUDE.md 7章の未検証事項「Qwen の最新版と、VRAM 12GB での実際のメモリ使用量・処理時間」と「pyannote.audio が Windows + CUDA 環境で問題なく動くか」への回答になる。結果を CLAUDE.md 7章に書き込む。
 - 手順10の Claude 側の抽出は、動作確認として `claude-sonnet-5-5`（`effort = "low"`）を使う。承認件数が足りなければ `config.toml` の `extract.claude.effort` を `medium` に上げる。

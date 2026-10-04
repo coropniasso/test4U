@@ -105,15 +105,29 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 CREATE SEQUENCE IF NOT EXISTS review_log_seq START 1;
 
--- 会議ごとの抽出件数と reusable の割合、形式別の比較に使う
+-- 会議ごと・抽出モデルごとの抽出件数と reusable の割合、形式別の比較に使う。
+-- model_name で分けるのは、Qwen と Claude の両方で抽出した会議が二重に数えられないようにするため。
+-- 1つの会議を2モデルで抽出すると2行になり、各行がその会議を1回だけ数える。
+-- 抽出が1件も無い会議は、model_name が NULL、requests が 0 の行になる。
 CREATE OR REPLACE VIEW v_weekly_metrics AS
+WITH per_model AS (
+    SELECT
+        date_trunc('week', c.recorded_at) AS week,
+        c.setting_format,
+        r.model_name,
+        count(DISTINCT c.conversation_id)              AS conversations,
+        count(r.request_id)                            AS requests,
+        sum(CASE WHEN r.reusable THEN 1 ELSE 0 END)    AS reusable_requests
+    FROM conversations c
+    LEFT JOIN extracted_requests r USING (conversation_id)
+    GROUP BY 1, 2, 3
+)
 SELECT
-    date_trunc('week', c.recorded_at)                       AS week,
-    c.setting_format,
-    count(DISTINCT c.conversation_id)                       AS conversations,
-    count(r.request_id)                                     AS requests,
-    count(r.request_id) / nullif(count(DISTINCT c.conversation_id), 0) AS requests_per_conversation,
-    sum(CASE WHEN r.reusable THEN 1 ELSE 0 END) / nullif(count(r.request_id), 0) AS reusable_ratio
-FROM conversations c
-LEFT JOIN extracted_requests r USING (conversation_id)
-GROUP BY 1, 2;
+    week,
+    setting_format,
+    model_name,                                        -- 抽出していない会議では NULL
+    conversations,
+    requests,
+    requests / nullif(conversations, 0) AS requests_per_conversation,
+    reusable_requests / nullif(requests, 0) AS reusable_ratio
+FROM per_model;
