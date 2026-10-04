@@ -82,6 +82,11 @@ Console で月額の上限金額を設定してから使うこと。秘密情報
 
 補足:
 
+- 手順4の注意（DB ファイルが既にある場合）: 埋め込みの `text_hash` 列とビュー `v_weekly_metrics` の修正より前に `kijun db init` を実行して作った DB ファイルがある場合、`embeddings` テーブルには `text_hash` 列が無い。`db init` は `CREATE TABLE IF NOT EXISTS` なので、既存のテーブルに列を足さない。
+  - ビュー `v_weekly_metrics` は `CREATE OR REPLACE` なので、`kijun db init` をもう一度実行すれば新しい定義になる。
+  - `embeddings` は、再計算できるキャッシュにすぎない。次の2コマンドで、他のテーブルの内容を残したまま作り直せる。
+    `uv run python -c "import duckdb; duckdb.connect('data/kijun.duckdb').execute('DROP TABLE embeddings')"` を実行してから、`uv run kijun db init` を実行する（DB のパスは `[paths].db` に合わせる）。
+  - 試しに作っただけの DB なら、DB ファイルを削除して `kijun db init` をやり直してもよい。文字起こしの JSON（`[paths].transcripts`）は DB ファイルとは別に残る。ただし、JSON から DB の `utterances` を読み込み直すコマンドは、この版には無い。文字起こし済みの会議が入った DB を削除すると、その会議は `kijun transcribe` をやり直さない限り DB に戻らない。GPU 時間を無駄にしないよう、文字起こし済みのデータがある DB は、削除せず上の方法で直すこと。
 - 手順4の10テーブルは、CLAUDE.md 5章の8テーブルに、`schema_version` と `embeddings` の2テーブルを足したものである。ビューは `v_weekly_metrics`（抽出モデルごとの週次の指標）の1つ。
 - 手順7の `--audio` は DuckDB に書かず、結果を標準出力と JSON に出すだけである。VRAM 使用量は、実行中に別の端末で `nvidia-smi` を実行して記録する。
 - 手順7、9で記録した処理時間と VRAM 使用量は、CLAUDE.md 7章の未検証事項「Qwen の最新版と、VRAM 12GB での実際のメモリ使用量・処理時間」と「pyannote.audio が Windows + CUDA 環境で問題なく動くか」への回答になる。結果を CLAUDE.md 7章に書き込む。

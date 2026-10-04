@@ -30,14 +30,15 @@ device = "cuda"
 language = "ja"
 # faster-whisper の VAD（無音区間の除去）。会議の録音では有効にする。
 vad_filter = true
-# 1つの発話として扱う最小の長さ（秒）。これより短い区間は前の発話に結合する。
+# 同一話者の連続する区間で、前の区間の終了から次の区間の開始までの間隔がこの秒数未満なら、1つの発話に結合する。
+# 話者が不明（None）の区間どうしは、同じ話者と判断できないので結合しない。
 min_utterance_sec = 0.4
 
 [diarize]
 backend = "pyannote"
 model = "pyannote/speaker-diarization-3.1"
 device = "cuda"
-# 話者数が分かっている場合に指定する。null なら pyannote が推定する。
+# 話者数が分かっている場合はその人数を書く。0 なら pyannote が推定する（TOML には null が無いため、0 を「指定なし」として扱う）。
 num_speakers = 0
 
 [extract]
