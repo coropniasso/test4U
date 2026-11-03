@@ -10,8 +10,12 @@ import numpy as np
 
 from kijun.discord.base import DiscordError, Reaction, Reply
 from kijun.extract.base import ExtractionError, RepairEvent
+from kijun.db.repo import KnowledgeItemRow
 from kijun.extract.chunk import Chunk
 from kijun.extract.models import ExtractedRequest, ExtractionResult
+from kijun.review.importance import ImportanceVerdict
+from kijun.review.llm import ReviewLlmError
+from kijun.review.reply import RoutedEntry, RoutedReply
 from kijun.transcribe.base import SpeakerTurn, TranscribedSegment
 
 
@@ -190,3 +194,92 @@ class FakeDiscordClient:
 
     def contents(self) -> list[str]:
         return [c for _, c, _ in self.posted]
+
+
+class FakeImportanceJudge:
+    """決めた重要度を返す。fail_for に入れた check_text は ReviewLlmError にする。呼ばれた check_text を記録する。"""
+
+    def __init__(self, importance: int = 2, fail_for: set[str] | None = None, by_text: dict[str, int] | None = None) -> None:
+        self._importance = importance
+        self._fail_for = fail_for or set()
+        self._by_text = by_text or {}
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def judge(self, check_text: str, quotes: list[str]) -> ImportanceVerdict:
+        self.calls.append((check_text, list(quotes)))
+        if check_text in self._fail_for:
+            raise ReviewLlmError("偽の判定失敗")
+        return ImportanceVerdict(
+            importance=self._by_text.get(check_text, self._importance), rationale=f"根拠:{check_text}"
+        )
+
+
+class FakeReplyRouter:
+    """返信の原文ごとに決めた振り分けを返す。responses に無い原文は、空の結果を返す。
+
+    fail が True なら、すべて ReviewLlmError にする。呼ばれた (原文, 項目, もう一方の項目) を記録する。
+    """
+
+    def __init__(self, responses: dict[str, list[RoutedEntry]] | None = None, fail: bool = False) -> None:
+        self._responses = responses or {}
+        self.fail = fail
+        self.calls: list[tuple[str, KnowledgeItemRow, KnowledgeItemRow | None]] = []
+
+    def route(self, reply_text: str, item: KnowledgeItemRow, other: KnowledgeItemRow | None = None) -> RoutedReply:
+        self.calls.append((reply_text, item, other))
+        if self.fail:
+            raise ReviewLlmError("偽の振り分け失敗")
+        return RoutedReply(items=list(self._responses.get(reply_text, [])))
+
+
+class FakeSpeakerInterpreter:
+    """自然な文の返信ごとに決めた対応を返す。呼ばれた原文を記録する。"""
+
+    def __init__(self, responses: dict[str, dict[str, str]] | None = None, fail: bool = False) -> None:
+        self._responses = responses or {}
+        self.fail = fail
+        self.calls: list[str] = []
+
+    def interpret(self, text: str, labels: list[str]) -> dict[str, str]:
+        self.calls.append(text)
+        if self.fail:
+            raise ReviewLlmError("偽の解釈失敗")
+        return dict(self._responses.get(text, {}))
+
+
+class FakeChatTransport:
+    """OpenAI 互換の応答(choices[0].message.content)を順に返す偽の HttpTransport。
+
+    contents の要素が文字列なら、その本文を 200 で返す。Exception なら送出する。(status, text) なら
+    そのまま返す。足りなくなったら最後の応答を繰り返す。投げられた payload を記録する。
+    """
+
+    def __init__(self, contents: list) -> None:
+        import json
+
+        from kijun.transport import HttpResponse
+
+        self._json, self._response = json, HttpResponse
+        self._contents = list(contents)
+        self.posts: list[dict] = []
+        self.gets: list[str] = []
+        self.get_error: Exception | None = None
+        self.get_ready_after: int = 0  # この回数だけ get を失敗させてから成功させる
+
+    def post(self, url: str, payload: dict, timeout_sec: float):
+        self.posts.append({"url": url, "payload": payload, "timeout_sec": timeout_sec})
+        item = self._contents[0] if len(self._contents) == 1 else self._contents.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, tuple):
+            return self._response(item[0], item[1], 0.1)
+        body = self._json.dumps({"choices": [{"message": {"content": item}}]}, ensure_ascii=False)
+        return self._response(200, body, 0.1)
+
+    def get(self, url: str, timeout_sec: float):
+        from kijun.transport import TransportError
+
+        self.gets.append(url)
+        if self.get_error is not None or len(self.gets) <= self.get_ready_after:
+            raise self.get_error or TransportError("まだ応答しません")
+        return self._response(200, '{"data": []}', 0.1)

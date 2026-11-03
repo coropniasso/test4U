@@ -18,8 +18,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TypeVar
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from kijun.extract.models import ExtractionResult
 
@@ -253,6 +254,29 @@ def repair_json_text(text: str) -> RepairOutcome:
     return RepairOutcome(stripped, actions)
 
 
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def parse_model_with_repair(text: str, model_cls: type[ModelT]) -> tuple[ModelT, RepairOutcome]:
+    """モデルの出力を修復してから model_cls として検証する。読めなければ UnrepairableJsonError を出す。
+
+    抽出以外の LLM の用途(重要度の判定、返信の振り分け、話者の対応付け)も、この関数を通す
+    (原則2-3: 背面がスキーマへの適合を保証するかどうかに関わらず、修復を通してから検証する)。
+    配列を包む・末尾の切れを閉じる修復は `items` というキーを前提にしているので、
+    配列を返させるスキーマは、抽出と同じ `{"items": [...]}` の形にすること。
+    """
+    outcome = repair_json_text(text)
+    try:
+        result = model_cls.model_validate_json(outcome.text)
+    except ValidationError as e:
+        head = outcome.text[:200].replace("\n", " ")
+        raise UnrepairableJsonError(
+            f"修復しても {model_cls.__name__} として読めませんでした"
+            f"（行った修復: {', '.join(outcome.descriptions) or 'なし'}）: {head}: {e}"
+        ) from e
+    return result, outcome
+
+
 def parse_with_repair(text: str) -> ParsedExtraction:
     """モデルの出力を修復してから ExtractionResult として検証する。
 
@@ -260,13 +284,5 @@ def parse_with_repair(text: str) -> ParsedExtraction:
     関わらず、テキストから ExtractionResult を作る経路はこの関数だけにする。
     こうしておくと、修復を通さずに検証してしまう経路が残らない。
     """
-    outcome = repair_json_text(text)
-    try:
-        result = ExtractionResult.model_validate_json(outcome.text)
-    except ValidationError as e:
-        head = outcome.text[:200].replace("\n", " ")
-        raise UnrepairableJsonError(
-            f"修復しても ExtractionResult として読めませんでした"
-            f"（行った修復: {', '.join(outcome.descriptions) or 'なし'}）: {head}: {e}"
-        ) from e
+    result, outcome = parse_model_with_repair(text, ExtractionResult)
     return ParsedExtraction(result, outcome)

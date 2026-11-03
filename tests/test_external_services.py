@@ -95,3 +95,27 @@ def test_discord_py_でチャンネルに投稿してリアクションと返信
     assert message_id.isdigit()
     assert message_id in client.fetch_reactions(channel, [message_id])
     assert message_id in client.fetch_thread_replies(channel, [message_id])
+
+
+@pytest.mark.requires_network
+def test_Strata_で重要度の判定が取れる():
+    from kijun.review.importance import StrataImportanceJudge
+    from kijun.review.llm import StrataJsonChat
+
+    verdict = StrataImportanceJudge(StrataJsonChat(Config())).judge(
+        "告知文の冒頭2行以内に、読み手にしてほしい行動が書かれているか", ["募集要項の最初に、何をしてほしいかを書いて"]
+    )
+    assert 1 <= verdict.importance <= 3 and verdict.rationale
+
+
+@pytest.mark.requires_network
+def test_Strata_で返信の振り分けが取れる():
+    from datetime import datetime
+
+    from kijun.db.repo import KnowledgeItemRow
+    from kijun.review.llm import StrataJsonChat
+    from kijun.review.reply import StrataReplyRouter
+
+    item = KnowledgeItemRow("item_0001", None, "冒頭に行動を書くか", None, None, None, None, None, "candidate", 1, datetime(2026, 11, 3))
+    routed = StrataReplyRouter(StrataJsonChat(Config())).route("読み飛ばされるから。ただし社内向けでは不要", item)
+    assert {e.column for e in routed.items} <= {"reason", "applies_when", "not_applies_when", "check_text"}
