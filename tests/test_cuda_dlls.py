@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.machinery
+import os
 import sys
 import types
 from pathlib import Path
@@ -39,6 +40,7 @@ def _make_nvidia(tmp_path: Path, with_dll=("cublas", "cudnn"), without_dll=()):
 @pytest.fixture
 def as_windows(monkeypatch):
     calls: list[str] = []
+    monkeypatch.setenv("PATH", os.pathsep.join(["P1", "P2"]))
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(cuda_dlls.os, "add_dll_directory", lambda p: calls.append(p), raising=False)
     return calls
@@ -116,5 +118,27 @@ def test_cublas_のエラーは対処を案内し_元の例外を残す(monkeypa
         fw_impl.FasterWhisperTranscriber(Config().transcribe)
     msg = str(ei.value)
     assert "uv pip install nvidia-cublas-cu12 nvidia-cudnn-cu12" in msg
-    assert "cublas/bin" in msg
+    assert str(Path("X/cublas/bin")) in msg  # 区切りは OS による（Windows では cublas\\bin）
     assert isinstance(ei.value.__cause__, RuntimeError)
+
+
+def test_PATH_の先頭にも足す(tmp_path, monkeypatch, as_windows):
+    root = _make_nvidia(tmp_path)
+    monkeypatch.setattr(cuda_dlls.importlib.util, "find_spec", lambda name: _spec_for(root))
+    result = cuda_dlls.register_nvidia_dll_directories()
+    parts = os.environ["PATH"].split(os.pathsep)
+    assert set(parts[:2]) == {str(p) for p in result}
+    assert parts[-2:] == ["P1", "P2"]
+
+
+def test_2回呼んでも_PATH_に重複しない(tmp_path, monkeypatch, as_windows):
+    root = _make_nvidia(tmp_path)
+    monkeypatch.setattr(cuda_dlls.importlib.util, "find_spec", lambda name: _spec_for(root))
+    cuda_dlls.register_nvidia_dll_directories()
+    once = os.environ["PATH"]
+    cuda_dlls.register_nvidia_dll_directories()
+    assert os.environ["PATH"] == once
+    # _registered が空でも（別プロセスの継承など）重複しない
+    cuda_dlls._registered.clear()
+    cuda_dlls.register_nvidia_dll_directories()
+    assert os.environ["PATH"] == once

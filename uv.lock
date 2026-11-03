@@ -1379,8 +1379,8 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'extract'", specifier = ">=0.27" },
     { name = "mutagen", specifier = ">=1.47" },
     { name = "numpy", specifier = ">=2.0" },
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'win32' and extra == 'transcribe'" },
-    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'win32' and extra == 'transcribe'" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'win32' and extra == 'transcribe'", specifier = ">=12.9.2,<12.9.3" },
+    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'win32' and extra == 'transcribe'", specifier = ">=9.27,<9.28" },
     { name = "pyannote-audio", marker = "extra == 'transcribe'", specifier = ">=3.3" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "sentence-transformers", marker = "extra == 'match'", specifier = ">=3.0" },
@@ -2194,10 +2194,13 @@ wheels = [
 
 [[package]]
 name = "nvidia-cublas-cu12"
-version = "12.9.3.13"
+version = "12.9.2.10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "nvidia-cuda-nvrtc-cu12" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/e2/fc9a0e985249d873150276d5afb02e39a66817fedbf1a385724393e505ed/nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl", hash = "sha256:623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661", size = 553162896, upload-time = "2026-04-08T18:53:10.035Z" },
 ]
 
 [[package]]
