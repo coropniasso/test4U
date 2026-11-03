@@ -25,3 +25,20 @@ def estimate_tokens(text: str) -> int:
 def estimate_messages_tokens(system: str, user: str) -> int:
     """system と user のプロンプトを合わせた入力トークン数を概算する。"""
     return estimate_tokens(system) + estimate_tokens(user)
+
+
+# 会議の音声1分あたりの入力トークン数の概算。
+# 根拠: 2時間の会議が日本語3〜4万字で約6万トークンという概算（計画書 7-6）から、
+# 60000 / 120 = 500 とした。doctor が入力を引き伸ばすときと、実測値から
+# chunk_minutes を逆算するときに使う。これも実測ではないので、doctor の結果で置き換える。
+TOKENS_PER_MEETING_MINUTE = 500
+
+
+def tokens_for_minutes(minutes: float) -> int:
+    """会議の分数を、文字起こしの入力トークン数の概算に変換する。"""
+    return int(minutes * TOKENS_PER_MEETING_MINUTE)
+
+
+def minutes_for_tokens(tokens: int) -> float:
+    """入力トークン数を、会議の分数の概算に変換する（tokens_for_minutes の逆）。"""
+    return tokens / TOKENS_PER_MEETING_MINUTE

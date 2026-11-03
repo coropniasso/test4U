@@ -27,6 +27,36 @@ from kijun.transport import HttpTransport, HttpxTransport, TransportError
 RETRY_COUNT = 1
 
 
+def build_payload(cfg: Config, chunk: Chunk, enforces_json_schema: bool) -> dict:
+    """1チャンク分のリクエストの本文を作る。プロンプトの文面は prompt.py のものを使う。
+
+    モジュールの関数にしてあるのは、doctor.py が「抽出が実際に送るのと同じ形」を
+    組み立てるのに使うためである。doctor が測るものと extract が送るものを
+    食い違わせないようにする。
+    """
+    system, user = build_messages(chunk, cfg)
+    payload: dict = {
+        "model": cfg.extract.strata.model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0,
+        "stream": False,
+    }
+    if enforces_json_schema:
+        # 対応していないサーバーが 400 を返す可能性があるので、保証すると宣言されたときだけ付ける。
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "extraction",
+                "schema": ExtractionResult.model_json_schema(),
+                "strict": True,
+            },
+        }
+    return payload
+
+
 class StrataExtractor:
     def __init__(self, cfg: Config, transport: HttpTransport | None = None) -> None:
         self._cfg = cfg
@@ -43,28 +73,7 @@ class StrataExtractor:
         return f"{self._strata.base_url}{self._strata.chat_path}"
 
     def build_payload(self, chunk: Chunk) -> dict:
-        """1チャンク分のリクエストの本文を作る。プロンプトの文面は prompt.py のものを使う。"""
-        system, user = build_messages(chunk, self._cfg)
-        payload: dict = {
-            "model": self._strata.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": 0,
-            "stream": False,
-        }
-        if self.enforces_json_schema:
-            # 対応していないサーバーが 400 を返す可能性があるので、保証すると宣言されたときだけ付ける。
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "extraction",
-                    "schema": ExtractionResult.model_json_schema(),
-                    "strict": True,
-                },
-            }
-        return payload
+        return build_payload(self._cfg, chunk, self.enforces_json_schema)
 
     def _post(self, payload: dict):
         try:

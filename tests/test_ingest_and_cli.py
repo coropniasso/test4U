@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -110,13 +111,13 @@ db = "{(tmp_path / 'data' / 'kijun.duckdb').as_posix()}"
 def test_kijun_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("db", "ingest", "transcribe", "restore-transcript", "extract", "compare", "match", "purge-audio"):
+    for cmd in ("db", "ingest", "transcribe", "restore-transcript", "doctor", "extract", "compare", "match", "purge-audio"):
         assert cmd in result.output
 
 
 @pytest.mark.parametrize(
     "args",
-    [["db"], ["db", "init"], ["ingest"], ["transcribe"], ["restore-transcript"], ["extract"], ["compare"], ["match"], ["purge-audio"]],
+    [["db"], ["db", "init"], ["ingest"], ["transcribe"], ["restore-transcript"], ["doctor"], ["extract"], ["compare"], ["match"], ["purge-audio"]],
 )
 def test_各サブコマンドの_help(args):
     result = runner.invoke(app, [*args, "--help"])
@@ -189,3 +190,67 @@ def test_purge_audio_は既定では削除せず_execute_で削除する(tmp_pat
     r = runner.invoke(app, [*base, "purge-audio", "--execute"])
     assert r.exit_code == 0 and "削除しました" in r.output
     assert not (cfg.paths.processed / "old.m4a").exists()
+
+
+def test_doctor_は_DB_が無くても実行でき_結果を保存する(tmp_path, monkeypatch):
+    """doctor は DB を使わないので、`db init` の前でも実行できる。"""
+    import json as _json
+
+    from kijun import transport as transport_module
+
+    base = ["--config", str(write_config(tmp_path))]
+    posts = {"n": 0}
+
+    class Transport:
+        def get(self, url, timeout_sec):
+            from kijun.transport import HttpResponse
+
+            return HttpResponse(200, _json.dumps({"data": [{"id": "qwen3.8-flash-next"}]}), 0.1)
+
+        def post(self, url, payload, timeout_sec):
+            from kijun.transport import HttpResponse
+
+            posts["n"] += 1
+            body = _json.dumps(
+                {"choices": [{"message": {"content": '{"items": []}'}}],
+                 "usage": {"prompt_tokens": 100, "completion_tokens": 5}}
+            )
+            return HttpResponse(200, body, 1.0)
+
+    # cli.py は呼び出し時に kijun.transport から読むので、そこを差し替える
+    monkeypatch.setattr(transport_module, "HttpxTransport", lambda: Transport())
+    r = runner.invoke(app, [*base, "doctor"])
+
+    assert r.exit_code == 0, r.output
+    assert "1. 接続確認" in r.output and "config.toml に書くべき推奨値" in r.output
+    assert posts["n"] > 0
+    saved = sorted((tmp_path / "data" / "doctor").glob("strata_*.json"))
+    assert len(saved) == 1
+    data = _json.loads(saved[0].read_text(encoding="utf-8"))
+    assert len(data["checks"]) == 5 and data["recommendations"]
+    assert not (tmp_path / "data" / "kijun.duckdb").exists()  # DB は作らない
+
+
+def test_doctor_は接続できなければ終了コード_1(tmp_path, monkeypatch):
+    from kijun import transport as transport_module
+    from kijun.transport import TransportError
+
+    base = ["--config", str(write_config(tmp_path))]
+
+    class Down:
+        def get(self, url, timeout_sec):
+            raise TransportError("接続拒否")
+
+        def post(self, url, payload, timeout_sec):
+            raise TransportError("接続拒否")
+
+    monkeypatch.setattr(transport_module, "HttpxTransport", lambda: Down())
+    r = runner.invoke(app, [*base, "doctor", "--out", str(tmp_path / "r.json")])
+    assert r.exit_code == 1
+    assert (tmp_path / "r.json").exists()  # 失敗しても結果は保存する
+
+
+def test_doctor_は_httpx_が無ければ入れ方を示す(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "httpx", None)
+    r = runner.invoke(app, ["--config", str(write_config(tmp_path)), "doctor"])
+    assert r.exit_code == 1 and "uv sync --extra extract" in r.output

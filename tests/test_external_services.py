@@ -53,6 +53,15 @@ def test_pyannote_で話者ラベルが取れる():
 
 
 @pytest.mark.requires_network
+def test_Strata_に接続できてモデルの一覧が取れる():
+    from kijun.doctor import check_models
+    from kijun.transport import HttpxTransport
+
+    result = check_models(HttpxTransport(), Config())
+    assert result.status != "error", result.summary
+
+
+@pytest.mark.requires_network
 def test_Strata_で抽出が_JSON_として取れる():
     from kijun.extract.strata_impl import StrataExtractor
 

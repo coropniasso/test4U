@@ -31,6 +31,7 @@ IMPL_MODULES = [
     "kijun.extract.strata_impl",
     "kijun.match.e5_impl",
     "kijun.transport",
+    "kijun.doctor",
 ]
 HEAVY = ["torch", "faster_whisper", "pyannote", "sentence_transformers", "httpx"]
 

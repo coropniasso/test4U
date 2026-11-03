@@ -1,6 +1,6 @@
 """kijun のサブコマンド（計画書 第12節）。
 
-GPU・ネットワークに触る実装（faster-whisper、pyannote、Ollama、Claude API、sentence-transformers）は、
+GPU・ネットワークに触る実装（faster-whisper、pyannote、Strata、sentence-transformers）は、
 サブコマンドの実行時に初めて import する。`kijun --help` は、これらが入っていなくても動く。
 """
 
@@ -325,6 +325,34 @@ def extract(ctx: typer.Context, conversation: ConversationOpt, provider: Provide
             typer.echo(f"失敗したチャンク: 発話 {f.seq_from}〜{f.seq_to}: {f.reason}", err=True)
 
 
+# --- doctor ------------------------------------------------------------------
+
+
+@app.command()
+def doctor(
+    ctx: typer.Context,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="結果の JSON の保存先。省略すると data/doctor/strata_<日時>.json。"),
+    ] = None,
+) -> None:
+    """推論サーバー（Strata）を実測し、config.toml に書くべき値を出す。"""
+    from kijun.doctor import STATUS_ERROR, format_report, report_path, run_doctor
+    from kijun.transport import HttpxTransport
+
+    with _errors():
+        cfg = _config(ctx)
+        # DB は使わないので、`db init` の前でも実行できる。
+        report = run_doctor(HttpxTransport(), cfg)
+        typer.echo(format_report(report))
+        path = out or report_path(cfg, report.started_at)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(report.to_json(), encoding="utf-8")
+        typer.echo(f"\n結果を保存しました: {path}")
+        if any(c.status == STATUS_ERROR for c in report.checks):
+            raise typer.Exit(code=1)
+
+
 # --- compare -----------------------------------------------------------------
 
 
@@ -335,10 +363,10 @@ def compare(
     out: Annotated[Path | None, typer.Option("--out", help="Markdown の保存先。省略すると data/compare/<ID>.md。")] = None,
     model: Annotated[
         list[str] | None,
-        typer.Option("--model", help="比較するモデル名。2 回指定する。省略すると設定の Qwen と Claude。"),
+        typer.Option("--model", help="比較するモデル名。2 回指定する。省略すると抽出結果のある全モデル。"),
     ] = None,
 ) -> None:
-    """Qwen と Claude の抽出結果の対照表（Markdown）を出す。"""
+    """同じ会議を2回抽出した結果の対照表（Markdown）を出す。"""
     from kijun.compare.report import build_report
 
     with _errors():

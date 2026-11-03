@@ -5,7 +5,7 @@
 2. 書かれていない項目は、このファイルの既定値
 
 既定値は config.example.toml と一致させる（tests/test_config.py が一致を検査する）。
-秘密情報（HF_TOKEN、ANTHROPIC_API_KEY）は設定ファイルに書かず、環境変数で渡す。
+秘密情報（pyannote のモデル取得に使う HF_TOKEN）は設定ファイルに書かず、環境変数で渡す。
 """
 
 from __future__ import annotations
