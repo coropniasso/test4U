@@ -184,7 +184,7 @@ test4U/
 - `deps.py`：重い依存を関数の中で import し、無いときに `uv sync --extra transcribe` のように入れるべき extra を示す。モジュールのトップレベルで import しないのは、`kijun --help` が依存の有無に関わらず動く必要があるため。
 - `table.py`：日本語を含む表を端末で崩さずに出すため。
 - `transport.py`：原則2-3により、HTTP の応答の判定を偽の応答で検査できるようにするため。所要時間の計測もここ1か所に置き、`doctor` の速度の実測で使う。
-- `tokens.py`：トークン数の概算の係数を1か所に置くため。`run.py` の入力長の警告と `doctor.py` の入力の引き伸ばしが同じ値を使う。
+- `tokens.py`：トークン数の概算の関数を1か所に置くため。`run.py` の入力長の警告と `doctor.py` の入力の引き伸ばしが同じ係数を使う。係数は定数ではなく設定（`extract.tokens_per_character`、`extract.tokens_per_meeting_minute`）から引数で受け取る（6-6の「2026-11-03 実機の訂正」）。
 - `run.py`：CLI の本体を `cli.py` から切り出し、偽の実装を差し込んでテストできるようにするため。
 
 ---
@@ -372,7 +372,7 @@ JSON には、`conversations` の行を再構成するのに必要な項目を�
 
 ### 6-6. 抽出の背面（`extract/base.py`、`strata_impl.py`、`transport.py`）
 
-`Extractor` は4つのメンバーを持つ。
+`Extractor` は5つのメンバーを持つ。
 
 ```python
 class Extractor(Protocol):
@@ -380,6 +380,7 @@ class Extractor(Protocol):
     enforces_json_schema: bool   # サーバーがスキーマ適合を保証するか
     max_input_tokens: int | None # 1リクエストの入力の上限。未確認なら None
     repair_events: list[RepairEvent]  # 出力を修復した記録。run.py が extract_logs に書く
+    last_usage: dict | None      # 直近の extract() の usage（入力・出力のトークン数）。run.py が進捗の表示に使う
     def extract(self, chunk: Chunk) -> ExtractionResult: ...
 ```
 
@@ -388,10 +389,22 @@ class Extractor(Protocol):
 `strata_impl.py` は OpenAI 互換のエンドポイントに `transport.py` 経由で投げる。Anthropic 互換側を `anthropic` SDK で叩く案は採らなかった。SDK は `betas`、`fallbacks`、`messages.parse` のサーバー側構造化出力に依存しており、ローカルサーバーが実装している保証がなく、失敗したときに原因が SDK 側かサーバー側か切り分けられなくなるためである。
 
 - `enforces_json_schema` が true のときだけ `response_format` に JSON スキーマを付ける。false のときは付けない（対応していないサーバーが 400 を返す可能性があるため）。
+- `max_tokens`（設定 `extract.strata.max_tokens`、既定 20000、0 は送らない）を必ず送る。応答の `finish_reason` が `length` なら、出力が切れたことを標準エラーに出す（例外にはせず、`repair.py` の切り詰めに任せる）。
 - 応答の本文は必ず `repair.py` を通してから検証する。失敗したら同じチャンクをもう1回だけ投げ直し、2回失敗したら `ExtractionError` を出す。会議全体は落とさず、失敗したチャンクを記録して次に進む。
 - 失敗の記録先は `<db と同じディレクトリ>/extract_logs/<会議ID>__<モデル>.json`。スキーマに保存先の列が無いためファイルに置く。`compare` がこれを読む。
 
 `transport.py` の `TransportError` は、応答そのものが得られなかった場合（接続できない、時間切れ）にだけ出す。HTTP のエラー応答（400 など）は `HttpResponse.status_code` で表す。**サーバーが機能に対応していないこと（400）と、サーバーに届かないこと（接続不可）を呼び出し側が区別できるようにするため**で、`doctor` の判定がこの区別に依存している。
+
+**2026-11-03 実機の訂正：`max_tokens` が無く、トークン数の概算が大きく外れていた。** 実機で初めて `kijun extract` を動かしたところ、次の事実が観測された。
+
+- 2分5秒の音声（1チャンク）が、2,383 秒経っても応答を返さなかった。リクエストに `max_tokens` が無く、推論トークン（`reasoning_content`）を含む生成が `n_ctx`（204,800）まで走り得た。
+- 上限なしで最後まで待った実測（curl）：入力 2,325、出力 13,050 トークン（`reasoning_tokens` という項目は返らず、推論は `completion_tokens` に合算される）。実時間 950 秒のうち生成が 932 秒、プロンプト処理が 18 秒。本文の JSON は約1,000トークンで、**残りの約12,000トークンは推論**。`finish_reason` は `stop`。
+- したがって `max_tokens` は「本文に必要な長さ」では決められない。小さすぎると推論の途中で打ち切られて JSON が1文字も出ず、`repair.py` は完全な要素が1件も無い出力を修復しない（原則2-4）ので、そのチャンクは失敗になる。既定値 20000 は、この実測 13,050 に余裕を持たせた値で、実測は2回分（6,952 と 13,050）しか無い。`doctor` の推奨値で置き換える。
+- 生成速度が同じ profile・モデルで **4.4 倍振れた**（`doctor` 検査4で 61.2〜68.9 tokens/s、上の実測で 14.0 tokens/s）。原因は特定できていない。`timeout_sec` を1回の測定の定数倍で決めてはいけない。
+- トークン数の概算（日本語1文字 1.5 トークン）は、`doctor` の記録で概算 4,711 に対し実際 1,646（約2.9倍の過大）、上の実測でも概算 4,825 に対し実際 2,325（約2.07倍）だった。Qwen3.8-Flash-Next は 51B の n-gram 埋め込みテーブルを持つので、日本語のトークン効率が高いと考えられる。係数を設定値にし、既定を `tokens_per_character = 0.55`（実測 1,646 ÷ 約3,141文字 ≒ 0.52 に余裕を持たせた値）、`tokens_per_meeting_minute = 180`（従来の 500 を 0.55/1.5 の比で換算して切り下げ）にした。**この2つは実測1点からの推測であり、`doctor` が `tokens_per_character` を実測して推奨値に出す。**
+- 追加の気づき：応答の `usage.prompt_tokens_details.cached_tokens` が 0 で、同じ system プロンプトを使う連続リクエストでもプロンプトキャッシュが効いていない。対応はしていない（12節の未確認事項）。
+
+`extract` は進捗を標準エラーに出す。チャンクごとに、開始時（発話の範囲と推定トークン数）、完了時（所要秒数、応答の `usage` による入力・出力のトークン数、抽出件数。`usage` が取れなければその旨）、失敗時（何チャンク目か、所要秒数）。
 
 ### 6-7. 壊れた JSON の修復（`extract/repair.py`）
 
@@ -439,11 +452,21 @@ uv run kijun doctor [--out <パス>]
 | 4 | 速度の実測 | 約1,000トークンのものと `chunk_minutes` 相当の2回。入力・出力のトークン数と所要秒数から tokens/s。`usage` が無ければ「サーバーが usage を返さない」と出す |
 | 5 | 最大入力長 | `chunk_minutes` 相当の1倍・2倍・4倍の3段階。エラーになる手前の長さを報告 |
 
-最後に `config.toml` に書くべき推奨値（`enforces_json_schema`、`max_input_tokens`、`timeout_sec`、`chunk_minutes`、`overlap_minutes`）を出し、同じ内容を `<db と同じディレクトリ>/doctor/strata_<日時>.json` に保存する。
+最後に `config.toml` に書くべき推奨値（`enforces_json_schema`、`max_input_tokens`、`max_tokens`、`tokens_per_character`、`timeout_sec`、`chunk_minutes`、`overlap_minutes`）を出し、同じ内容を `<db と同じディレクトリ>/doctor/strata_<日時>.json` に保存する。
 
 `chunk_minutes` の推奨値は、**実際に通った長さから算出する**。既定の `chunk_minutes = 25` では4倍でも100分相当（約5万トークン）にしかならず、2時間に届かない。120分相当以上が通れば `180` / `0` を推奨し、届かなければ通った長さの8割を5分単位に切り下げる。4倍まで通った場合は「2時間相当はまだ確かめていない。確かめるには `chunk_minutes` を30以上にして `doctor` をもう一度実行する」と出す。
 
-`timeout_sec` の推奨値は、**推奨する `chunk_minutes` での推定所要時間**から算出する（実機で初めて `doctor` を実行して、実測の長さと推奨する長さが違うと打ち切り時間が足りなくなる誤りが見つかったため）。手順4の2点（約1,000トークンと `chunk_minutes` 相当）から、所要秒数 = 切片 + 傾き × 入力トークン数 の直線を当てはめる（傾き = 秒数の差 / トークン数の差、切片 = 短い方の秒数 − 短い方のトークン数 × 傾き。切片が負なら0）。推奨する `chunk_minutes` を `tokens_for_minutes` でトークン数に直し（実測の入力がそれより多い分、すなわちシステムプロンプト分は足す）、推定秒数の3倍を、下限600秒・分単位切り上げで推奨する。トークン数は概算で、2点からの直線は近似である。2点が揃わない場合、または傾きが0以下（長い入力のほうが速い）の場合は、従来どおり実測の3倍とし、根拠に「推奨する chunk_minutes での所要時間は推定できていない」と書く。
+`tokens_per_character` の推奨値は、検査4で送った文字数（system と user の合計）と、サーバーが数えた `usage.prompt_tokens` から実測する（小数第2位に切り上げ）。根拠の文面に、何文字・何トークンから求めたかを書く。固定の文を繰り返した入力からの値なので、実際の会議ではずれ得る。
+
+`max_tokens` の推奨値は、検査4の長い側の「出力トークン ÷ 入力トークン」の比（実測では 6,952 ÷ 1,646 ≒ 4.2 倍）に、推奨する `chunk_minutes` の入力トークン数（検査4の実測入力を `chunk_minutes` の比で伸縮したもの）を掛けた出力見込みの2倍とする（下限 4096、1000 単位に切り上げ）。**この比は、固定の文を繰り返した入力に対する推論の長さであり、実際の会議で同じ比になる保証は無い。** 推論の長さは入力の長さに比例するとは限らない。`finish_reason` が `length` だった測定があれば、比は下限だと根拠に書く。
+
+`timeout_sec` の推奨値は、**1回の測定の定数倍では決めない**（生成速度が 4.4 倍振れた実測があるため）。次の式で算出する。
+
+```
+timeout_sec = プロンプト処理の推定秒数 + (推奨する max_tokens ÷ 検査4で観測された最も遅い生成速度) × 1.5
+```
+
+生成速度は測定ごとに 出力トークン ÷ 所要秒数（プロンプト処理を含む）とし、2点のうち遅いほうを使う（1点しか取れなければその値）。プロンプト処理の秒数は、2点の「出力 ÷ 入力」の比が20%以上違うときだけ、2点・2係数の連立方程式（切片なし）で入力1トークンあたりの秒数を求めて足す（比が近いと入力と出力の寄与を分けられないため）。係数が負になるときも足さない。下限600秒、分単位に切り上げ。`usage` が取れない場合は、従来の入力長だけの直線（所要秒数 = 切片 + 傾き × 入力トークン数、推定の3倍）に戻し、根拠に「出力長を推定に入れていない」と書く。それも当てはまらない場合は実測の3倍とし、「推奨する chunk_minutes での所要時間は推定できていない」と書く。
 
 段階を3つに留めているのは、実測に時間をかけすぎないためである（125B の MoE をオフロードして動かすため、1回の応答に数分から十数分かかる見込み）。
 
@@ -516,6 +539,9 @@ uv run kijun compare --conversation <ID> [--model <名前> --model <名前>] [--
 | `extract.strata.chat_path` | `"/v1/chat/completions"` | 未確認。`doctor` で確認してから書き換える |
 | `extract.strata.enforces_json_schema` | `false` | 安全側の仮定。false のときは `response_format` を送らない（6-6） |
 | `extract.strata.max_input_tokens` | `0` | `0` は未確認を意味し、入力長の検査をしない。`Extractor` の属性では `None` に変換する |
+| `extract.tokens_per_character` | `0.55` | 入力トークン数の概算の係数。実測 1,646 ÷ 約3,141文字 ≒ 0.52 に余裕を持たせた値で、**実測1点からの推測**。`doctor` の推奨値で置き換える（6-6） |
+| `extract.tokens_per_meeting_minute` | `180` | 会議1分あたりの入力トークン数の概算。従来の 500 を 0.55/1.5 の比で換算して切り下げた値で、**推測**（6-6） |
+| `extract.strata.max_tokens` | `20000` | 1リクエストの出力トークン数の上限（推論を含む）。`0` は送らない。実測 13,050 トークン（`stop`）に余裕を持たせた値で、実測2回分しか無い。小さすぎると推論の途中で切れて JSON が出ず、そのチャンクが失敗する（6-6） |
 | `extract.strata.timeout_sec` | `3600` | 125B の MoE をオフロードして動かすため長く取ってある。`doctor` の実測で詰める |
 | `extract.strata.start_command` / `stop_command` | `""` | 文字起こしに VRAM を明け渡すための手段。夜間バッチが読む（15-2）。空なら何もしない。`start_command` は Strata を起動したらすぐに戻るコマンドを書く。`stop_command` は抽出が失敗しても必ず実行する |
 | `discord.review_channel_id` / `contradictions_channel_id` | `""` | 空なら `post` と `read` は何もせず、設定が必要であることを出して終了コード 0 で終わる。チャンネルは個人サーバーに作る（`CLAUDE.md` 2章） |
@@ -621,7 +647,10 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 | Strata の OpenAI 互換のパス | 未確認。既定は `/v1/chat/completions` | 同上（手順1） |
 | Strata の応答に `usage` が含まれるか | 未確認。3つの応答形式に対応済み | 同上（手順4） |
 | Strata にモデルを VRAM から降ろす手段があるか | 未確認。無い場合は `stop_command` でプロセスごと止める | Strata のドキュメント（開発環境から到達できない） |
-| トークン数の概算の係数 | 日本語1文字あたり1.5トークン、会議1分あたり500トークン。**実測ではなく概算** | `doctor` の実測で置き換える |
+| トークン数の概算の係数 | 日本語1文字あたり 0.55 トークン、会議1分あたり 180 トークン。**実測1点からの推測**（旧 1.5 / 500 は約2〜3倍の過大だった） | `doctor` が `tokens_per_character` を実測して推奨する |
+| `max_tokens` の適正値 | 既定 20000。実測は出力 6,952 と 13,050 トークンの2回だけ | 実機で `completion_tokens` の実測を増やし、`doctor` の推奨値と見比べる |
+| 生成速度の振れ | 同じ profile・モデルで 61〜69 と 14 tokens/s（4.4倍）。原因は未特定（生成が長いほど遅い、メモリの状態、専門家キャッシュの学習状況などが候補） | `timeout_sec` は最も遅い速度で決める。振れの原因は未調査 |
+| プロンプトキャッシュ | `usage.prompt_tokens_details.cached_tokens` が 0。同じ system プロンプトの連続リクエストでキャッシュが効いていない | 未対応。気づきとして記録 |
 | pyannote.audio が Windows + CUDA で動くか | 未確認 | 実機手順8 |
 | Qwen3.8-Flash-Next の量子化版の入手先とタグ | 未確認 | ユーザーが Strata のモデル一覧で確認 |
 | ~~torch の CUDA のタグ~~ | **2026-11-03 確認済み。`cu132`（CUDA 13.2、torch 2.15.0、Windows）** | — |
@@ -649,6 +678,10 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 ---
 
 ## 13. 変更の履歴
+
+### 2026-11-03：実機で `kijun extract` を初めて動かして見つかった訂正
+
+6-6 の「2026-11-03 実機の訂正」に事実と根拠を書いた。変更点は次のとおり。`max_tokens` を送る（既定 20000）、`finish_reason = length` を警告する、トークン数の係数を設定値にして `doctor` が実測する、`doctor` の `timeout_sec` を最も遅い生成速度から出して `max_tokens` も推奨する、`extract` の進捗を出す、`cuda_dlls.py` が `os.environ["PATH"]` の先頭にも足す（`os.add_dll_directory()` は `LoadLibraryEx` に `LOAD_LIBRARY_SEARCH_USER_DIRS` を付けた呼び出しにしか効かず、CTranslate2 の読み込みには効かなかった）、`nvidia-cublas-cu12` を Windows の wheel がある 12.9.2.x に収める、テストが実データの `data/` に書かないようにする（`cfg` フィクスチャが `batch.log_dir` も一時ディレクトリにし、Path 型の設定がすべて `tmp_path` の下にあることを検査するテストを足した）。
 
 ### 2026-11-03：第2弾（Discord でのレビューと夜間バッチ）を実装した
 
