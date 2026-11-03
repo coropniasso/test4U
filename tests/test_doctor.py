@@ -485,3 +485,80 @@ def test_doctor_は抽出が実際に送るのと同じ形のリクエストを�
     cfg = Config()
     check_minimal_request(transport, cfg)
     assert transport.posts[0]["payload"] == build_payload(cfg, sample_chunk(), False)
+
+
+# --- timeout_sec は推奨する chunk_minutes での推定所要時間から出す ----------------------------
+
+
+def _hand_report(cfg: Config, short_sec, long_sec, chunk_minutes: int = 5, short_tokens=1000, long_tokens=None):
+    """検査4と検査5の結果を直接組み立てた DoctorReport（実機の数値を再現するため）。"""
+    from kijun.doctor import CheckResult, DoctorReport
+
+    long_tokens = long_tokens if long_tokens is not None else tokens_for_minutes(chunk_minutes)
+    base = tokens_for_minutes(chunk_minutes)
+    measurements = []
+    for label, sec, tokens in (("short", short_sec, short_tokens), ("long", long_sec, long_tokens)):
+        if sec is None:
+            measurements.append({"label": label, "estimated_input_tokens": tokens, "error": "timeout"})
+        else:
+            measurements.append({"label": label, "estimated_input_tokens": tokens, "elapsed_sec": sec})
+    report = DoctorReport("http://x", "/v1/chat/completions", "m", NOW)
+    report.checks = [
+        CheckResult("speed", "4", STATUS_OK, "", {"measurements": measurements}),
+        CheckResult(
+            "max_input", "5", STATUS_OK, "",
+            {
+                "attempts": [{"passed": True, "estimated_input_tokens": base * 4}],
+                "largest_passed_user_tokens": base * 4,
+                "all_multipliers_passed": True,
+            },
+        ),
+    ]
+    return report
+
+
+def test_推奨値_timeout_は推奨する_chunk_minutes_での推定所要時間から出す():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    rec = build_recommendations(cfg, _hand_report(cfg, 113.64, 253.86))
+
+    assert rec["chunk_minutes"]["value"] == 15
+    # 15分 = 7500 トークン。傾き 0.0935 秒/トークン、切片 約20 秒 → 約721 秒 → ×3 → 2163 → 2180 秒
+    assert rec["timeout_sec"]["value"] >= 2000
+    assert rec["timeout_sec"]["value"] != 780
+    reason = rec["timeout_sec"]["reason"]
+    assert "直線" in reason and "概算" in reason and "推定所要時間" in reason
+
+
+def test_推奨値_推奨する_chunk_minutes_が実行時と同じでも破綻しない():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    report = _hand_report(cfg, 100.0, 200.0)
+    # 通った長さを 5 分相当だけにして、推奨が 5 のままになるようにする
+    base = tokens_for_minutes(5)
+    report.get("max_input").detail["largest_passed_user_tokens"] = base
+    rec = build_recommendations(cfg, report)
+
+    assert rec["chunk_minutes"]["value"] == 5
+    # 2500 トークンの実測 200 秒がそのまま推定になり、3 倍の 600 秒
+    assert rec["timeout_sec"]["value"] == 600
+    assert rec["timeout_sec"]["value"] >= TIMEOUT_FLOOR_SEC
+
+
+def test_推奨値_検査4が1点しか測れなければ実測の3倍に戻し_推定できていないと書く():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    rec = build_recommendations(cfg, _hand_report(cfg, None, 253.86))
+
+    assert rec["timeout_sec"]["value"] == 780  # 253.86 × 3 を分単位に切り上げ
+    assert "実測した長さの 3 倍" in rec["timeout_sec"]["reason"]
+    assert "推奨する chunk_minutes での所要時間は推定できていない" in rec["timeout_sec"]["reason"]
+
+
+def test_推奨値_長い入力のほうが速いという異常な実測でも下限を下回らない():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    rec = build_recommendations(cfg, _hand_report(cfg, 120.0, 30.0))
+
+    assert rec["timeout_sec"]["value"] >= TIMEOUT_FLOOR_SEC
+    assert "推定できていない" in rec["timeout_sec"]["reason"]

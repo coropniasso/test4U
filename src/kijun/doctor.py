@@ -537,6 +537,30 @@ def check_max_input(transport: HttpTransport, cfg: Config) -> CheckResult:
 # --- 推奨値 ---------------------------------------------------------------------------------
 
 
+def _fit_latency(cfg: Config, measurements: list[dict]) -> tuple[float, float, int] | None:
+    """検査4の2点（短い・chunk_minutes 相当）から、所要秒数 = 切片 + 傾き × 入力トークン数 を当てはめる。
+
+    戻り値は (傾き, 切片, 上乗せトークン数)。上乗せは、実測した入力（システムプロンプトを含む）が
+    tokens_for_minutes(chunk_minutes) より多い分で、推奨する長さにも同じだけ加える。
+    2点が揃わない、または傾きが0以下なら None。
+    """
+    if len(measurements) < 2:
+        return None
+    short, long_ = measurements[0], measurements[1]
+    if any("error" in m or not m.get("elapsed_sec") for m in (short, long_)):
+        return None
+    x1 = short.get("estimated_input_tokens") or SMALL_REQUEST_TOKENS
+    x2 = long_.get("estimated_input_tokens") or tokens_for_minutes(cfg.extract.chunk_minutes)
+    if x2 <= x1:
+        return None
+    slope = (long_["elapsed_sec"] - short["elapsed_sec"]) / (x2 - x1)
+    if slope <= 0:
+        return None
+    intercept = max(0.0, short["elapsed_sec"] - x1 * slope)
+    overhead = max(0, x2 - tokens_for_minutes(cfg.extract.chunk_minutes))
+    return slope, intercept, overhead
+
+
 def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
     """実測の結果から、config.toml に書くべき値を出す。
 
@@ -589,29 +613,6 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
             "reason": "通る長さが1つも見つからなかったので、未確認（0）のまま",
         }
 
-    speed = report.get("speed")
-    measured = None
-    if speed is not None:
-        measured = next(
-            (
-                m.get("elapsed_sec")
-                for m in reversed(speed.detail.get("measurements", []))
-                if "error" not in m and m.get("elapsed_sec")
-            ),
-            None,
-        )
-    if measured:
-        suggested = max(TIMEOUT_FLOOR_SEC, int(math.ceil(measured * TIMEOUT_MARGIN / 60) * 60))
-        rec["timeout_sec"] = {
-            "value": suggested,
-            "reason": f"実測 {measured} 秒の {TIMEOUT_MARGIN} 倍（下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）",
-        }
-    else:
-        rec["timeout_sec"] = {
-            "value": cfg.extract.strata.timeout_sec,
-            "reason": "測れなかったので現在の値のまま",
-        }
-
     if largest:
         minutes = minutes_for_tokens(largest)
         if minutes >= WHOLE_MEETING_MINUTES:
@@ -646,6 +647,50 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
             "value": cfg.extract.overlap_minutes,
             "reason": "測れなかったので現在の値のまま",
         }
+    speed = report.get("speed")
+    measurements = speed.detail.get("measurements", []) if speed is not None else []
+    measured = next(
+        (
+            m.get("elapsed_sec")
+            for m in reversed(measurements)
+            if "error" not in m and m.get("elapsed_sec")
+        ),
+        None,
+    )
+    recommended_chunk_minutes = rec["chunk_minutes"]["value"]
+    fit = _fit_latency(cfg, measurements)
+    if measured and fit is not None:
+        slope, intercept, overhead = fit
+        planned_tokens = tokens_for_minutes(recommended_chunk_minutes) + overhead
+        estimated_sec = intercept + slope * planned_tokens
+        suggested = max(TIMEOUT_FLOOR_SEC, int(math.ceil(estimated_sec * TIMEOUT_MARGIN / 60) * 60))
+        rec["timeout_sec"] = {
+            "value": suggested,
+            "reason": (
+                f"検査4の2点（約{SMALL_REQUEST_TOKENS}トークンと chunk_minutes={cfg.extract.chunk_minutes} 相当）から"
+                f"直線で当てはめた（1トークンあたり {slope:.4f} 秒、固定の立ち上がり {intercept:.0f} 秒。"
+                "トークン数は概算）。推奨する chunk_minutes="
+                f"{recommended_chunk_minutes}（約{planned_tokens}トークン）での推定所要時間は約{estimated_sec:.0f} 秒。"
+                f"その {TIMEOUT_MARGIN} 倍（下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）"
+            ),
+        }
+    elif measured:
+        suggested = max(TIMEOUT_FLOOR_SEC, int(math.ceil(measured * TIMEOUT_MARGIN / 60) * 60))
+        rec["timeout_sec"] = {
+            "value": suggested,
+            "reason": (
+                f"実測した長さの {TIMEOUT_MARGIN} 倍（実測 {measured} 秒。下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）。"
+                "推奨する chunk_minutes での所要時間は推定できていない"
+                "（検査4の2点が揃わない、または長い入力のほうが速いなど直線に当てはまらない）"
+            ),
+        }
+    else:
+        rec["timeout_sec"] = {
+            "value": cfg.extract.strata.timeout_sec,
+            "reason": "測れなかったので現在の値のまま",
+        }
+    order = ["enforces_json_schema", "max_input_tokens", "timeout_sec", "chunk_minutes", "overlap_minutes"]
+    rec = {k: rec[k] for k in order if k in rec}
     return rec
 
 
