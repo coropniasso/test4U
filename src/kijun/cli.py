@@ -314,6 +314,13 @@ def extract(ctx: typer.Context, conversation: ConversationOpt, provider: Provide
             f"捨てた件数: 番号が範囲外 {o.invalid_count}、重複区間 {o.overlap_dropped_count}、"
             f"quote の重複 {o.duplicate_count}"
         )
+        if run.repair_events:
+            truncated = sum(r.truncated_items for r in run.repair_events)
+            typer.echo(
+                f"出力を修復したチャンク: {len(run.repair_events)} 個"
+                + (f"（末尾が切れて捨てた要素 {truncated} 件）" if truncated else "")
+                + "。内容は extract_logs の JSON を見てください。"
+            )
         for f in run.failures:
             typer.echo(f"失敗したチャンク: 発話 {f.seq_from}〜{f.seq_to}: {f.reason}", err=True)
 

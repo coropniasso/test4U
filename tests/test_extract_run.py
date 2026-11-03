@@ -113,3 +113,79 @@ def test_発話が無い会議は例外(con, cfg):
 
 def test_失敗の記録が無ければ_None(tmp_path):
     assert read_failed_chunk_count(tmp_path / "none.json") is None
+
+
+# --- 修復の記録と入力長の検査 ------------------------------------------------------------
+
+
+def test_背面が修復した記録が_extract_logs_に入る(con, cfg, conv):
+    from kijun.extract.base import RepairEvent
+
+    events = [
+        RepairEvent(
+            chunk_index=0, seq_from=0, seq_to=24,
+            actions=["removed_prose_before"], truncated_items=1, attempt=2,
+        )
+    ]
+    extractor = FakeExtractor({0: [make_item(1, quote="a")]}, repair_events=events)
+    run = run_extraction(con, cfg, conv, extractor, now=NOW)
+
+    assert run.repair_events == events
+    data = json.loads(extract_log_path(cfg, conv, extractor.model_name).read_text(encoding="utf-8"))
+    assert data["repaired_chunks"] == [
+        {
+            "chunk_index": 0, "seq_from": 0, "seq_to": 24,
+            "actions": ["removed_prose_before"], "truncated_items": 1, "attempt": 2,
+        }
+    ]
+
+
+def test_修復が無ければ記録は空(con, cfg, conv):
+    run = run_extraction(con, cfg, conv, FakeExtractor({0: [make_item(1, quote="a")]}), now=NOW)
+    assert run.repair_events == []
+    data = json.loads(extract_log_path(cfg, conv, "fake-model").read_text(encoding="utf-8"))
+    assert data["repaired_chunks"] == [] and data["oversize_warnings"] == []
+
+
+def test_max_input_tokens_が未確認なら入力長を検査しない(con, cfg, conv, capsys):
+    extractor = FakeExtractor({0: [make_item(1, quote="a")]}, max_input_tokens=None)
+    run = run_extraction(con, cfg, conv, extractor, now=NOW)
+    assert run.oversize_warnings == []
+    assert "警告" not in capsys.readouterr().err
+
+
+def test_入力が_max_input_tokens_を超えたら警告するが止めない(con, cfg, conv, capsys):
+    # 上限を極端に小さくすると、どのチャンクも超える
+    extractor = FakeExtractor({0: [make_item(1, quote="a")]}, max_input_tokens=10)
+    run = run_extraction(con, cfg, conv, extractor, now=NOW)
+
+    assert len(run.oversize_warnings) == run.chunk_count  # 全チャンクが超える
+    assert "chunk_minutes" in run.oversize_warnings[0]
+    assert "kijun doctor" in run.oversize_warnings[0]
+    assert run.saved_count == 1  # 警告を出しても処理は続ける
+    assert "警告" in capsys.readouterr().err
+    data = json.loads(extract_log_path(cfg, conv, "fake-model").read_text(encoding="utf-8"))
+    assert len(data["oversize_warnings"]) == run.chunk_count
+
+
+def test_入力が上限に収まっていれば警告しない(con, cfg, conv):
+    extractor = FakeExtractor({0: [make_item(1, quote="a")]}, max_input_tokens=1_000_000)
+    assert run_extraction(con, cfg, conv, extractor, now=NOW).oversize_warnings == []
+
+
+def test_check_chunk_input_size_は概算の係数を使う(cfg):
+    from kijun.extract.chunk import split_into_chunks
+    from kijun.extract.prompt import build_messages
+    from kijun.extract.run import check_chunk_input_size
+    from kijun.extract.tokens import TOKENS_PER_JAPANESE_CHARACTER, estimate_messages_tokens
+    from tests.conftest import make_utterances
+
+    chunk = split_into_chunks(make_utterances(5), 25, 2)[0]
+    system, user = build_messages(chunk, cfg)
+    estimated = estimate_messages_tokens(system, user)
+    assert estimated == int(len(system) * TOKENS_PER_JAPANESE_CHARACTER) + int(
+        len(user) * TOKENS_PER_JAPANESE_CHARACTER
+    )
+    assert check_chunk_input_size(chunk, cfg, None) is None
+    assert check_chunk_input_size(chunk, cfg, estimated) is None  # ちょうどなら警告しない
+    assert check_chunk_input_size(chunk, cfg, estimated - 1) is not None

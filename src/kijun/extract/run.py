@@ -18,9 +18,11 @@ import duckdb
 
 from kijun.config import Config
 from kijun.db import repo
-from kijun.extract.base import ExtractionError, Extractor
-from kijun.extract.chunk import MergeOutcome, merge_chunk_results, split_into_chunks
+from kijun.extract.base import ExtractionError, Extractor, RepairEvent
+from kijun.extract.chunk import Chunk, MergeOutcome, merge_chunk_results, split_into_chunks
 from kijun.extract.models import ExtractedRequest
+from kijun.extract.prompt import build_messages
+from kijun.extract.tokens import estimate_messages_tokens
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,10 @@ class ExtractionRun:
     failures: list[ChunkFailure] = field(default_factory=list)
     outcome: MergeOutcome = field(default_factory=lambda: MergeOutcome(items=[]))
     saved_count: int = 0
+    # 背面が壊れた JSON を返して修復した記録（背面から受け取る）
+    repair_events: list[RepairEvent] = field(default_factory=list)
+    # 推定トークン数が max_input_tokens を超えたチャンクの警告
+    oversize_warnings: list[str] = field(default_factory=list)
 
 
 def extract_log_path(cfg: Config, conversation_id: str, model_name: str) -> Path:
@@ -62,6 +68,18 @@ def write_extract_log(path: Path, conversation_id: str, run: ExtractionRun, at: 
             {"chunk_index": f.chunk_index, "seq_from": f.seq_from, "seq_to": f.seq_to, "reason": f.reason}
             for f in run.failures
         ],
+        "repaired_chunks": [
+            {
+                "chunk_index": r.chunk_index,
+                "seq_from": r.seq_from,
+                "seq_to": r.seq_to,
+                "actions": r.actions,
+                "truncated_items": r.truncated_items,
+                "attempt": r.attempt,
+            }
+            for r in run.repair_events
+        ],
+        "oversize_warnings": run.oversize_warnings,
         "invalid_count": run.outcome.invalid_count,
         "overlap_dropped_count": run.outcome.overlap_dropped_count,
         "duplicate_count": run.outcome.duplicate_count,
@@ -104,6 +122,30 @@ def _to_row(
     )
 
 
+def check_chunk_input_size(
+    chunk: Chunk, cfg: Config, max_input_tokens: int | None
+) -> str | None:
+    """チャンクの推定入力トークン数が上限を超えていれば、警告の文を返す。
+
+    max_input_tokens が None（設定の 0 = 未確認）のときは検査しない。推測で止めないため。
+    超えていても処理は止めない。概算が外れている可能性があるので、実際に投げて
+    サーバーの返事を見る方が確かだからである。
+    """
+    if max_input_tokens is None:
+        return None
+    system, user = build_messages(chunk, cfg)
+    estimated = estimate_messages_tokens(system, user)
+    if estimated <= max_input_tokens:
+        return None
+    return (
+        f"チャンク {chunk.index + 1}（発話 {chunk.seq_from}〜{chunk.seq_to}）の推定入力は "
+        f"約 {estimated} トークンで、設定の extract.strata.max_input_tokens "
+        f"（{max_input_tokens}）を超えています。"
+        f"extract.chunk_minutes（現在 {cfg.extract.chunk_minutes}）を下げるか、"
+        "`uv run kijun doctor` で上限を実測し直してください。"
+    )
+
+
 def run_extraction(
     con: duckdb.DuckDBPyConnection,
     cfg: Config,
@@ -135,6 +177,10 @@ def run_extraction(
     run = ExtractionRun(model_name=extractor.model_name, chunk_count=len(chunks))
     results: list[tuple] = []
     for chunk in chunks:
+        warning = check_chunk_input_size(chunk, cfg, extractor.max_input_tokens)
+        if warning is not None:
+            run.oversize_warnings.append(warning)
+            log(f"警告: {warning}")
         try:
             result = extractor.extract(chunk)
             results.append((chunk, result.items))
@@ -144,6 +190,9 @@ def run_extraction(
                 f"失敗: チャンク {chunk.index + 1}/{len(chunks)}（発話 {chunk.seq_from}〜{chunk.seq_to}）: {e}"
             )
             results.append((chunk, None))
+
+    # 修復の記録は背面が持っている（Protocol の属性）。extract_logs に書くために受け取る。
+    run.repair_events = list(extractor.repair_events)
 
     if len(run.failures) == len(chunks):
         write_extract_log(extract_log_path(cfg, conversation_id, run.model_name), conversation_id, run, now)
