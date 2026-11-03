@@ -38,6 +38,18 @@ def test_計画書の主な既定値():
     assert c.settings.formats == ["f2f", "call"]
 
 
+def test_第2弾の設定の既定値():
+    c = Config()
+    assert c.discord.review_channel_id == "" and c.discord.contradictions_channel_id == ""
+    assert c.discord.max_candidates_per_run == 20
+    assert c.discord.max_contradictions_per_run == 5
+    assert c.discord.contradiction_min_similarity == 0.70
+    assert c.discord.speaker_sample_count == 3
+    assert c.batch.log_dir == Path("./data/batch_logs")
+    # 矛盾の下限は、重複として統合される閾値より小さくなければ範囲が空になる
+    assert c.discord.contradiction_min_similarity < c.match.similarity_threshold
+
+
 def test_config_toml_が無ければ既定値(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert load_config() == Config()

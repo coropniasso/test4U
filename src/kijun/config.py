@@ -5,7 +5,8 @@
 2. 書かれていない項目は、このファイルの既定値
 
 既定値は config.example.toml と一致させる（tests/test_config.py が一致を検査する）。
-秘密情報（pyannote のモデル取得に使う HF_TOKEN）は設定ファイルに書かず、環境変数で渡す。
+秘密情報（pyannote のモデル取得に使う HF_TOKEN、Discord bot の DISCORD_BOT_TOKEN）は
+設定ファイルに書かず、環境変数で渡す。
 """
 
 from __future__ import annotations
@@ -69,8 +70,8 @@ class StrataConfig(_Section):
     # 0 は「未確認」を表す（TOML に null が無いため。diarize.num_speakers と同じ扱い）。
     # 未確認のときは chunk_minutes の妥当性を検査しない。
     max_input_tokens: int = 0
-    # 文字起こしに VRAM を明け渡すための起動・停止コマンド（第2弾の夜間バッチで使う）。
-    # 第1弾では、この2つを読む処理はまだ無い。空文字なら何もしない。
+    # 文字起こしに VRAM を明け渡すための起動・停止コマンド。夜間バッチ（kijun batch run）が
+    # Strata を使う手順の前後で実行する。空文字なら何もしない（Strata を手で起動・停止する運用）。
     start_command: str = ""
     stop_command: str = ""
 
@@ -96,6 +97,29 @@ class RetentionConfig(_Section):
     audio_days: int = 30
 
 
+class DiscordConfig(_Section):
+    # Discord のチャンネルID（数字の文字列）。空文字なら post と read は何もせず、設定が必要であることを出して終わる。
+    review_channel_id: str = ""
+    contradictions_channel_id: str = ""
+    # 1回の post で投稿する新規候補の上限（CLAUDE.md 6章のレビュー所要時間の調整用）。
+    max_candidates_per_run: int = 20
+    # 1回の post で投稿する矛盾の可能性がある組の上限。
+    max_contradictions_per_run: int = 5
+    # 矛盾の候補とみなす類似度の下限。上限は match.similarity_threshold で、それ以上は重複として扱う。
+    # この規則は設計者（Claude）が考案したもので、運用して見直す。
+    contradiction_min_similarity: float = 0.70
+    # 話者の対応付けで投稿する発言サンプルの件数（CLAUDE.md 4-6 は3件）。
+    speaker_sample_count: int = 3
+
+
+class BatchConfig(_Section):
+    # 各手順の記録（<日時>.json）を置く場所。
+    log_dir: Path = Path("./data/batch_logs")
+    # extract.strata.start_command を実行してから、Strata が応答するようになるまで待つ秒数。
+    # 125B の MoE の読み込みには時間がかかる。待っても応答しなければ、その手順を失敗として扱う。
+    strata_ready_timeout_sec: int = 1800
+
+
 class Config(_Section):
     paths: PathsConfig = Field(default_factory=PathsConfig)
     settings: SettingsConfig = Field(default_factory=SettingsConfig)
@@ -105,6 +129,8 @@ class Config(_Section):
     extract: ExtractConfig = Field(default_factory=ExtractConfig)
     match: MatchConfig = Field(default_factory=MatchConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
+    discord: DiscordConfig = Field(default_factory=DiscordConfig)
+    batch: BatchConfig = Field(default_factory=BatchConfig)
 
 
 class ConfigError(Exception):

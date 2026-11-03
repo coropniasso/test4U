@@ -64,9 +64,13 @@ enforces_json_schema = false
 # 1リクエストの入力トークンの上限。0 は未確認を意味し、chunk_minutes の検査をしない。
 # kijun doctor の手順5の実測値を書く。
 max_input_tokens = 0
-# 文字起こしに VRAM を明け渡すための起動・停止コマンド（第2弾の夜間バッチで使う）。
+# 文字起こしに VRAM を明け渡すための起動・停止コマンド。夜間バッチ（kijun batch run）が
+# Strata を使う手順（Discord の返信の読み取り、抽出、Discord への投稿）の前後で実行する。
 # Strata に Ollama の keep_alive: 0 に相当する手段があるか未確認のため、
-# プロセスごと止める手段を設定で持たせてある。空文字なら何もしない。
+# プロセスごと止める手段を設定で持たせてある。空文字なら何もしない（Strata を手で起動・停止する運用）。
+# start_command は、サーバーを起動したらすぐに戻るコマンド（バックグラウンドで起動するもの）を書く。
+# 戻らないコマンド（フォアグラウンドで動き続けるもの）を書くと、batch.strata_ready_timeout_sec で打ち切って失敗にする。
+# stop_command は、Strata の抽出が失敗しても必ず実行する。
 start_command = ""
 stop_command = ""
 
@@ -84,3 +88,26 @@ device = "cuda"
 [retention]
 # 文字起こしが完了してからこの日数が経った音声を削除する（CLAUDE.md 2章）。
 audio_days = 30
+
+[discord]
+# Discord のチャンネルID（数字の文字列）。空文字なら post と read は何もせず、
+# 設定が必要であることを出して終わる。
+# チャンネルは、プロジェクトのサーバーではなくユーザー個人のサーバーに作る（CLAUDE.md 2章）。
+review_channel_id = ""
+contradictions_channel_id = ""
+# 1回の post で投稿する新規候補の上限（CLAUDE.md 6章のレビュー所要時間の調整用）。
+max_candidates_per_run = 20
+# 1回の post で投稿する矛盾の可能性がある組の上限。
+max_contradictions_per_run = 5
+# 矛盾の候補とみなす類似度の下限。上限は match.similarity_threshold（0.85）で、
+# それ以上は重複として扱う。この規則は設計者が考案したもので、運用して見直す。
+contradiction_min_similarity = 0.70
+# 話者の対応付けで投稿する発言サンプルの件数（CLAUDE.md 4-6 は3件）。
+speaker_sample_count = 3
+
+[batch]
+# 各手順の記録（<日時>.json）を置く場所。
+log_dir = "./data/batch_logs"
+# extract.strata.start_command を実行してから、Strata が応答するようになるまで待つ秒数。
+# 125B の MoE の読み込みには時間がかかる。待っても応答しなければ、その手順を失敗として扱う。
+strata_ready_timeout_sec = 1800
