@@ -73,7 +73,7 @@ def test_スキーマの適用は何度でも安全で_バージョン行は1つ
     migrate.apply_schema(con)
     migrate.apply_schema(con)
     assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 1
-    assert migrate.current_version(con) == migrate.SCHEMA_VERSION == 1
+    assert migrate.current_version(con) == migrate.SCHEMA_VERSION == 2
 
 
 def test_適用前のバージョンは_None(tmp_path):

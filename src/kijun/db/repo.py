@@ -32,6 +32,39 @@ OWNER_EXTRACTED_REQUEST = "extracted_request"
 SOURCE_LIVE_CONVERSATION = "live_conversation"
 SOURCE_DICTATED_REVIEW = "dictated_review"
 
+# extracted_requests.direction の保存値
+DIRECTION_SELF_TO_OTHER = "self_to_other"
+DIRECTION_OTHER_TO_SELF = "other_to_self"
+
+# speaker_map.person_label のうち、ユーザー本人を表す値。direction の導出がこれに依存する。
+PERSON_SELF = "self"
+
+# discord_posts.post_type の保存値
+POST_NEW_CANDIDATE = "new_candidate"
+POST_CONTRADICTION = "contradiction"
+POST_SPEAKER_SAMPLE = "speaker_sample"
+POST_BUNDLE_RESULT = "bundle_result"
+
+# review_log.action の保存値。値はここ1か所で定義し、他のファイルでは文字列を直接書かない。
+# 後で上書き履歴を回帰の目的変数にする（CLAUDE.md 4-6）ため、値を変えると過去の履歴が読めなくなる。
+ACTION_STATUS_CHANGED = "status_changed"  # before = 変更前の status、after = 変更後の status
+ACTION_IMPORTANCE_PROPOSED = "importance_proposed"  # after = LLM が添えた根拠の1文
+ACTION_IMPORTANCE_OVERRIDDEN = "importance_overridden"  # before = LLM の判定値、after = ユーザーの値
+ACTION_REPLY_RECEIVED = "reply_received"  # before = 返信の送信時刻（ISO）、after = 返信の原文の全文
+ACTION_REPLY_ROUTED = "reply_routed"  # before = 対応する返信の送信時刻（ISO）、after = 振り分け結果の JSON
+ACTION_AMBIGUOUS_REACTION = "ambiguous_reaction"  # after = 判定できなかったリアクションの説明
+ACTION_CHECK_TEXT_EDITED = "check_text_edited"  # before / after = check_text の変更前後
+
+REVIEW_LOG_ACTIONS = (
+    ACTION_STATUS_CHANGED,
+    ACTION_IMPORTANCE_PROPOSED,
+    ACTION_IMPORTANCE_OVERRIDDEN,
+    ACTION_REPLY_RECEIVED,
+    ACTION_REPLY_ROUTED,
+    ACTION_AMBIGUOUS_REACTION,
+    ACTION_CHECK_TEXT_EDITED,
+)
+
 
 @dataclass(frozen=True)
 class RequestRow:
@@ -72,6 +105,32 @@ class KnowledgeItemRow:
     status: str
     version: int
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class DiscordPostRow:
+    """discord_posts テーブルの1行。"""
+
+    message_id: str
+    post_type: str
+    item_id: str | None
+    conversation_id: str | None
+    posted_at: datetime
+    processed_at: datetime | None
+    channel_id: str | None
+    pair_item_id: str | None
+
+
+@dataclass(frozen=True)
+class ReviewLogRow:
+    """review_log テーブルの1行。"""
+
+    log_id: int
+    item_id: str
+    action: str
+    before: str | None
+    after: str | None
+    reviewed_at: datetime
 
 
 _REQUEST_COLUMNS = (
@@ -448,3 +507,190 @@ def put_embeddings(
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [owner_type, owner_id, model_name, text_hash(text), int(arr.shape[0]), arr.tolist(), created_at],
         )
+
+
+# --- knowledge_items の更新 ---------------------------------------------------
+
+
+def get_knowledge_item(con: duckdb.DuckDBPyConnection, item_id: str) -> KnowledgeItemRow | None:
+    row = con.execute(
+        f"SELECT {_ITEM_COLUMNS} FROM knowledge_items WHERE item_id = ?", [item_id]
+    ).fetchone()
+    return KnowledgeItemRow(*row) if row else None
+
+
+def update_item_status(
+    con: duckdb.DuckDBPyConnection, item_id: str, status: str, at: datetime
+) -> None:
+    con.execute(
+        "UPDATE knowledge_items SET status = ?, updated_at = ? WHERE item_id = ?",
+        [status, at, item_id],
+    )
+
+
+def update_item_importance(
+    con: duckdb.DuckDBPyConnection, item_id: str, importance: int | None, at: datetime
+) -> None:
+    con.execute(
+        "UPDATE knowledge_items SET importance = ?, updated_at = ? WHERE item_id = ?",
+        [importance, at, item_id],
+    )
+
+
+# update_item_fields が書き換えてよい列。SQL に列名を埋め込むので、許可する名前をここで固定する。
+EDITABLE_ITEM_FIELDS = ("check_text", "reason", "applies_when", "not_applies_when")
+
+
+def update_item_fields(
+    con: duckdb.DuckDBPyConnection, item_id: str, fields: dict[str, str], at: datetime
+) -> None:
+    """ユーザーが書き足した欄を更新し、version を1つ上げる。fields の空は何もしない。"""
+    unknown = set(fields) - set(EDITABLE_ITEM_FIELDS)
+    if unknown:
+        raise ValueError(f"更新できない列です: {sorted(unknown)}")
+    if not fields:
+        return
+    assignments = ", ".join(f"{name} = ?" for name in fields)
+    con.execute(
+        f"UPDATE knowledge_items SET {assignments}, version = version + 1, updated_at = ? "
+        "WHERE item_id = ?",
+        [*fields.values(), at, item_id],
+    )
+
+
+def get_item_evidence_requests(
+    con: duckdb.DuckDBPyConnection, item_id: str, limit: int | None = None
+) -> list[RequestRow]:
+    """項目の根拠になった抽出結果を、紐付けた順（古いものから）に返す。"""
+    sql = (
+        f"SELECT {', '.join('r.' + c.strip() for c in _REQUEST_COLUMNS.split(','))} "
+        "FROM item_evidence e JOIN extracted_requests r USING (request_id) "
+        "WHERE e.item_id = ? ORDER BY e.linked_at, r.request_id"
+    )
+    params: list = [item_id]
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return [RequestRow(*r) for r in con.execute(sql, params).fetchall()]
+
+
+# --- review_log --------------------------------------------------------------
+
+
+def insert_review_log(
+    con: duckdb.DuckDBPyConnection,
+    item_id: str,
+    action: str,
+    before: str | None,
+    after: str | None,
+    at: datetime,
+) -> int:
+    """review_log に1行足し、log_id を返す。action は REVIEW_LOG_ACTIONS のどれか。"""
+    if action not in REVIEW_LOG_ACTIONS:
+        raise ValueError(f"未定義の review_log.action です: {action}")
+    log_id = con.execute("SELECT nextval('review_log_seq')").fetchone()[0]
+    con.execute(
+        "INSERT INTO review_log (log_id, item_id, action, before, after, reviewed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [log_id, item_id, action, before, after, at],
+    )
+    return log_id
+
+
+def list_review_log(
+    con: duckdb.DuckDBPyConnection, item_id: str | None = None, action: str | None = None
+) -> list[ReviewLogRow]:
+    """review_log を log_id の昇順で返す。item_id と action で絞り込める。"""
+    sql = "SELECT log_id, item_id, action, before, after, reviewed_at FROM review_log"
+    where, params = [], []
+    if item_id is not None:
+        where.append("item_id = ?")
+        params.append(item_id)
+    if action is not None:
+        where.append("action = ?")
+        params.append(action)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY log_id"
+    return [ReviewLogRow(*r) for r in con.execute(sql, params).fetchall()]
+
+
+# --- discord_posts -----------------------------------------------------------
+
+_POST_COLUMNS = (
+    "message_id, post_type, item_id, conversation_id, posted_at, processed_at, "
+    "channel_id, pair_item_id"
+)
+
+
+def insert_discord_post(con: duckdb.DuckDBPyConnection, row: DiscordPostRow) -> None:
+    con.execute(
+        f"INSERT INTO discord_posts ({_POST_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            row.message_id,
+            row.post_type,
+            row.item_id,
+            row.conversation_id,
+            row.posted_at,
+            row.processed_at,
+            row.channel_id,
+            row.pair_item_id,
+        ],
+    )
+
+
+def list_discord_posts(
+    con: duckdb.DuckDBPyConnection,
+    post_type: str | None = None,
+    unprocessed_only: bool = False,
+) -> list[DiscordPostRow]:
+    """投稿の記録を投稿時刻の昇順で返す。"""
+    sql = f"SELECT {_POST_COLUMNS} FROM discord_posts"
+    where, params = [], []
+    if post_type is not None:
+        where.append("post_type = ?")
+        params.append(post_type)
+    if unprocessed_only:
+        where.append("processed_at IS NULL")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY posted_at, message_id"
+    return [DiscordPostRow(*r) for r in con.execute(sql, params).fetchall()]
+
+
+def mark_post_processed(con: duckdb.DuckDBPyConnection, message_id: str, at: datetime) -> None:
+    con.execute("UPDATE discord_posts SET processed_at = ? WHERE message_id = ?", [at, message_id])
+
+
+# --- speaker_map と direction ----------------------------------------------------
+
+
+def get_speaker_map(con: duckdb.DuckDBPyConnection, conversation_id: str) -> dict[str, str]:
+    """会議の {話者ラベル: 人物ラベル}。未登録なら空。"""
+    rows = con.execute(
+        "SELECT speaker_label, person_label FROM speaker_map WHERE conversation_id = ?",
+        [conversation_id],
+    ).fetchall()
+    return {label: person for label, person in rows}
+
+
+def set_speaker_map(
+    con: duckdb.DuckDBPyConnection, conversation_id: str, speaker_label: str, person_label: str
+) -> None:
+    """話者ラベルと人物の対応を入れ直す（同じラベルがあれば置き換える）。"""
+    con.execute(
+        "DELETE FROM speaker_map WHERE conversation_id = ? AND speaker_label = ?",
+        [conversation_id, speaker_label],
+    )
+    con.execute(
+        "INSERT INTO speaker_map (conversation_id, speaker_label, person_label) VALUES (?, ?, ?)",
+        [conversation_id, speaker_label, person_label],
+    )
+
+
+def update_request_direction(
+    con: duckdb.DuckDBPyConnection, request_id: str, direction: str | None
+) -> None:
+    con.execute(
+        "UPDATE extracted_requests SET direction = ? WHERE request_id = ?", [direction, request_id]
+    )

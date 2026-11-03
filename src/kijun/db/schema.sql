@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS item_evidence (
 CREATE TABLE IF NOT EXISTS review_log (
     log_id      BIGINT PRIMARY KEY,        -- シーケンスから採番
     item_id     VARCHAR NOT NULL,
-    action      VARCHAR NOT NULL,          -- approve / reject / hold / edit_reason / ...
+    action      VARCHAR NOT NULL,          -- 値の一覧は db/repo.py の REVIEW_LOG_ACTIONS（status_changed / reply_received / ...）
     before      VARCHAR,
     after       VARCHAR,
     reviewed_at TIMESTAMP NOT NULL
@@ -90,7 +90,9 @@ CREATE TABLE IF NOT EXISTS discord_posts (
     item_id         VARCHAR,
     conversation_id VARCHAR,
     posted_at       TIMESTAMP NOT NULL,
-    processed_at    TIMESTAMP              -- 翌晩のバッチで読み取った時刻
+    processed_at    TIMESTAMP,             -- 翌晩のバッチで読み取りを終えた時刻。判定できなかったものは NULL のまま
+    channel_id      VARCHAR,               -- 投稿先のチャンネルID。設定値は後から変わり得るので投稿時の値を残す（バージョン2で追加）
+    pair_item_id    VARCHAR                -- contradiction のとき、組のもう一方の item_id（バージョン2で追加）
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (
