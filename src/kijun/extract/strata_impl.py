@@ -49,6 +49,10 @@ def build_payload(cfg: Config, chunk: Chunk, enforces_json_schema: bool) -> dict
     # 既定値 20000 は実測（出力 13,050 トークンで stop）に余裕を持たせた値（設定 extract.strata.max_tokens）。
     if cfg.extract.strata.max_tokens > 0:
         payload["max_tokens"] = cfg.extract.strata.max_tokens
+    # 空文字なら送らない（サーバーの既定に任せる）。詳しい理由と実測は config.py の
+    # StrataConfig.reasoning_effort のコメントにある。
+    if cfg.extract.strata.reasoning_effort:
+        payload["reasoning_effort"] = cfg.extract.strata.reasoning_effort
     if enforces_json_schema:
         # 対応していないサーバーが 400 を返す可能性があるので、保証すると宣言されたときだけ付ける。
         payload["response_format"] = {
@@ -66,7 +70,8 @@ class StrataExtractor:
     def __init__(self, cfg: Config, transport: HttpTransport | None = None) -> None:
         self._cfg = cfg
         self._strata = cfg.extract.strata
-        self.model_name = self._strata.model
+        # run_label が入っていれば model_name に付く。設定を変えた2回の抽出を DB に並べて残すため。
+        self.model_name = cfg.extract.model_name()
         self.enforces_json_schema = self._strata.enforces_json_schema
         # 設定の 0 は「未確認」を表す（TOML に null が無いため）。属性では None にする。
         self.max_input_tokens = self._strata.max_input_tokens or None

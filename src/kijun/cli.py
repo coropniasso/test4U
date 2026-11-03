@@ -131,7 +131,8 @@ def _build_embedder(cfg: Config):
 def _provider_model(cfg: Config, provider: Provider | None) -> tuple[Provider, str]:
     """背面と、その背面が extracted_requests.model_name に入れるモデル名を返す。"""
     p = provider or Provider(cfg.extract.provider)
-    return p, cfg.extract.strata.model
+    # extract が書く名前と同じものを返す。食い違うと match が「照合の対象がありません」になる。
+    return p, cfg.extract.model_name()
 
 
 # --- db ----------------------------------------------------------------------

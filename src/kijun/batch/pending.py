@@ -53,7 +53,7 @@ def _extraction_done(con: duckdb.DuckDBPyConnection, cfg: Config, conversation_i
 
 
 def pending_extraction(con: duckdb.DuckDBPyConnection, cfg: Config) -> list[str]:
-    model = cfg.extract.strata.model
+    model = cfg.extract.model_name()
     return [
         c.conversation_id
         for c in repo.list_conversations(con)
@@ -72,6 +72,6 @@ def pending_match(con: duckdb.DuckDBPyConnection, cfg: Config) -> list[str]:
         "  AND r.model_name = ? AND r.reusable "
         "  AND NOT EXISTS (SELECT 1 FROM item_evidence e WHERE e.request_id = r.request_id)"
         ") ORDER BY c.recorded_at",
-        [cfg.extract.strata.model],
+        [cfg.extract.model_name()],
     ).fetchall()
     return [r[0] for r in rows]

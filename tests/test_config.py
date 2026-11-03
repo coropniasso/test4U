@@ -111,3 +111,16 @@ def test_cfg_フィクスチャの_Path_設定はすべて_tmp_path_の下(cfg, 
     assert {"paths.inbox", "paths.db", "batch.log_dir"} <= set(found)
     outside = {k: str(v) for k, v in found.items() if not v.resolve().is_relative_to(tmp_path.resolve())}
     assert outside == {}, f"一時ディレクトリの外を指す設定がある（テストが利用者のデータを汚す）: {outside}"
+
+
+def test_run_label_は英数字と記号3種だけ許す(tmp_path):
+    # request_id（"<会議ID>#<model_name>#<番号>"）とログのファイル名に入るため。
+    import pytest
+    from pydantic import ValidationError
+
+    from kijun.config import Config
+
+    assert Config.model_validate({"extract": {"run_label": "iq3_xxs-medium.1"}})
+    for bad in ["medium 1", "日本語", "a/b", "a#b", "a+b"]:
+        with pytest.raises(ValidationError):
+            Config.model_validate({"extract": {"run_label": bad}})

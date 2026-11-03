@@ -76,6 +76,24 @@ class StrataConfig(_Section):
     # 既定値 20000 は、実測（2分5秒の音声1チャンクで出力 13,050 トークン、finish_reason = stop）に
     # 余裕を持たせた値。推論トークンを含むので、本文（JSON）に必要な長さでは決めない。
     max_tokens: int = Field(default=20000, ge=0)
+    # 推論の量。OpenAI 互換 API の reasoning_effort に渡す。空文字なら送らず、サーバーの既定に任せる。
+    # 既定を空文字にしてあるのは、"xhigh" が「このときのサーバーの既定がそれだった」という観測であり、
+    # 入力として送って 200 が返るかを確認していないためである。受け付けない値を送ると全チャンクが
+    # 400 で失敗するので、動くと分かっている挙動（送らない）を既定にしてある。
+    # ただし送らない限りサーバーの既定に依存し、Strata の版が変わると抽出の挙動が黙って変わる。
+    # そのため、`uv run kijun doctor` で "xhigh" を送って 200 が返ることを確認したら、
+    # config.toml に reasoning_effort = "xhigh" と書き、この既定も "xhigh" に変える。
+    # 実測（2026-11-03、2分5秒の音声1チャンク。プロンプトは同一で、この値だけを変えた）:
+    # - "xhigh"（このときのサーバーの既定でもあった）: 6件。文字起こしが壊れた発話（「感嘆符」が
+    #   「簡単フォーイス」に化けた箇所）に対し stated_reason / applies_when / pass_criterion を null、
+    #   reusable を false にした。所要 950 秒、出力 13,050 トークン（うち約 12,000 が推論）。
+    # - "medium": 発話に無い「フォントサイズ」という語を当てはめた項目を作り、pass_criterion も作って
+    #   reusable を true にした。CLAUDE.md 1章が禁じている推測の混入。所要は "xhigh" の約 1/8。
+    # - "low": 同じ捏造に加え、反対の意味の発言を理由として誤って結び付けた。
+    # - 思考なし（chat_template_kwargs の enable_thinking = false）: その項目を出さなかった（5件）。
+    # 速さでは "medium" が有利だが、上記のとおり推測が混入したので既定にはしない。
+    # プロンプト側で全項目に根拠制約を掛け、文字起こしが壊れた発話の扱いを明記した改訂の後に測り直す。
+    reasoning_effort: str = ""
     # 文字起こしに VRAM を明け渡すための起動・停止コマンド。夜間バッチ（kijun batch run）が
     # Strata を使う手順の前後で実行する。空文字なら何もしない（Strata を手で起動・停止する運用）。
     start_command: str = ""
@@ -93,7 +111,18 @@ class ExtractConfig(_Section):
     # tokens_per_meeting_minute: 従来の 500（係数 1.5 に対応）を 0.55/1.5 の比で換算して切り下げた値。
     tokens_per_character: float = Field(default=0.55, gt=0)
     tokens_per_meeting_minute: int = Field(default=180, gt=0)
+    # extracted_requests.model_name に付ける印。設定を変えた2回の抽出を、同じ会議の中で
+    # 並べて残すために使う（CLAUDE.md 4-4 の「同じ Strata の2回の実行の比較」）。
+    # これが無いと、2回目の kijun extract が1回目の行を削除してしまい、kijun compare が
+    # 比較できない（extract/run.py の delete_requests は (会議ID, model_name) で消すため）。
+    # 例: reasoning_effort = "medium" で流すときに run_label = "medium" を入れる。
+    # 空文字なら model_name は strata.model のまま。request_id にも入るので英数字・._- に限る。
+    run_label: str = Field(default="", pattern=r"^[A-Za-z0-9._-]*$")
     strata: StrataConfig = Field(default_factory=StrataConfig)
+
+    def model_name(self) -> str:
+        """extracted_requests.model_name に入れる名前。run_label があれば + でつなぐ。"""
+        return f"{self.strata.model}+{self.run_label}" if self.run_label else self.strata.model
 
 
 class MatchConfig(_Section):

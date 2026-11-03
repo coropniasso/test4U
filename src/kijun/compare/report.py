@@ -139,7 +139,7 @@ def select_models(
     """比較するモデルを決める。
 
     requested（CLI の --model）があればそれを使う。無ければ、抽出結果があるモデルをすべて使い、
-    設定の extract.strata.model があればそれを左（A）に置く。
+    設定が指す model_name（extract.strata.model に run_label を付けたもの）があればそれを左（A）に置く。
 
     背面が1つになったので、設定から2つのモデル名を読むことはできない。比較したい2回の実行は、
     設定を変えて抽出した結果として DB に別々の model_name で入っているので、
@@ -147,7 +147,7 @@ def select_models(
     """
     if requested:
         return requested
-    configured = cfg.extract.strata.model
+    configured = cfg.extract.model_name()
     if configured in available:
         return [configured, *[m for m in available if m != configured]]
     return list(available)

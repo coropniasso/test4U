@@ -436,3 +436,46 @@ def test_usage_が無ければ_last_usage_は_None():
     ex = StrataExtractor(Config(), FakeTransport([(200, chat_body(EMPTY))]))
     ex.extract(a_chunk())
     assert ex.last_usage is None
+
+
+def test_reasoning_effort_は既定で送らない():
+    # 既定が空文字なのは、"xhigh" を入力として送って 200 が返るかを確認していないため。
+    # 受け付けない値を送ると全チャンクが 400 で失敗するので、動くと分かっている挙動を既定にしてある。
+    transport = FakeTransport([(200, chat_body(EMPTY))])
+    StrataExtractor(Config(), transport).extract(a_chunk())
+    assert "reasoning_effort" not in transport.posts[0]["payload"]
+
+
+def test_reasoning_effort_を書いたらそのまま送る():
+    cfg = Config()
+    cfg.extract.strata.reasoning_effort = "xhigh"
+    transport = FakeTransport([(200, chat_body(EMPTY))])
+    StrataExtractor(cfg, transport).extract(a_chunk())
+    assert transport.posts[0]["payload"]["reasoning_effort"] == "xhigh"
+
+
+def test_run_label_が_model_name_に付く():
+    # 設定を変えた2回の抽出を同じ会議の中に並べて残すための印。これが無いと2回目の extract が
+    # 1回目の行を削除し、kijun compare が比較できない。
+    cfg = Config()
+    cfg.extract.run_label = "medium"
+    transport = FakeTransport([(200, chat_body(EMPTY))])
+    ex = StrataExtractor(cfg, transport)
+    assert ex.model_name == f"{cfg.extract.strata.model}+medium"
+    ex.extract(a_chunk())
+    # API に送るモデルIDには印を付けない（サーバーが知らない名前になる）。
+    assert transport.posts[0]["payload"]["model"] == cfg.extract.strata.model
+
+
+def test_run_label_が空なら_model_name_はモデルIDのまま():
+    assert StrataExtractor(Config(), FakeTransport([])).model_name == Config().extract.strata.model
+
+
+def test_match_が使う_model_name_は_extract_が書くものと一致する():
+    # 食い違うと kijun match が「照合の対象がありません」になり、原因が分かりにくい。
+    from kijun.cli import Provider, _provider_model
+
+    cfg = Config()
+    cfg.extract.run_label = "xhigh"
+    _p, model_name = _provider_model(cfg, Provider.strata)
+    assert model_name == StrataExtractor(cfg, FakeTransport([])).model_name

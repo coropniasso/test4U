@@ -133,3 +133,35 @@ def test_プロンプトは_JSON_だけを返し_items_のオブジェクトで�
 def test_プロンプトは_extracted_requests_の項目を全部説明している():
     for name in VALID:
         assert name in SYSTEM_PROMPT, name
+
+
+def test_推測で補わない規則は_6項目すべてを名指ししている():
+    # 名指しが stated_reason と applies_when の2項目だけだったとき、reasoning_effort を下げた
+    # 実機の実行で、規則が名指ししていない request_summary と pass_criterion に発話に無い語が
+    # 入った（2026-11-03）。規則の射程を文面で確認する。
+    s = SYSTEM_PROMPT
+    head = s.split("# 最も重要な規則", 1)[1].split("# pass_criterion", 1)[0]
+    for name in [
+        "stated_reason",
+        "applies_when",
+        "request_summary",
+        "pass_criterion",
+        "counterpart_role",
+        "artifact_type",
+    ]:
+        assert name in head, name
+    assert "どの項目にも書かない" in s
+
+
+def test_プロンプトは_文字起こしが壊れた発話の扱いを指示している():
+    s = SYSTEM_PROMPT
+    assert "文字起こしが壊れている発話の扱い" in s
+    # 入力が機械の文字起こしであり、誤認識を含むことを述べている
+    assert "聞き取りの誤り" in s
+    # 音や文脈が近い語を当てはめることを禁じている
+    assert "当てはめて書くことは" in s
+    # 壊れていても項目を落とさない（本人が読めば直せるため）
+    assert "items から省いてはいけません" in s
+    # 試験対象の語（「感嘆符」→「簡単フォーイス」）を文面に書いていない。
+    # 書くと、その語の正解を教えることになり、実機での比較が成立しない。
+    assert "簡単フォーイス" not in s and "感嘆符" not in s
