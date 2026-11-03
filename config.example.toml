@@ -54,6 +54,13 @@ provider = "strata"
 # chunk_minutes = 180 / overlap_minutes = 0 に変え、会議全体を1リクエストで渡す。
 chunk_minutes = 25
 overlap_minutes = 2
+# 入力トークン数の概算の係数。既定値は実測1点からの推測で、kijun doctor で置き換えるべきもの。
+# 従来は 1文字 1.5 トークンとしていたが、実機で概算 4,711 に対し実際は 1,646 トークンで約2.9倍の過大評価だった
+# （Qwen3.8-Flash-Next は n-gram 埋め込みテーブルを持ち、日本語のトークン効率が高いと考えられる）。
+# tokens_per_character: 実測 1,646 ÷ 約3,141文字 ≒ 0.52 に少し余裕を持たせた値。
+# tokens_per_meeting_minute: 従来の 500 を 0.55/1.5 の比で換算して切り下げた値（500 × 0.55/1.5 ≒ 183）。
+tokens_per_character = 0.55
+tokens_per_meeting_minute = 180
 
 [extract.strata]
 base_url = "http://localhost:8080"

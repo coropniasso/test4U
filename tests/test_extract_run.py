@@ -177,15 +177,33 @@ def test_check_chunk_input_size_は概算の係数を使う(cfg):
     from kijun.extract.chunk import split_into_chunks
     from kijun.extract.prompt import build_messages
     from kijun.extract.run import check_chunk_input_size
-    from kijun.extract.tokens import TOKENS_PER_JAPANESE_CHARACTER, estimate_messages_tokens
+    from kijun.extract.tokens import estimate_messages_tokens
     from tests.conftest import make_utterances
 
     chunk = split_into_chunks(make_utterances(5), 25, 2)[0]
     system, user = build_messages(chunk, cfg)
-    estimated = estimate_messages_tokens(system, user)
-    assert estimated == int(len(system) * TOKENS_PER_JAPANESE_CHARACTER) + int(
-        len(user) * TOKENS_PER_JAPANESE_CHARACTER
-    )
+    per_char = cfg.extract.tokens_per_character
+    estimated = estimate_messages_tokens(system, user, per_char)
+    assert estimated == int(len(system) * per_char) + int(len(user) * per_char)
     assert check_chunk_input_size(chunk, cfg, None) is None
     assert check_chunk_input_size(chunk, cfg, estimated) is None  # ちょうどなら警告しない
     assert check_chunk_input_size(chunk, cfg, estimated - 1) is not None
+
+
+def test_概算の係数は設定から読む(cfg):
+    from kijun.extract.chunk import split_into_chunks
+    from kijun.extract.run import check_chunk_input_size
+    from tests.conftest import make_utterances
+
+    chunk = split_into_chunks(make_utterances(5), 25, 2)[0]
+    cfg.extract.tokens_per_character = 0.55
+    assert check_chunk_input_size(chunk, cfg, 10000) is None
+    cfg.extract.tokens_per_character = 1000.0
+    assert check_chunk_input_size(chunk, cfg, 10000) is not None
+
+
+def test_概算の係数の既定値():
+    from kijun.config import Config
+
+    c = Config().extract
+    assert c.tokens_per_character == 0.55 and c.tokens_per_meeting_minute == 180

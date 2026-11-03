@@ -71,6 +71,9 @@ MAX_INPUT_MULTIPLIERS = (1, 2, 4)
 # timeout_sec の推奨値を出すときの余裕の倍率と下限
 TIMEOUT_MARGIN = 3
 TIMEOUT_FLOOR_SEC = 600
+# max_tokens の推奨値は、出力見込みのこの倍数。下限は 4096
+MAX_TOKENS_MARGIN = 2
+MAX_TOKENS_FLOOR = 4096
 # 会議1回を1リクエストで渡せると判断する分数（2時間の会議を想定）
 WHOLE_MEETING_MINUTES = 120
 # 会議全体を1リクエストで渡すときに設定する chunk_minutes（2時間に余裕を持たせた値）
@@ -144,15 +147,13 @@ def sample_chunk() -> Chunk:
     return Chunk(index=0, seq_from=0, seq_to=len(SAMPLE_UTTERANCES) - 1, utterances=list(SAMPLE_UTTERANCES))
 
 
-def stretched_chunk(target_user_tokens: int) -> Chunk:
+def stretched_chunk(cfg: Config, target_user_tokens: int) -> Chunk:
     """固定の日本語の文を繰り返して、文字起こし部分が約 target_user_tokens になるチャンクを作る。
 
     システムプロンプトの分はこの長さに含まれない（文字起こしの長さだけを指定する）。
     入力全体の概算は estimate_messages_tokens で別に求める。
     """
-    from kijun.extract.tokens import TOKENS_PER_JAPANESE_CHARACTER
-
-    target_chars = max(1, int(target_user_tokens / TOKENS_PER_JAPANESE_CHARACTER))
+    target_chars = max(1, int(target_user_tokens / cfg.extract.tokens_per_character))
     count = max(1, target_chars // STRETCH_CHARS_PER_UTTERANCE)
     repeated = STRETCH_SENTENCE * (STRETCH_CHARS_PER_UTTERANCE // len(STRETCH_SENTENCE) + 2)
     text = repeated[:STRETCH_CHARS_PER_UTTERANCE]
@@ -187,6 +188,14 @@ def _usage_tokens(response: HttpResponse) -> tuple[int | None, int | None]:
     if not isinstance(usage, dict):
         return None, None
     return usage.get("prompt_tokens"), usage.get("completion_tokens")
+
+
+def _finish_reason(response: HttpResponse) -> str | None:
+    """応答の finish_reason。length なら出力が max_tokens で切れている。"""
+    try:
+        return response.json()["choices"][0].get("finish_reason")
+    except (TransportError, KeyError, IndexError, TypeError, AttributeError):
+        return None
 
 
 def _content(response: HttpResponse) -> str | None:
@@ -395,11 +404,13 @@ def check_schema_enforcement(transport: HttpTransport, cfg: Config) -> CheckResu
 def _measure(transport: HttpTransport, cfg: Config, chunk: Chunk, label: str) -> dict:
     """1回投げて、入力・出力のトークン数と所要秒数を測る。"""
     system, user = build_messages(chunk, cfg)
-    estimated = estimate_messages_tokens(system, user)
+    estimated = estimate_messages_tokens(system, user, cfg.extract.tokens_per_character)
     record: dict = {
         "label": label,
         "utterances": len(chunk.utterances),
         "estimated_input_tokens": estimated,
+        # 送った文字数。tokens_per_character の実測（usage.prompt_tokens ÷ この値）に使う。
+        "input_chars": len(system) + len(user),
     }
     response, error = _probe(transport, cfg, chunk, with_schema=cfg.extract.strata.enforces_json_schema)
     if error is not None:
@@ -419,6 +430,7 @@ def _measure(transport: HttpTransport, cfg: Config, chunk: Chunk, label: str) ->
         record["output_tokens_per_sec"] = round(completion_tokens / response.elapsed_sec, 1)
     if prompt_tokens and response.elapsed_sec > 0:
         record["input_tokens_per_sec"] = round(prompt_tokens / response.elapsed_sec, 1)
+    record["finish_reason"] = _finish_reason(response)
     text = _content(response)
     if text is not None:
         record["classification"] = classify_output(text)[0]
@@ -428,11 +440,11 @@ def _measure(transport: HttpTransport, cfg: Config, chunk: Chunk, label: str) ->
 def check_speed(transport: HttpTransport, cfg: Config) -> CheckResult:
     """手順4: 約1,000トークンと、chunk_minutes 相当の長さで投げ、tokens/s を出す。"""
     title = "4. 速度の実測"
-    chunk_tokens = tokens_for_minutes(cfg.extract.chunk_minutes)
+    chunk_tokens = tokens_for_minutes(cfg.extract.chunk_minutes, cfg.extract.tokens_per_meeting_minute)
     measurements = [
-        _measure(transport, cfg, stretched_chunk(SMALL_REQUEST_TOKENS), f"約{SMALL_REQUEST_TOKENS}トークン"),
+        _measure(transport, cfg, stretched_chunk(cfg, SMALL_REQUEST_TOKENS), f"約{SMALL_REQUEST_TOKENS}トークン"),
         _measure(
-            transport, cfg, stretched_chunk(chunk_tokens),
+            transport, cfg, stretched_chunk(cfg, chunk_tokens),
             f"chunk_minutes={cfg.extract.chunk_minutes} 相当（約{chunk_tokens}トークン）",
         ),
     ]
@@ -466,18 +478,18 @@ def check_max_input(transport: HttpTransport, cfg: Config) -> CheckResult:
     壊れ方は別の問題なので、分けて報告する）。
     """
     title = "5. 最大入力長の実測"
-    base_tokens = tokens_for_minutes(cfg.extract.chunk_minutes)
+    base_tokens = tokens_for_minutes(cfg.extract.chunk_minutes, cfg.extract.tokens_per_meeting_minute)
     attempts: list[dict] = []
     largest_passed: int | None = None
     for multiplier in MAX_INPUT_MULTIPLIERS:
         target = base_tokens * multiplier
-        chunk = stretched_chunk(target)
+        chunk = stretched_chunk(cfg, target)
         system, user = build_messages(chunk, cfg)
         record: dict = {
             "multiplier": multiplier,
             "target_user_tokens": target,
-            "target_minutes": round(minutes_for_tokens(target), 1),
-            "estimated_input_tokens": estimate_messages_tokens(system, user),
+            "target_minutes": round(minutes_for_tokens(target, cfg.extract.tokens_per_meeting_minute), 1),
+            "estimated_input_tokens": estimate_messages_tokens(system, user, cfg.extract.tokens_per_character),
         }
         response, error = _probe(transport, cfg, chunk, with_schema=cfg.extract.strata.enforces_json_schema)
         if error is not None:
@@ -512,7 +524,7 @@ def check_max_input(transport: HttpTransport, cfg: Config) -> CheckResult:
             f"最小の段階（chunk_minutes={cfg.extract.chunk_minutes} 相当、約{base_tokens}トークン）も通りませんでした",
             detail,
         )
-    minutes = round(minutes_for_tokens(largest_passed), 1)
+    minutes = round(minutes_for_tokens(largest_passed, cfg.extract.tokens_per_meeting_minute), 1)
     if detail["all_multipliers_passed"]:
         summary = (
             f"{MAX_INPUT_MULTIPLIERS[-1]}倍でも通りました（会議 約{minutes} 分相当、"
@@ -550,15 +562,137 @@ def _fit_latency(cfg: Config, measurements: list[dict]) -> tuple[float, float, i
     if any("error" in m or not m.get("elapsed_sec") for m in (short, long_)):
         return None
     x1 = short.get("estimated_input_tokens") or SMALL_REQUEST_TOKENS
-    x2 = long_.get("estimated_input_tokens") or tokens_for_minutes(cfg.extract.chunk_minutes)
+    x2 = long_.get("estimated_input_tokens") or tokens_for_minutes(cfg.extract.chunk_minutes, cfg.extract.tokens_per_meeting_minute)
     if x2 <= x1:
         return None
     slope = (long_["elapsed_sec"] - short["elapsed_sec"]) / (x2 - x1)
     if slope <= 0:
         return None
     intercept = max(0.0, short["elapsed_sec"] - x1 * slope)
-    overhead = max(0, x2 - tokens_for_minutes(cfg.extract.chunk_minutes))
+    overhead = max(0, x2 - tokens_for_minutes(cfg.extract.chunk_minutes, cfg.extract.tokens_per_meeting_minute))
     return slope, intercept, overhead
+
+
+def _usable(m: dict) -> bool:
+    """usage の入力・出力トークン数と所要秒数が揃った測定か。"""
+    return (
+        "error" not in m
+        and bool(m.get("input_tokens"))
+        and bool(m.get("output_tokens"))
+        and bool(m.get("elapsed_sec"))
+    )
+
+
+def _recommend_tokens_per_character(rec: dict, measurements: list[dict]) -> None:
+    """検査4の usage.prompt_tokens と送った文字数から、tokens_per_character を実測して推奨値に入れる。"""
+    used = [m for m in measurements if "error" not in m and m.get("input_tokens") and m.get("input_chars")]
+    if not used:
+        return
+    tokens = sum(m["input_tokens"] for m in used)
+    chars = sum(m["input_chars"] for m in used)
+    value = math.ceil(tokens / chars * 100) / 100
+    rec["tokens_per_character"] = {
+        "value": value,
+        "reason": (
+            f"実測値。検査4で送った {chars} 文字（system と user の合計）に対し、サーバーが数えた "
+            f"入力は {tokens} トークン（usage.prompt_tokens）で、{tokens / chars:.3f} トークン/文字。"
+            "小数第2位に切り上げた。固定の文を繰り返した入力からの値なので、"
+            "実際の会議の文字起こしでは多少ずれる可能性がある"
+        ),
+    }
+
+
+def _fit_generation(measurements: list[dict]) -> dict | None:
+    """検査4の2点から、入力1トークンあたりの秒数と出力1トークンあたりの秒数を当てはめる。
+
+    2点・2係数（切片なし）の連立方程式を解く。2点の「出力 ÷ 入力」の比がほぼ同じだと、入力と出力の
+    寄与を分けられない（連立方程式が特異に近づく）。そのとき、または係数が負になるときは、
+    所要時間の合計 ÷ 出力トークンの合計を出力1トークンあたりの秒数とし（プロンプト処理の時間を含む
+    保守的な値）、入力の係数は 0 とする。
+
+    戻り値: sec_per_input, sec_per_output, output_ratio（長い側の 出力 ÷ 入力）, mode, 測定の詳細。
+    usage が取れない、または2点が揃わなければ None。
+    """
+    if len(measurements) < 2:
+        return None
+    short, long_ = measurements[0], measurements[1]
+    if not (_usable(short) and _usable(long_)):
+        return None
+    i1, o1, t1 = short["input_tokens"], short["output_tokens"], short["elapsed_sec"]
+    i2, o2, t2 = long_["input_tokens"], long_["output_tokens"], long_["elapsed_sec"]
+    r1, r2 = o1 / i1, o2 / i2
+    mode = "separated"
+    a = b = 0.0
+    if abs(r1 - r2) / max(r1, r2) >= 0.2:
+        det = i1 * o2 - i2 * o1
+        a = (t1 * o2 - t2 * o1) / det
+        b = (i1 * t2 - i2 * t1) / det
+    if not (a > 0 and b > 0):
+        mode = "output_only"
+        a = 0.0
+        b = (t1 + t2) / (o1 + o2)
+    return {
+        "sec_per_input": a,
+        "sec_per_output": b,
+        "output_ratio": r2,
+        "mode": mode,
+        "input_tokens": i2,
+        "truncated": long_.get("finish_reason") == "length" or short.get("finish_reason") == "length",
+    }
+
+
+def _recommend_with_output_length(
+    cfg: Config, rec: dict, gen: dict, recommended_chunk_minutes: int
+) -> None:
+    """出力長を入れた所要時間の推定から、timeout_sec と max_tokens の推奨値を作る。
+
+    推奨する chunk_minutes の入力トークン数は、検査4の長い側の実測入力（usage.prompt_tokens）を
+    chunk_minutes の比で伸縮して求める。出力トークン数は 入力 × 実測の比 とする。
+    """
+    scale = recommended_chunk_minutes / cfg.extract.chunk_minutes
+    planned_in = int(gen["input_tokens"] * scale)
+    planned_out = int(planned_in * gen["output_ratio"])
+    estimated_sec = gen["sec_per_input"] * planned_in + gen["sec_per_output"] * planned_out
+    suggested = max(TIMEOUT_FLOOR_SEC, int(math.ceil(estimated_sec * TIMEOUT_MARGIN / 60) * 60))
+    max_tokens = max(MAX_TOKENS_FLOOR, int(math.ceil(planned_out * MAX_TOKENS_MARGIN / 1000) * 1000))
+    worst_sec = gen["sec_per_output"] * max_tokens
+    if gen["mode"] == "separated":
+        fit_note = (
+            f"入力と出力を分けて当てはめた（入力 1トークンあたり {gen['sec_per_input']:.4f} 秒、"
+            f"出力 1トークンあたり {gen['sec_per_output']:.4f} 秒）。"
+        )
+    else:
+        fit_note = (
+            "2点の 出力÷入力 の比が近い、または分けると係数が負になるため、入力と出力を分けられなかった。"
+            f"所要時間の合計 ÷ 出力トークンの合計から、出力 1トークンあたり {gen['sec_per_output']:.4f} 秒"
+            "（プロンプト処理の時間を含む）とした。"
+        )
+    truncated_note = (
+        " 注意: 検査4の出力は max_tokens で切れていた（finish_reason = length）ので、出力の比は下限である。"
+        if gen["truncated"]
+        else ""
+    )
+    rec["timeout_sec"] = {
+        "value": suggested,
+        "reason": (
+            f"{fit_note}検査4の長い側の実測では、入力 {gen['input_tokens']} トークンに対し出力の比が "
+            f"{gen['output_ratio']:.2f} 倍。推奨する chunk_minutes={recommended_chunk_minutes} では、"
+            f"入力約{planned_in}トークン、出力約{planned_out}トークンと見込み、推定所要時間は約{estimated_sec:.0f} 秒。"
+            f"その {TIMEOUT_MARGIN} 倍（下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）。"
+            f"なお推奨の max_tokens={max_tokens} まで生成が続いた場合は約{worst_sec:.0f} 秒かかる。"
+            "出力の比は固定の文を繰り返した入力からの値で、実際の会議では異なる可能性がある。"
+            + truncated_note
+        ),
+    }
+    rec["max_tokens"] = {
+        "value": max_tokens,
+        "reason": (
+            f"推奨する chunk_minutes={recommended_chunk_minutes} での出力見込み約{planned_out}トークン"
+            f"（入力約{planned_in}トークン × 実測の比 {gen['output_ratio']:.2f}）の {MAX_TOKENS_MARGIN} 倍"
+            f"（下限 {MAX_TOKENS_FLOOR}、1000 単位に切り上げ）。推論トークンを含む。"
+            + truncated_note
+        ),
+    }
 
 
 def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
@@ -599,7 +733,7 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
         rec["max_input_tokens"] = {
             "value": estimated_total,
             "reason": (
-                f"この長さ（会議 約{round(minutes_for_tokens(largest), 1)} 分相当）までは通った。"
+                f"この長さ（会議 約{round(minutes_for_tokens(largest, cfg.extract.tokens_per_meeting_minute), 1)} 分相当）までは通った。"
                 + (
                     "最大の段階まで通ったので、実際の上限はこれ以上で未確定"
                     if max_input.detail.get("all_multipliers_passed")
@@ -614,7 +748,7 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
         }
 
     if largest:
-        minutes = minutes_for_tokens(largest)
+        minutes = minutes_for_tokens(largest, cfg.extract.tokens_per_meeting_minute)
         if minutes >= WHOLE_MEETING_MINUTES:
             rec["chunk_minutes"] = {
                 "value": WHOLE_MEETING_CHUNK_MINUTES,
@@ -658,10 +792,16 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
         None,
     )
     recommended_chunk_minutes = rec["chunk_minutes"]["value"]
+    _recommend_tokens_per_character(rec, measurements)
+    gen = _fit_generation(measurements)
     fit = _fit_latency(cfg, measurements)
-    if measured and fit is not None:
+    if measured and gen is not None:
+        _recommend_with_output_length(cfg, rec, gen, recommended_chunk_minutes)
+    elif measured and fit is not None:
         slope, intercept, overhead = fit
-        planned_tokens = tokens_for_minutes(recommended_chunk_minutes) + overhead
+        planned_tokens = (
+            tokens_for_minutes(recommended_chunk_minutes, cfg.extract.tokens_per_meeting_minute) + overhead
+        )
         estimated_sec = intercept + slope * planned_tokens
         suggested = max(TIMEOUT_FLOOR_SEC, int(math.ceil(estimated_sec * TIMEOUT_MARGIN / 60) * 60))
         rec["timeout_sec"] = {
@@ -671,7 +811,9 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
                 f"直線で当てはめた（1トークンあたり {slope:.4f} 秒、固定の立ち上がり {intercept:.0f} 秒。"
                 "トークン数は概算）。推奨する chunk_minutes="
                 f"{recommended_chunk_minutes}（約{planned_tokens}トークン）での推定所要時間は約{estimated_sec:.0f} 秒。"
-                f"その {TIMEOUT_MARGIN} 倍（下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）"
+                f"その {TIMEOUT_MARGIN} 倍（下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）。"
+                "注意: サーバーが usage を返さないため、出力長を推定に入れていない"
+                "（実測では出力トークン数のほうが所要時間を支配する）"
             ),
         }
     elif measured:
@@ -681,7 +823,8 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
             "reason": (
                 f"実測した長さの {TIMEOUT_MARGIN} 倍（実測 {measured} 秒。下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）。"
                 "推奨する chunk_minutes での所要時間は推定できていない"
-                "（検査4の2点が揃わない、または長い入力のほうが速いなど直線に当てはまらない）"
+                "（検査4の2点が揃わない、または長い入力のほうが速いなど直線に当てはまらない）。"
+                "出力長を推定に入れていない"
             ),
         }
     else:
@@ -689,7 +832,23 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
             "value": cfg.extract.strata.timeout_sec,
             "reason": "測れなかったので現在の値のまま",
         }
-    order = ["enforces_json_schema", "max_input_tokens", "timeout_sec", "chunk_minutes", "overlap_minutes"]
+    if "max_tokens" not in rec:
+        rec["max_tokens"] = {
+            "value": cfg.extract.strata.max_tokens,
+            "reason": (
+                "測れなかったので現在の値のまま"
+                "（検査4の2点で usage の入力・出力トークン数が取れないと、出力見込みを計算できない）"
+            ),
+        }
+    order = [
+        "enforces_json_schema",
+        "max_input_tokens",
+        "max_tokens",
+        "tokens_per_character",
+        "timeout_sec",
+        "chunk_minutes",
+        "overlap_minutes",
+    ]
     rec = {k: rec[k] for k in order if k in rec}
     return rec
 

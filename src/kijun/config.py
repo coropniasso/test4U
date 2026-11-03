@@ -87,6 +87,12 @@ class ExtractConfig(_Section):
     provider: Literal["strata"] = "strata"
     chunk_minutes: int = 25
     overlap_minutes: int = 2
+    # 入力トークン数の概算に使う係数。既定値は実測1点からの推測であり、`uv run kijun doctor` の
+    # 実測値で置き換えるべきもの。
+    # tokens_per_character: 実測 1,646 トークン ÷ 約3,141文字 ≒ 0.52 に少し余裕を持たせた値。
+    # tokens_per_meeting_minute: 従来の 500（係数 1.5 に対応）を 0.55/1.5 の比で換算して切り下げた値。
+    tokens_per_character: float = Field(default=0.55, gt=0)
+    tokens_per_meeting_minute: int = Field(default=180, gt=0)
     strata: StrataConfig = Field(default_factory=StrataConfig)
 
 

@@ -134,7 +134,7 @@ def check_chunk_input_size(
     if max_input_tokens is None:
         return None
     system, user = build_messages(chunk, cfg)
-    estimated = estimate_messages_tokens(system, user)
+    estimated = estimate_messages_tokens(system, user, cfg.extract.tokens_per_character)
     if estimated <= max_input_tokens:
         return None
     return (

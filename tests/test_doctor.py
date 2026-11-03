@@ -42,6 +42,8 @@ from kijun.extract.tokens import estimate_tokens, tokens_for_minutes
 from kijun.transport import HttpResponse, TransportError
 
 NOW = datetime(2026, 11, 3, 21, 30, 15)
+PER_MIN = Config().extract.tokens_per_meeting_minute
+PER_CHAR = Config().extract.tokens_per_character
 
 ITEM = {
     "seq_from": 0,
@@ -115,18 +117,18 @@ def test_固定の発話で入力を作るので音声が無くても実行で�
 
 
 def test_入力を目標のトークン数に引き伸ばせる():
-    small = stretched_chunk(1000)
-    big = stretched_chunk(50000)
+    small = stretched_chunk(Config(), 1000)
+    big = stretched_chunk(Config(), 50000)
     assert len(big.utterances) > len(small.utterances)
     # 文字起こし部分の概算が目標に近い（係数は概算なので 2 割の幅を許す）
-    text_tokens = sum(estimate_tokens(u.text) for u in big.utterances)
+    text_tokens = sum(estimate_tokens(u.text, PER_CHAR) for u in big.utterances)
     assert 0.8 * 50000 <= text_tokens <= 1.2 * 50000
     # seq が 0 から連続している（プロンプトの番号づけが壊れない）
     assert [u.seq for u in big.utterances] == list(range(len(big.utterances)))
 
 
 def test_引き伸ばしても最低1発話は作る():
-    assert len(stretched_chunk(1).utterances) == 1
+    assert len(stretched_chunk(Config(), 1).utterances) == 1
 
 
 # --- 出力の分類 -------------------------------------------------------------------------------
@@ -308,7 +310,7 @@ def test_手順5_3段階すべて通れば_4倍でも通ったと出す():
     assert len(transport.posts) == len(MAX_INPUT_MULTIPLIERS) == 3
     assert r.detail["all_multipliers_passed"] is True
     assert "4倍でも通りました" in r.summary
-    assert r.detail["largest_passed_user_tokens"] == tokens_for_minutes(25) * 4
+    assert r.detail["largest_passed_user_tokens"] == tokens_for_minutes(25, PER_MIN) * 4
     # 既定の 25 分では 4 倍が 100 分相当なので、2時間はまだ確かめていないと言う
     assert "2時間" in r.summary and "doctor をもう一度" in r.summary
 
@@ -318,7 +320,7 @@ def test_手順5_2段階目で失敗すれば1段階目までを報告して打�
     r = check_max_input(transport, Config())
     assert r.status == STATUS_WARN
     assert len(transport.posts) == 2  # 3段階目は投げない
-    assert r.detail["largest_passed_user_tokens"] == tokens_for_minutes(25)
+    assert r.detail["largest_passed_user_tokens"] == tokens_for_minutes(25, PER_MIN)
     assert r.detail["all_multipliers_passed"] is False
     assert "2倍" in r.summary
 
@@ -328,7 +330,7 @@ def test_手順5_3段階目で失敗すれば2段階目までを報告():
         post_responses=[(200, chat(GOOD_JSON)), (200, chat(GOOD_JSON)), (400, "context length exceeded")]
     )
     r = check_max_input(transport, Config())
-    assert r.detail["largest_passed_user_tokens"] == tokens_for_minutes(25) * 2
+    assert r.detail["largest_passed_user_tokens"] == tokens_for_minutes(25, PER_MIN) * 2
     assert "4倍" in r.summary
 
 
@@ -343,7 +345,7 @@ def test_手順5_時間切れも通らなかった扱いにする():
     transport = FakeTransport(post_responses=[(200, chat(GOOD_JSON)), TransportError("時間切れ")])
     r = check_max_input(transport, Config())
     assert r.status == STATUS_WARN
-    assert r.detail["largest_passed_user_tokens"] == tokens_for_minutes(25)
+    assert r.detail["largest_passed_user_tokens"] == tokens_for_minutes(25, PER_MIN)
 
 
 def test_手順5_200_なら出力が壊れていても長さは通った扱いにする():
@@ -381,7 +383,7 @@ def test_推奨値_すべて通った場合():
     rec = full_report(cfg, transport).recommendations
 
     assert rec["enforces_json_schema"]["value"] is True  # 200 で適合した
-    assert rec["max_input_tokens"]["value"] > tokens_for_minutes(120)
+    assert rec["max_input_tokens"]["value"] > tokens_for_minutes(120, PER_MIN)
     assert rec["timeout_sec"]["value"] == TIMEOUT_FLOOR_SEC  # 10 秒 × 3 は下限未満
     assert rec["chunk_minutes"]["value"] == WHOLE_MEETING_CHUNK_MINUTES
     assert rec["overlap_minutes"]["value"] == 0
@@ -415,11 +417,13 @@ def test_推奨値_スキーマを保証しなければ_false_のまま():
 def test_推奨値_timeout_は実測の3倍を分単位に切り上げる():
     transport = FakeTransport(
         get_response=(200, MODELS_BODY),
-        post_responses=[(200, chat(GOOD_JSON, 1000, 100))],
+        post_responses=[(200, chat(GOOD_JSON))],  # usage が無いので出力長は入れられない
         elapsed_sec=400.0,  # 400 × 3 = 1200 秒
     )
     rec = full_report(Config(), transport).recommendations
     assert rec["timeout_sec"]["value"] == 1200
+    assert "出力長を推定に入れていない" in rec["timeout_sec"]["reason"]
+    assert rec["max_tokens"]["value"] == Config().extract.strata.max_tokens  # 測れないので現在の値
 
 
 def test_推奨値_何も測れなければ現在の値のままにして推測値を書かない():
@@ -467,7 +471,8 @@ def test_表と_JSON_に同じ内容が出る():
     assert data["started_at"] == "2026-11-03T21:30:15"
     assert [c["key"] for c in data["checks"]] == ["models", "minimal", "schema", "speed", "max_input"]
     assert set(data["recommendations"]) == {
-        "enforces_json_schema", "max_input_tokens", "timeout_sec", "chunk_minutes", "overlap_minutes",
+        "enforces_json_schema", "max_input_tokens", "max_tokens", "tokens_per_character",
+        "timeout_sec", "chunk_minutes", "overlap_minutes",
     }
 
 
@@ -494,8 +499,8 @@ def _hand_report(cfg: Config, short_sec, long_sec, chunk_minutes: int = 5, short
     """検査4と検査5の結果を直接組み立てた DoctorReport（実機の数値を再現するため）。"""
     from kijun.doctor import CheckResult, DoctorReport
 
-    long_tokens = long_tokens if long_tokens is not None else tokens_for_minutes(chunk_minutes)
-    base = tokens_for_minutes(chunk_minutes)
+    long_tokens = long_tokens if long_tokens is not None else tokens_for_minutes(chunk_minutes, PER_MIN)
+    base = tokens_for_minutes(chunk_minutes, PER_MIN)
     measurements = []
     for label, sec, tokens in (("short", short_sec, short_tokens), ("long", long_sec, long_tokens)):
         if sec is None:
@@ -520,14 +525,16 @@ def _hand_report(cfg: Config, short_sec, long_sec, chunk_minutes: int = 5, short
 def test_推奨値_timeout_は推奨する_chunk_minutes_での推定所要時間から出す():
     cfg = Config()
     cfg.extract.chunk_minutes = 5
-    rec = build_recommendations(cfg, _hand_report(cfg, 113.64, 253.86))
+    # usage が無い測定。長い側の入力を 2500 トークンとして直線に当てはめる（出力長は入っていない）
+    rec = build_recommendations(cfg, _hand_report(cfg, 113.64, 253.86, long_tokens=2500))
 
     assert rec["chunk_minutes"]["value"] == 15
-    # 15分 = 7500 トークン。傾き 0.0935 秒/トークン、切片 約20 秒 → 約721 秒 → ×3 → 2163 → 2180 秒
-    assert rec["timeout_sec"]["value"] >= 2000
+    # 15分 = 2700 トークン + 上乗せ 1600。傾き 0.0935 秒/トークン、切片 約20 秒 → 約422 秒 → ×3 → 1266 → 1280 秒
+    assert rec["timeout_sec"]["value"] >= 1200
     assert rec["timeout_sec"]["value"] != 780
     reason = rec["timeout_sec"]["reason"]
     assert "直線" in reason and "概算" in reason and "推定所要時間" in reason
+    assert "出力長を推定に入れていない" in reason
 
 
 def test_推奨値_推奨する_chunk_minutes_が実行時と同じでも破綻しない():
@@ -535,7 +542,7 @@ def test_推奨値_推奨する_chunk_minutes_が実行時と同じでも破綻�
     cfg.extract.chunk_minutes = 5
     report = _hand_report(cfg, 100.0, 200.0)
     # 通った長さを 5 分相当だけにして、推奨が 5 のままになるようにする
-    base = tokens_for_minutes(5)
+    base = tokens_for_minutes(5, PER_MIN)
     report.get("max_input").detail["largest_passed_user_tokens"] = base
     rec = build_recommendations(cfg, report)
 
@@ -562,3 +569,110 @@ def test_推奨値_長い入力のほうが速いという異常な実測でも�
 
     assert rec["timeout_sec"]["value"] >= TIMEOUT_FLOOR_SEC
     assert "推定できていない" in rec["timeout_sec"]["reason"]
+
+
+# --- 出力長を入れた推定（実機: 入力 1,646 トークンに対し出力 6,952 トークン） --------------------
+
+
+def _usage_report(cfg: Config, points, finish_reason=None, chunk_minutes: int = 5):
+    """検査4の2点に usage（input_tokens, output_tokens, elapsed_sec）を入れた DoctorReport。"""
+    report = _hand_report(cfg, 1.0, 2.0, chunk_minutes=chunk_minutes, long_tokens=2500)
+    ms = report.get("speed").detail["measurements"]
+    for m, (i, o, t, chars) in zip(ms, points):
+        m.update(input_tokens=i, output_tokens=o, elapsed_sec=t, input_chars=chars)
+        if finish_reason:
+            m["finish_reason"] = finish_reason
+    return report
+
+
+def test_入力と出力の比が違えば_入力と出力の秒数を分けて当てはめる():
+    from kijun.doctor import _fit_generation
+
+    # 入力 1 トークン 0.01 秒、出力 1 トークン 0.02 秒
+    ms = [
+        {"input_tokens": 1000, "output_tokens": 2000, "elapsed_sec": 50.0},
+        {"input_tokens": 3000, "output_tokens": 3000, "elapsed_sec": 90.0},
+    ]
+    gen = _fit_generation(ms)
+    assert gen["mode"] == "separated"
+    assert gen["sec_per_input"] == pytest.approx(0.01) and gen["sec_per_output"] == pytest.approx(0.02)
+    assert gen["output_ratio"] == pytest.approx(1.0)  # 長い側の比
+
+
+def test_入力と出力の比が近ければ分けられないので_出力あたりの秒数にまとめる():
+    from kijun.doctor import _fit_generation
+
+    # 実機の検査4: 比がほぼ同じ 4.2 倍の2点では入力と出力の寄与を分けられない
+    ms = [
+        {"input_tokens": 1646, "output_tokens": 6952, "elapsed_sec": 113.64},
+        {"input_tokens": 4000, "output_tokens": 16800, "elapsed_sec": 280.0},
+    ]
+    gen = _fit_generation(ms)
+    assert gen["mode"] == "output_only" and gen["sec_per_input"] == 0
+    assert gen["sec_per_output"] == pytest.approx((113.64 + 280.0) / (6952 + 16800))
+
+
+def test_usage_が無ければ_出力長の当てはめはしない():
+    from kijun.doctor import _fit_generation
+
+    assert _fit_generation([{"elapsed_sec": 1.0}, {"elapsed_sec": 2.0}]) is None
+    assert _fit_generation([{"input_tokens": 1, "output_tokens": 1, "elapsed_sec": 1.0}]) is None
+
+
+def test_推奨値_timeout_と_max_tokens_は出力見込みから出す():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    report = _usage_report(cfg, [(1646, 6952, 113.64, 3141), (2500, 10500, 170.0, 4800)])
+    rec = build_recommendations(cfg, report)
+
+    minutes = rec["chunk_minutes"]["value"]
+    planned_in = int(2500 * minutes / 5)
+    planned_out = int(planned_in * 10500 / 2500)
+    rate = (113.64 + 170.0) / (6952 + 10500)
+    assert rec["max_tokens"]["value"] == -(-planned_out * 2 // 1000) * 1000
+    expected = planned_out * rate * 3
+    assert rec["timeout_sec"]["value"] == max(600, int(-(-expected // 60) * 60))
+    assert "4.20" in rec["timeout_sec"]["reason"] and "出力約" in rec["timeout_sec"]["reason"]
+    assert str(rec["max_tokens"]["value"]) in rec["timeout_sec"]["reason"]  # max_tokens まで続いた場合
+
+
+def test_推奨値_max_tokens_の下限は_4096():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    report = _usage_report(cfg, [(1000, 100, 10.0, 2000), (2500, 200, 20.0, 5000)])
+    assert build_recommendations(cfg, report)["max_tokens"]["value"] == 4096
+
+
+def test_推奨値_検査4の出力が_length_で切れていたら下限だと書く():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    report = _usage_report(cfg, [(1000, 3000, 30.0, 2000), (2500, 7500, 75.0, 5000)], finish_reason="length")
+    assert "下限" in build_recommendations(cfg, report)["timeout_sec"]["reason"]
+    assert "finish_reason = length" in build_recommendations(cfg, report)["max_tokens"]["reason"]
+
+
+def test_推奨値_tokens_per_character_は_usage_と送った文字数から求める():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    report = _usage_report(cfg, [(1646, 6952, 113.64, 3141), (0, 0, 1.0, 0)])
+    t = build_recommendations(cfg, report)["tokens_per_character"]
+    assert t["value"] == 0.53  # 1646 ÷ 3141 = 0.524 を切り上げ
+    assert "実測値" in t["reason"] and "3141" in t["reason"] and "1646" in t["reason"]
+
+
+def test_推奨値_usage_が無ければ_tokens_per_character_は出さない():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    assert "tokens_per_character" not in build_recommendations(cfg, _hand_report(cfg, 10.0, 20.0, long_tokens=2500))
+
+
+def test_検査4は送った文字数と_finish_reason_を記録する():
+    body = json.dumps(
+        {
+            "choices": [{"message": {"content": GOOD_JSON}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+        }
+    )
+    transport = FakeTransport(post_responses=[(200, body)])
+    m = check_speed(transport, Config()).detail["measurements"][0]
+    assert m["finish_reason"] == "length" and m["input_chars"] > 0
