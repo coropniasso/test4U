@@ -152,7 +152,17 @@ def test_スキーマ未適用なら_db_init_を促す(tmp_path):
     assert r.exit_code == 1 and "db init" in r.output
 
 
-def test_重い依存が無いときは入れ方を示して終了する(tmp_path):
+def test_重い依存が無いときは入れ方を示して終了する(tmp_path, monkeypatch):
+    # extra が入っている環境でも依存が無い状況を作るため、import の仕組みを偽物に差し替える。
+    # extra の有無で skip する方法だと、実機（extra が入っている）で検証されない経路が残る。
+    import types
+
+    from kijun import deps
+
+    def no_module(name, *a, **k):
+        raise ImportError(f"No module named {name!r}")
+
+    monkeypatch.setattr(deps, "importlib", types.SimpleNamespace(import_module=no_module))
     cfg_path = write_config(tmp_path)
     audio = tmp_path / "a.m4a"
     audio.write_bytes(b"x")
