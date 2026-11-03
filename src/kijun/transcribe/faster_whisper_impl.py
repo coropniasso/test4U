@@ -12,15 +12,32 @@ from kijun.config import TranscribeConfig
 from kijun.deps import import_optional
 from kijun.transcribe.audio_decode import SAMPLE_RATE, decode_to_mono_16k
 from kijun.transcribe.base import TranscribedSegment, shift_items
+from kijun.transcribe.cuda_dlls import register_nvidia_dll_directories
 
 
 class FasterWhisperTranscriber:
     """Transcriber の実装。モデルは __init__ で読み込む。"""
 
     def __init__(self, cfg: TranscribeConfig) -> None:
+        # 順序が重要。faster_whisper を import すると ctranslate2 の拡張モジュールが読み込まれ、
+        # その時点で cublas64_12.dll などの解決が行われる。DLL のディレクトリの登録は import より前に
+        # 済ませないと手遅れになる。
+        dll_dirs = register_nvidia_dll_directories()
         fw = import_optional("faster_whisper", "transcribe", "faster-whisper による文字起こし")
         self._cfg = cfg
-        self._model = fw.WhisperModel(cfg.model, device=cfg.device, compute_type=cfg.compute_type)
+        try:
+            self._model = fw.WhisperModel(cfg.model, device=cfg.device, compute_type=cfg.compute_type)
+        except Exception as e:
+            if "cublas" not in str(e).lower() and "cudnn" not in str(e).lower():
+                raise
+            listed = ", ".join(str(d) for d in dll_dirs) or "なし"
+            raise RuntimeError(
+                f"CUDA 12 の DLL を読み込めませんでした（{e}）。"
+                "次のコマンドを実行してください: uv pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 。"
+                "CTranslate2 は CUDA 12 の DLL（cublas64_12.dll など）を要求し、torch の CUDA 13 の DLL"
+                "（cublas64_13.dll）とは名前が違うため、両方を入れて共存させる必要があります。"
+                f"登録を試みたディレクトリ: {listed}"
+            ) from e
 
     def transcribe(self, audio_paths: list[Path]) -> list[TranscribedSegment]:
         result: list[TranscribedSegment] = []

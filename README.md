@@ -55,6 +55,18 @@ CUDA 版を入れるには、`pyproject.toml` の末尾近くにある、コメ�
 5. `uv sync --extra transcribe` を実行する。
 6. `uv run python -c "import torch; print(torch.cuda.is_available())"` が `True` になることを確認する。
 
+### CUDA 12 の DLL を入れる（Windows）
+
+faster-whisper の CTranslate2 は `cublas64_12.dll` と cuDNN（CUDA 12）を要求する。torch の CUDA 13 の DLL とは名前が違うので、両方を入れる。
+
+```powershell
+uv pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+```
+
+`transcribe` extra にも Windows 限定の依存として宣言してあるので、`uv sync --extra transcribe` でも入る。
+入った DLL のディレクトリは、コードが `os.add_dll_directory()` で登録する。**PowerShell で `$env:PATH` を手動で設定する必要はない。**
+起動時に標準エラーへ「NVIDIA の DLL ディレクトリを登録: ...」と出る。「0 件」と出たら、上のコマンドが実行されていない。
+
 ### pyannote の利用条件と Hugging Face のトークン
 
 1. Hugging Face のアカウントでアクセストークンを作る（https://huggingface.co/settings/tokens）。

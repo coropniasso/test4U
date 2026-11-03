@@ -316,6 +316,8 @@ pyannote に PyAV で読んだ波形を渡す理由は、torchaudio が Windows 
 
 `HF_TOKEN` が未設定の場合は、`pyannote/speaker-diarization-3.1`、`pyannote/segmentation-3.0`、`pyannote/speaker-diarization-community-1` の3つのモデルページで利用条件に同意する必要があることを含めたエラーメッセージを出して終了する。
 
+**CUDA 12 の DLL（Windows）。** faster-whisper の計算エンジンである CTranslate2 4.8.2 は `cublas64_12.dll`（CUDA 12 の cuBLAS）と cuDNN を要求する。torch 2.15.0+cu132 が同梱するのは `cublas64_13.dll` で名前が違うため、`uv pip install nvidia-cublas-cu12 nvidia-cudnn-cu12` で CUDA 12 版を併せて入れる（`transcribe` extra に Windows 限定の依存として宣言してあるので、`uv sync --extra transcribe` でも入る）。DLL は `.venv\Lib\site-packages\nvidia\cublas\bin` と `...\cudnn\bin` に入る。コード（`transcribe/cuda_dlls.py` の `register_nvidia_dll_directories()`）が、`nvidia` パッケージの下の `bin` のうち `.dll` を含むものを `os.add_dll_directory()` に登録するので、PATH の手動設定は不要である（PATH への追加はそのウィンドウの間しか有効でなく、タスクスケジューラから起動する夜間バッチでは使えない）。**登録は `import faster_whisper` より前に行う**。import で `ctranslate2` の拡張モジュールが読み込まれ、そこで DLL が解決されるためである。登録したディレクトリは標準エラーに1行出る。`WhisperModel` の構築が cublas / cudnn のエラーで失敗したときは、対処を案内するメッセージを出す。
+
 faster-whisper の `segments` は generator なので、使う前に list にする。generator のまま次の処理に渡すと、モデルを解放した後に評価されて落ちる。
 
 ### 6-2. 区間の突き合わせ（`transcribe/merge.py`）
