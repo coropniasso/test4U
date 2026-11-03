@@ -27,11 +27,12 @@ def transcribe_to_utterances(
     transcriber: Transcriber,
     diarizer: Diarizer,
     min_utterance_sec: float,
+    max_utterance_sec: float = 0.0,
 ) -> list[Utterance]:
     """音声から Utterance のリストを作る。DB にもファイルにも書かない。"""
     segments = transcriber.transcribe(audio_paths)
     turns = diarizer.diarize(audio_paths)
-    return merge_segments(segments, turns, min_utterance_sec)
+    return merge_segments(segments, turns, min_utterance_sec, max_utterance_sec)
 
 
 def transcript_to_json(
@@ -96,7 +97,11 @@ def transcribe_conversation(
     audio_paths = [find_audio_file(cfg, n) for n in conv.source_files]
 
     utterances = transcribe_to_utterances(
-        audio_paths, transcriber, diarizer, cfg.transcribe.min_utterance_sec
+        audio_paths,
+        transcriber,
+        diarizer,
+        cfg.transcribe.min_utterance_sec,
+        cfg.transcribe.max_utterance_sec,
     )
     repo.replace_utterances(con, conversation_id, utterances)
 
@@ -121,12 +126,13 @@ def transcribe_single_audio(
     transcriber: Transcriber,
     diarizer: Diarizer,
     min_utterance_sec: float,
+    max_utterance_sec: float = 0.0,
     now: datetime | None = None,
 ) -> list[Utterance]:
     """単発の試し実行（`transcribe --audio`）。DuckDB には書かず、JSON だけを保存する。音声は移動しない。"""
     now = now or datetime.now()
     utterances = transcribe_to_utterances(
-        [audio_path], transcriber, diarizer, min_utterance_sec
+        [audio_path], transcriber, diarizer, min_utterance_sec, max_utterance_sec
     )
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(

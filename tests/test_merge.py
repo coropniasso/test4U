@@ -112,3 +112,59 @@ def test_複数ファイルの時刻を後ろにずらせる():
     assert (shifted[0].start_sec, shifted[0].end_sec, shifted[0].text) == (101.0, 102.0, "a")
     t = shift_items([turn(0, 1, "SPEAKER_00")], 50.0)
     assert (t[0].start_sec, t[0].end_sec, t[0].speaker_label) == (50.0, 51.0, "SPEAKER_00")
+
+
+def test_間隔が近くても_結合後の長さが_max_utterance_sec_を超える手前で区切られる():
+    turns = [turn(0, 100, "SPEAKER_00")]
+    segs = [seg(0, 10, "a"), seg(10.1, 20, "b"), seg(20.1, 30, "c"), seg(30.1, 40, "d")]
+    out = merge_segments(segs, turns, min_utterance_sec=0.4, max_utterance_sec=30)
+    assert [u.text for u in out] == ["abc", "d"]
+    assert out[0].end_sec == 30
+    assert out[1].start_sec == 30.1
+
+
+def test_実機の再現_125秒の読み上げが上限で複数の発話に分かれる():
+    # 0.5〜124.8秒を、間隔0.2秒で区切られた同一話者の区間列にする
+    segs = []
+    t = 0.5
+    while t < 124.8:
+        end = min(t + 4.8, 124.8)
+        segs.append(seg(t, end, "あ"))
+        t = end + 0.2
+    turns = [turn(0, 125, "SPEAKER_00")]
+    limited = merge_segments(segs, turns, min_utterance_sec=0.4, max_utterance_sec=30)
+    assert len(limited) > 1
+    assert all(u.end_sec - u.start_sec <= 30 for u in limited)
+    assert limited[0].start_sec == 0.5
+    assert limited[-1].end_sec == 124.8
+    assert "".join(u.text for u in limited) == "あ" * len(segs)
+    # 上限なし（0）なら従来どおり1件に結合される
+    unlimited = merge_segments(segs, turns, min_utterance_sec=0.4, max_utterance_sec=0)
+    assert len(unlimited) == 1
+    assert unlimited[0].end_sec - unlimited[0].start_sec > 120
+
+
+def test_1つの区間そのものが上限より長い場合は分割しない():
+    turns = [turn(0, 100, "SPEAKER_00")]
+    out = merge_segments([seg(0, 40, "長い")], turns, min_utterance_sec=0.4, max_utterance_sec=30)
+    assert len(out) == 1
+    assert (out[0].start_sec, out[0].end_sec) == (0, 40)
+    # 長い区間の前後の短い区間は結合されず、別の発話になる
+    out = merge_segments(
+        [seg(0, 5, "a"), seg(5.1, 45, "長い"), seg(45.1, 50, "b")],
+        turns, min_utterance_sec=0.4, max_utterance_sec=30,
+    )
+    assert [u.text for u in out] == ["a", "長い", "b"]
+
+
+def test_話者が変わる箇所では上限に達していなくても区切られる():
+    turns = [turn(0, 5, "SPEAKER_00"), turn(5, 10, "SPEAKER_01")]
+    out = merge_segments([seg(0, 4, "a"), seg(4.1, 4.5, "b"), seg(5.1, 9, "c")], turns, 0.4, max_utterance_sec=30)
+    assert [(u.speaker_label, u.text) for u in out] == [("SPEAKER_00", "ab"), ("SPEAKER_01", "c")]
+
+
+def test_max_utterance_sec_が_0_なら従来と同じ結果():
+    turns = [turn(0, 100, "SPEAKER_00")]
+    segs = [seg(0, 20, "a"), seg(20.1, 40, "b"), seg(40.1, 60, "c")]
+    assert merge_segments(segs, turns, 0.4, max_utterance_sec=0) == merge_segments(segs, turns, 0.4)
+    assert len(merge_segments(segs, turns, 0.4, max_utterance_sec=0)) == 1

@@ -34,6 +34,7 @@ def merge_segments(
     segments: list[TranscribedSegment],
     turns: list[SpeakerTurn],
     min_utterance_sec: float,
+    max_utterance_sec: float = 0.0,
 ) -> list[Utterance]:
     """文字起こしの区間に話者を割り当て、同一話者の連続する区間を結合して Utterance にする。
 
@@ -43,6 +44,11 @@ def merge_segments(
     3. 直前の区間と speaker_label が同じで、かつ「前の区間の終了から次の区間の開始までの間隔」が
        min_utterance_sec 未満なら、1つの発話に結合する。結合した本文は、日本語の文字起こしなので
        区切りを入れずにつなぐ。speaker_label が None の区間は、同じ話者だと判断できないので結合しない。
+       max_utterance_sec が 0 より大きい場合は、結合後の長さ（新しい終了時刻 - 開始時刻）がそれを
+       超えるなら結合せず、次の区間から新しい発話を始める。0 は上限なし。
+       1つの文字起こし区間そのものが max_utterance_sec より長い場合は、分割せずそのまま1つの発話にする。
+       word_timestamps=False で動かしているため区間の内部の時刻が分からず、分割すると文字と時刻の
+       対応が壊れるからである。
     4. seq を 0 から順に振る。
     """
     ordered = sorted(
@@ -55,8 +61,10 @@ def merge_segments(
         if merged:
             prev = merged[-1]
             gap = seg.start_sec - prev[2]
-            if label is not None and label == prev[0] and gap < min_utterance_sec:
-                prev[2] = max(prev[2], seg.end_sec)
+            new_end = max(prev[2], seg.end_sec)
+            within_max = max_utterance_sec <= 0 or (new_end - prev[1]) <= max_utterance_sec
+            if label is not None and label == prev[0] and gap < min_utterance_sec and within_max:
+                prev[2] = new_end
                 prev[3] = prev[3] + text
                 continue
         merged.append([label, seg.start_sec, seg.end_sec, text])

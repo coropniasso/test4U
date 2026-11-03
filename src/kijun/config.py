@@ -51,6 +51,8 @@ class TranscribeConfig(_Section):
     language: str = "ja"
     vad_filter: bool = True
     min_utterance_sec: float = 0.4
+    # 結合した発話の長さの上限（秒）。0 は「上限なし」。
+    max_utterance_sec: float = 30.0
 
 
 class DiarizeConfig(_Section):

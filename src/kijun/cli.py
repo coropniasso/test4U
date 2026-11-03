@@ -223,7 +223,12 @@ def transcribe(
             diarizer = _build_diarizer(cfg)
             out_path = out or (cfg.paths.transcripts / f"{audio.stem}.json")
             utterances = transcribe_single_audio(
-                audio, out_path, transcriber, diarizer, cfg.transcribe.min_utterance_sec
+                audio,
+                out_path,
+                transcriber,
+                diarizer,
+                cfg.transcribe.min_utterance_sec,
+                cfg.transcribe.max_utterance_sec,
             )
             for u in utterances:
                 typer.echo(
