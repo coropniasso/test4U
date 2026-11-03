@@ -191,16 +191,16 @@ def _req(conv: str, request_id: str, model: str, reusable: bool) -> repo.Request
 
 
 def test_ビューは抽出モデルごとに分かれ_会議を二重に数えない(con):
-    # 同じ会議を Qwen と Claude の両方で抽出した場合（パイロットの最初の3週）
+    # 同じ会議を、量子化の違う2つの設定で抽出した場合（compare が比較する状況）
     repo.insert_conversation(con, make_conversation("c1"))
     repo.insert_requests(
         con,
         [
-            _req("c1", "c1#qwen#1", "qwen", True),
-            _req("c1", "c1#qwen#2", "qwen", True),
-            _req("c1", "c1#qwen#3", "qwen", False),
-            _req("c1", "c1#claude#1", "claude", True),
-            _req("c1", "c1#claude#2", "claude", False),
+            _req("c1", "c1#q4#1", "q4", True),
+            _req("c1", "c1#q4#2", "q4", True),
+            _req("c1", "c1#q4#3", "q4", False),
+            _req("c1", "c1#q8#1", "q8", True),
+            _req("c1", "c1#q8#2", "q8", False),
         ],
     )
     rows = con.execute(
@@ -208,18 +208,18 @@ def test_ビューは抽出モデルごとに分かれ_会議を二重に数え�
         "FROM v_weekly_metrics ORDER BY model_name"
     ).fetchall()
     assert len(rows) == 2  # 1つの会議を2モデルで抽出すると2行
-    claude, qwen = rows
-    assert claude == ("claude", 1, 2, 2.0, 0.5)  # 各行が、その会議を1回だけ数える
-    assert qwen[:4] == ("qwen", 1, 3, 3.0)
-    assert qwen[4] == pytest.approx(2 / 3)  # モデルごとに正しい割合（小数）
+    q4, q8 = rows
+    assert q8 == ("q8", 1, 2, 2.0, 0.5)  # 各行が、その会議を1回だけ数える
+    assert q4[:4] == ("q4", 1, 3, 3.0)
+    assert q4[4] == pytest.approx(2 / 3)  # モデルごとに正しい割合（小数）
 
 
 def test_抽出が0件の会議は_model_name_が_NULL_の行として出る(con):
     repo.insert_conversation(con, make_conversation("c1"))
     repo.insert_conversation(con, make_conversation("c2"))
-    repo.insert_requests(con, [_req("c1", "c1#qwen#1", "qwen", True)])
+    repo.insert_requests(con, [_req("c1", "c1#q4#1", "q4", True)])
     rows = con.execute(
         "SELECT setting_format, model_name, conversations, requests, reusable_ratio "
         "FROM v_weekly_metrics ORDER BY model_name NULLS LAST"
     ).fetchall()
-    assert rows == [("f2f", "qwen", 1, 1, 1.0), ("f2f", None, 1, 0, None)]
+    assert rows == [("f2f", "q4", 1, 1, 1.0), ("f2f", None, 1, 0, None)]

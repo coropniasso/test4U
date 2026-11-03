@@ -1,4 +1,9 @@
-"""Qwen と Claude の抽出結果の比較表（作業表 #5、計画書 第8節）。
+"""同じ会議を2回抽出した結果の比較表（作業表 #5、計画書 第8節）。
+
+2026-11-03 の決定で抽出の背面は Strata のみになったので、この表は「Qwen 対 Claude」ではなく
+**同じ Strata で設定を変えた2回の実行**を比べる道具である。比べる対象になるのは、
+量子化の違い、chunk_minutes の違い、enforces_json_schema の違いなど、
+extracted_requests.model_name を変えて2回抽出した結果である。
 
 承認件数はユーザーがレビューして初めて決まる数字なので、このレポートでは出せない。
 出せるのは、レビューのための対照表と、承認を待たずに計算できる数字である。
@@ -133,13 +138,19 @@ def select_models(
 ) -> list[str]:
     """比較するモデルを決める。
 
-    requested があればそれを使う。無ければ、設定の ollama と claude のモデルのうち
-    抽出結果があるものを（Qwen、Claude の順で）使い、1つも無ければ抽出結果のある全モデルを使う。
+    requested（CLI の --model）があればそれを使う。無ければ、抽出結果があるモデルをすべて使い、
+    設定の extract.strata.model があればそれを左（A）に置く。
+
+    背面が1つになったので、設定から2つのモデル名を読むことはできない。比較したい2回の実行は、
+    設定を変えて抽出した結果として DB に別々の model_name で入っているので、
+    どちらを比べるかは `--model` を2回指定して選ぶ。
     """
     if requested:
         return requested
-    preferred = [m for m in (cfg.extract.ollama.model, cfg.extract.claude.model) if m in available]
-    return preferred or available
+    configured = cfg.extract.strata.model
+    if configured in available:
+        return [configured, *[m for m in available if m != configured]]
+    return list(available)
 
 
 def build_report(
@@ -245,7 +256,12 @@ def build_report(
         f"| {_cell(a_name)} |  |",
         f"| {_cell(b_name)} |  |",
         "",
-        "CLAUDE.md 4-4 の判断基準: Qwen の承認件数が Claude の 8 割以上なら Qwen に一本化し、未満なら Claude API を使う。",
+        "2026-11-03 の決定で抽出の背面は Strata のみになったため、CLAUDE.md 4-4 にあった"
+        "「Qwen の承認件数が Claude の8割以上なら一本化」という判断手順は使えません。"
+        "この表は、同じ Strata で設定（量子化、chunk_minutes、enforces_json_schema）を変えた"
+        "2回の実行のどちらを採るかを決めるために使います。"
+        "承認件数そのものを指標として記録するには、CLAUDE.md 6章の"
+        "「LLM の提案文言を修正せず承認した割合」が必要で、その測定には #7（Discord、第2弾）が要ります。",
         "",
     ]
     return "\n".join(lines)

@@ -30,7 +30,8 @@ def row(request_id, model, seq_from, quote, reason=None, applies=None, criterion
     )
 
 
-QWEN, CLAUDE = "qwen3:14b", "claude-sonnet-5-5"
+# 同じ Strata で設定を変えた2回の実行を比較する（量子化の違いを想定したモデル名）
+QWEN, CLAUDE = "qwen3.8-flash-next-q4", "qwen3.8-flash-next-q8"
 
 
 def test_統計の計算():
@@ -82,9 +83,17 @@ def test_対応付けは1対1():
     assert len(p.matched) == 1 and len(p.only_a) == 1 and p.only_b == []
 
 
-def test_モデルの選択(cfg):
-    assert select_models([CLAUDE, QWEN, "x"], cfg) == [QWEN, CLAUDE]  # Qwen、Claude の順
+def test_モデルの選択_設定のモデルを左に置く(cfg):
+    cfg.extract.strata.model = QWEN
+    assert select_models([CLAUDE, QWEN], cfg) == [QWEN, CLAUDE]
+
+
+def test_モデルの選択_設定のモデルが無ければ抽出結果のある全モデル(cfg):
     assert select_models(["x", "y"], cfg) == ["x", "y"]
+
+
+def test_モデルの選択_明示した指定が優先される(cfg):
+    cfg.extract.strata.model = QWEN
     assert select_models([QWEN, CLAUDE], cfg, ["a", "b"]) == ["a", "b"]
 
 

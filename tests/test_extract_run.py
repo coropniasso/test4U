@@ -28,16 +28,16 @@ def test_抽出結果が_グローバルな_seq_で_extracted_requests_に保存
             0: [make_item(3, 4, quote="a", summary="s1", reason="理由あり")],
             1: [make_item(5, 6, quote="b", summary="s2")],  # チャンク1 は seq 23 から
         },
-        model_name="qwen3:14b",
+        model_name="qwen3.8-flash-next",
     )
     run = run_extraction(con, cfg, conv, extractor, now=NOW)
 
     rows = repo.get_requests(con, conv)
     assert [(r.seq_from, r.seq_to) for r in rows] == [(3, 4), (28, 29)]
     assert run.saved_count == 2 and run.chunk_count >= 4
-    assert rows[0].request_id == f"{CID}#qwen3:14b#1"
-    assert rows[1].request_id == f"{CID}#qwen3:14b#2"
-    assert rows[0].model_name == "qwen3:14b"
+    assert rows[0].request_id == f"{CID}#qwen3.8-flash-next#1"
+    assert rows[1].request_id == f"{CID}#qwen3.8-flash-next#2"
+    assert rows[0].model_name == "qwen3.8-flash-next"
     assert rows[0].source_type == "live_conversation"
     assert rows[0].direction is None  # speaker_map が埋まるまで確定しない
     assert rows[0].stated_reason == "理由あり" and rows[1].stated_reason is None
@@ -84,11 +84,11 @@ def test_同じモデルで再抽出すると置き換える(con, cfg, conv):
 
 
 def test_モデルが違えば別々に保存される(con, cfg, conv):
-    run_extraction(con, cfg, conv, FakeExtractor({0: [make_item(1, quote="a")]}, model_name="qwen"), now=NOW)
-    run_extraction(con, cfg, conv, FakeExtractor({0: [make_item(1, quote="a")]}, model_name="claude"), now=NOW)
-    assert repo.list_request_models(con, conv) == ["claude", "qwen"]
+    run_extraction(con, cfg, conv, FakeExtractor({0: [make_item(1, quote="a")]}, model_name="q4"), now=NOW)
+    run_extraction(con, cfg, conv, FakeExtractor({0: [make_item(1, quote="a")]}, model_name="q8"), now=NOW)
+    assert repo.list_request_models(con, conv) == ["q4", "q8"]
     ids = {r.request_id for r in repo.get_requests(con, conv)}
-    assert ids == {f"{CID}#qwen#1", f"{CID}#claude#1"}  # model_name を含むので衝突しない
+    assert ids == {f"{CID}#q4#1", f"{CID}#q8#1"}  # model_name を含むので衝突しない
 
 
 def test_item_evidence_に紐付いた結果がある場合は置き換えない(con, cfg, conv):

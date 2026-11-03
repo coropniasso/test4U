@@ -259,10 +259,10 @@ def test_dry_run_で既存項目が無い抽出結果は末尾に並ぶ(con, cfg
 
 
 def test_model_name_を指定すると_そのモデルの抽出結果だけを照合する(con, cfg, conv):
-    add_request(con, "qwen#1", SUMMARY_A, model="qwen")
-    add_request(con, "claude#1", SUMMARY_B, model="claude")
-    results = link_requests(con, cfg, conv, FakeEmbedder(), model_name="qwen", now=NOW)
-    assert [r.request_id for r in results] == ["qwen#1"]
+    add_request(con, "q4#1", SUMMARY_A, model="q4")
+    add_request(con, "q8#1", SUMMARY_B, model="q8")
+    results = link_requests(con, cfg, conv, FakeEmbedder(), model_name="q4", now=NOW)
+    assert [r.request_id for r in results] == ["q4#1"]
 
 
 def test_抽出から照合までつながる(con, cfg, conv):

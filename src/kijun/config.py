@@ -60,26 +60,27 @@ class DiarizeConfig(_Section):
     num_speakers: int = 0
 
 
-class OllamaConfig(_Section):
-    base_url: str = "http://localhost:11434"
-    model: str = "qwen3:14b"
-    keep_alive: int = 0
-    timeout_sec: int = 900
-
-
-class ClaudeConfig(_Section):
-    model: str = "claude-sonnet-5-5"
-    max_tokens: int = 16000
-    effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
-    timeout_sec: int = 600
+class StrataConfig(_Section):
+    base_url: str = "http://localhost:8080"
+    chat_path: str = "/v1/chat/completions"
+    model: str = "qwen3.8-flash-next"
+    timeout_sec: int = 3600
+    enforces_json_schema: bool = False
+    # 0 は「未確認」を表す（TOML に null が無いため。diarize.num_speakers と同じ扱い）。
+    # 未確認のときは chunk_minutes の妥当性を検査しない。
+    max_input_tokens: int = 0
+    # 文字起こしに VRAM を明け渡すための起動・停止コマンド（第2弾の夜間バッチで使う）。
+    # 第1弾では、この2つを読む処理はまだ無い。空文字なら何もしない。
+    start_command: str = ""
+    stop_command: str = ""
 
 
 class ExtractConfig(_Section):
-    provider: Literal["ollama", "claude"] = "ollama"
+    # 値は1つだが Literal のままにする（将来背面を足すときの型の受け皿）。
+    provider: Literal["strata"] = "strata"
     chunk_minutes: int = 25
     overlap_minutes: int = 2
-    ollama: OllamaConfig = Field(default_factory=OllamaConfig)
-    claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
+    strata: StrataConfig = Field(default_factory=StrataConfig)
 
 
 class MatchConfig(_Section):

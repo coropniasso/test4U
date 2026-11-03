@@ -26,9 +26,15 @@ def test_計画書の主な既定値():
     assert c.extract.overlap_minutes == 2
     assert c.match.similarity_threshold == 0.85
     assert c.retention.audio_days == 30
-    assert c.extract.ollama.keep_alive == 0
-    assert c.extract.claude.model == "claude-sonnet-5-5"
-    assert c.extract.claude.effort == "low"
+    assert c.extract.provider == "strata"
+    assert c.extract.strata.base_url == "http://localhost:8080"
+    assert c.extract.strata.chat_path == "/v1/chat/completions"
+    assert c.extract.strata.model == "qwen3.8-flash-next"
+    assert c.extract.strata.timeout_sec == 3600
+    # 既定は「保証しない」「未確認」の安全側。kijun doctor の実測で書き換える。
+    assert c.extract.strata.enforces_json_schema is False
+    assert c.extract.strata.max_input_tokens == 0
+    assert c.extract.strata.start_command == "" and c.extract.strata.stop_command == ""
     assert c.settings.formats == ["f2f", "call"]
 
 

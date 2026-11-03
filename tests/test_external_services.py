@@ -1,4 +1,4 @@
-"""実機（GPU、Ollama、Claude API、Hugging Face）でだけ動かす確認。
+"""実機（GPU、Strata の推論サーバー、Hugging Face）でだけ動かす確認。
 
 `uv run pytest` の既定では実行しない（pyproject.toml の addopts で除外している）。
 実機で動かすには、例えば次のようにする。
@@ -6,6 +6,9 @@
     $env:KIJUN_TEST_AUDIO = "C:/path/to/5min.m4a"
     uv run pytest -m requires_gpu
     uv run pytest -m requires_network
+
+Strata の実測は、このテストよりも `uv run kijun doctor` の方が詳しい結果を出す。
+こちらは「つながるか」だけを見る。
 """
 
 from __future__ import annotations
@@ -50,23 +53,11 @@ def test_pyannote_で話者ラベルが取れる():
 
 
 @pytest.mark.requires_network
-def test_Ollama_で抽出が_JSON_として取れる():
-    from kijun.extract.ollama_impl import OllamaExtractor
+def test_Strata_で抽出が_JSON_として取れる():
+    from kijun.extract.strata_impl import StrataExtractor
 
     chunk = split_into_chunks(make_utterances(5), 25, 2)[0]
-    result = OllamaExtractor(Config()).extract(chunk)
-    assert isinstance(result.items, list)
-
-
-@pytest.mark.requires_network
-def test_Claude_API_で抽出が取れる():
-    pytest.importorskip("anthropic")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        pytest.skip("ANTHROPIC_API_KEY が未設定")
-    from kijun.extract.claude_impl import ClaudeExtractor
-
-    chunk = split_into_chunks(make_utterances(5), 25, 2)[0]
-    result = ClaudeExtractor(Config()).extract(chunk)
+    result = StrataExtractor(Config()).extract(chunk)
     assert isinstance(result.items, list)
 
 

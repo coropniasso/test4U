@@ -32,8 +32,9 @@ app.add_typer(db_app, name="db")
 
 
 class Provider(str, Enum):
-    ollama = "ollama"
-    claude = "claude"
+    """抽出の背面。2026-11-03 の決定で Strata のみ。将来背面を足すときの受け皿として残す。"""
+
+    strata = "strata"
 
 
 ConversationOpt = Annotated[
@@ -102,13 +103,11 @@ def _build_diarizer(cfg: Config):
 
 
 def _build_extractor(cfg: Config, provider: Provider):
-    if provider == Provider.ollama:
-        from kijun.extract.ollama_impl import OllamaExtractor
+    if provider != Provider.strata:
+        raise _fail(f"未対応の extract.provider です: {provider.value}")
+    from kijun.extract.strata_impl import StrataExtractor
 
-        return OllamaExtractor(cfg)
-    from kijun.extract.claude_impl import ClaudeExtractor
-
-    return ClaudeExtractor(cfg)
+    return StrataExtractor(cfg)
 
 
 def _build_embedder(cfg: Config):
@@ -120,9 +119,9 @@ def _build_embedder(cfg: Config):
 
 
 def _provider_model(cfg: Config, provider: Provider | None) -> tuple[Provider, str]:
+    """背面と、その背面が extracted_requests.model_name に入れるモデル名を返す。"""
     p = provider or Provider(cfg.extract.provider)
-    model = cfg.extract.ollama.model if p == Provider.ollama else cfg.extract.claude.model
-    return p, model
+    return p, cfg.extract.strata.model
 
 
 # --- db ----------------------------------------------------------------------
