@@ -72,6 +72,10 @@ class StrataConfig(_Section):
     # 0 は「未確認」を表す（TOML に null が無いため。diarize.num_speakers と同じ扱い）。
     # 未確認のときは chunk_minutes の妥当性を検査しない。
     max_input_tokens: int = 0
+    # 1リクエストの出力トークン数の上限（推論トークンを含む）。0 は上限なし（payload に入れない）。
+    # 既定値 32000 は実測1点（入力1,646トークンに対し出力6,952トークン）からの推測であり、
+    # 実機で completion_tokens の実測が取れ次第、見直す。
+    max_tokens: int = Field(default=32000, ge=0)
     # 文字起こしに VRAM を明け渡すための起動・停止コマンド。夜間バッチ（kijun batch run）が
     # Strata を使う手順の前後で実行する。空文字なら何もしない（Strata を手で起動・停止する運用）。
     start_command: str = ""

@@ -241,6 +241,46 @@ def test_Strata_のリクエストの形():
     ]
 
 
+def test_max_tokens_を既定で送る():
+    # 既定値 32000 は実測1点からの推測。上限が無いと n_ctx まで走り得る。
+    transport = FakeTransport([(200, chat_body(EMPTY))])
+    StrataExtractor(Config(), transport).extract(a_chunk())
+    assert transport.posts[0]["payload"]["max_tokens"] == 32000
+
+
+def test_max_tokens_が_0_なら送らない():
+    cfg = Config()
+    cfg.extract.strata.max_tokens = 0
+    transport = FakeTransport([(200, chat_body(EMPTY))])
+    StrataExtractor(cfg, transport).extract(a_chunk())
+    assert "max_tokens" not in transport.posts[0]["payload"]
+
+
+def test_finish_reason_が_length_なら標準エラーに出し_例外にはしない(capsys):
+    body = json.dumps(
+        {"choices": [{"message": {"content": '{"items": []}'}, "finish_reason": "length"}]}
+    )
+    transport = FakeTransport([(200, body)])
+    assert StrataExtractor(Config(), transport).extract(a_chunk()).items == []
+    err = capsys.readouterr().err
+    assert "max_tokens に達して切れた" in err and "extract.strata.max_tokens" in err
+
+
+def test_finish_reason_が_stop_なら警告しない(capsys):
+    body = json.dumps(
+        {"choices": [{"message": {"content": '{"items": []}'}, "finish_reason": "stop"}]}
+    )
+    StrataExtractor(Config(), FakeTransport([(200, body)])).extract(a_chunk())
+    assert "max_tokens に達して" not in capsys.readouterr().err
+
+
+def test_content_が_null_なら読めない出力として扱う():
+    body = json.dumps({"choices": [{"message": {"content": None}, "finish_reason": "length"}]})
+    transport = FakeTransport([(200, body), (200, body)])
+    with pytest.raises(ExtractionError, match="2 回とも"):
+        StrataExtractor(Config(), transport).extract(a_chunk())
+
+
 def test_プロンプトの文面は_prompt_py_のものをそのまま使う():
     transport = FakeTransport([(200, chat_body(EMPTY))])
     cfg = Config()

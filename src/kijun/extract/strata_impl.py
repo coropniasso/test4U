@@ -44,6 +44,11 @@ def build_payload(cfg: Config, chunk: Chunk, enforces_json_schema: bool) -> dict
         "temperature": 0,
         "stream": False,
     }
+    # 0 は「上限なし」。そのときは max_tokens を送らない。上限が無いと、推論トークンを含む生成が
+    # n_ctx（実機で 204,800）まで走り得る（実機で 2,383 秒経っても終わらなかった事例がある）。
+    # 既定値 32000 は実測1点からの推測である（設定 extract.strata.max_tokens）。
+    if cfg.extract.strata.max_tokens > 0:
+        payload["max_tokens"] = cfg.extract.strata.max_tokens
     if enforces_json_schema:
         # 対応していないサーバーが 400 を返す可能性があるので、保証すると宣言されたときだけ付ける。
         payload["response_format"] = {
@@ -98,7 +103,9 @@ class StrataExtractor:
         except TransportError as e:
             raise ExtractionError(str(e)) from e
         try:
-            return body["choices"][0]["message"]["content"]
+            # 推論の途中で max_tokens に達すると content が null や空になり得る。その場合は空文字にして
+            # 後段の修復に任せる（読めなければ失敗として記録される）。
+            return body["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as e:
             keys = list(body) if isinstance(body, dict) else type(body).__name__
             raise ExtractionError(
@@ -106,6 +113,22 @@ class StrataExtractor:
                 f"（最上位のキー: {keys}）。設定の extract.strata.chat_path が正しいかを "
                 "`uv run kijun doctor` で確認してください。"
             ) from e
+
+    def _report_truncation(self, response, chunk: Chunk) -> None:
+        """finish_reason が length なら、出力が max_tokens に達して切れたことを標準エラーに出す。
+
+        例外にはしない。途中まで読める出力は repair.py が最後の完全な要素まで切り詰める。
+        """
+        try:
+            reason = response.json()["choices"][0].get("finish_reason")
+        except (TransportError, KeyError, IndexError, TypeError, AttributeError):
+            return
+        if reason == "length":
+            print(
+                f"警告: 出力が max_tokens に達して切れた（発話 {chunk.seq_from}〜{chunk.seq_to}）。"
+                "`extract.strata.max_tokens` を上げるか `chunk_minutes` を下げてください",
+                file=sys.stderr,
+            )
 
     def _report_usage(self, response) -> None:
         """サーバーが返したトークン数を標準エラーに出す。返さない場合はそのことを出す。"""
@@ -137,6 +160,7 @@ class StrataExtractor:
         for attempt in range(1, 2 + RETRY_COUNT):
             response = self._post(payload)
             self._report_usage(response)
+            self._report_truncation(response, chunk)
             text = self._message_content(response)
             try:
                 parsed = parse_with_repair(text)
