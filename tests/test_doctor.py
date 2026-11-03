@@ -635,7 +635,7 @@ def test_推奨値_timeout_と_max_tokens_は出力見込みから出す():
     expected = max_tokens / slowest * 1.5
     assert rec["timeout_sec"]["value"] == max(600, int(-(-expected // 60) * 60))
     reason = rec["timeout_sec"]["reason"]
-    assert "最も遅い生成速度" in reason and "4.4倍" in reason and "定数倍では決めていない" in reason
+    assert "最も遅い生成速度" in reason and "約4.9倍" in reason and "定数倍では決めていない" in reason
     assert "4.20" in reason
 
 
@@ -701,3 +701,35 @@ def test_検査4は送った文字数と_finish_reason_を記録する():
     transport = FakeTransport(post_responses=[(200, body)])
     m = check_speed(transport, Config()).detail["measurements"][0]
     assert m["finish_reason"] == "length" and m["input_chars"] > 0
+
+
+def test_推奨する_max_tokens_は_実測した出力トークン数を下回らない():
+    """出力見込みが実測より小さく出ても、推奨値は実測 × 2 を下回らない。
+
+    推奨値が実測を下回ると、その値を config.toml に書いた瞬間に全チャンクが max_tokens に達し、
+    答えが収まらずに失敗する。出力見込みは検査4の固定の文を繰り返した入力から出した比に
+    依存しており、実際の抽出の出力より小さくなり得る。
+    """
+    from kijun.doctor import MAX_TOKENS_MARGIN, build_recommendations
+
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    # 出力の比が小さい（出力 ÷ 入力 = 0.1）のに、実測の出力そのものは 13,050 トークンある場合。
+    report = _usage_report(cfg, [(1000, 1300, 20.0, 1900), (130500, 13050, 200.0, 240000)])
+    rec = build_recommendations(cfg, report)
+    assert rec["max_tokens"]["value"] >= 13050 * MAX_TOKENS_MARGIN
+    assert "13050" in rec["max_tokens"]["reason"]
+
+
+def test_推奨する_max_tokens_がいまの設定より小さいときは注意を書く():
+    """doctor が測れるのは doctor 自身が投げた入力に対する出力だけなので、下げるなと書く。"""
+    from kijun.doctor import build_recommendations
+
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    cfg.extract.strata.max_tokens = 20000
+    report = _usage_report(cfg, [(1000, 100, 20.0, 1900), (2000, 200, 30.0, 3800)])
+    rec = build_recommendations(cfg, report)
+    assert rec["max_tokens"]["value"] < 20000
+    assert "下げないこと" in rec["max_tokens"]["reason"]
+    assert "13,050" in rec["max_tokens"]["reason"]
