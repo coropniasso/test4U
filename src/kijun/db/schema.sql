@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 CREATE SEQUENCE IF NOT EXISTS review_log_seq START 1;
 
 -- 会議ごと・抽出モデルごとの抽出件数と reusable の割合、形式別の比較に使う。
--- model_name で分けるのは、Qwen と Claude の両方で抽出した会議が二重に数えられないようにするため。
+-- model_name で分けるのは、設定を変えて2回抽出した会議が二重に数えられないようにするため。
 -- 1つの会議を2モデルで抽出すると2行になり、各行がその会議を1回だけ数える。
 -- 抽出が1件も無い会議は、model_name が NULL、requests が 0 の行になる。
 CREATE OR REPLACE VIEW v_weekly_metrics AS

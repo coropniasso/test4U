@@ -8,7 +8,7 @@
 | 作業表 | 内容 | サブコマンド |
 |---|---|---|
 | #4 | 文字起こし（faster-whisper）と話者分離（pyannote.audio） | `transcribe` |
-| #5 | Qwen（Ollama）と Claude API による抽出と、結果の比較 | `extract`、`compare` |
+| #5 | Strata（Qwen3.8-Flash-Next）による抽出と、設定を変えた2回の実行の比較 | `doctor`、`extract`、`compare` |
 | #6 | DuckDB のスキーマ | `db init` |
 | #9 | 音声の30日削除 | `purge-audio` |
 
@@ -30,11 +30,10 @@ copy config.example.toml config.toml   # 必要な項目だけ書き換える。
 | 用途 | コマンド | 入るもの |
 |---|---|---|
 | 文字起こしと話者分離 | `uv sync --extra transcribe` | faster-whisper、pyannote.audio、torch、torchaudio |
-| Ollama での抽出 | `uv sync --extra extract-ollama` | httpx |
-| Claude API での抽出 | `uv sync --extra extract-claude` | anthropic |
+| 抽出（Strata への通信）と `doctor` | `uv sync --extra extract` | httpx |
 | 埋め込みによる照合 | `uv sync --extra match` | sentence-transformers |
 
-複数の extra を同時に入れるときは `uv sync --extra transcribe --extra extract-ollama` のように並べる。
+複数の extra を同時に入れるときは `uv sync --extra transcribe --extra extract` のように並べる。
 extra が足りない状態でサブコマンドを実行すると、どの extra を入れればよいかを示すエラーで終了する。
 
 ### torch を CUDA 版にする（Windows）
@@ -59,8 +58,20 @@ CUDA 版を入れるには、`pyproject.toml` の末尾近くにある、コメ�
 3. https://huggingface.co/pyannote/segmentation-3.0 のページでも利用条件に同意する。両方に同意しないと、モデルの取得が失敗する。
 4. PowerShell で `$env:HF_TOKEN = "hf_..."` を実行する。
 
-Claude API で抽出する場合は、`$env:ANTHROPIC_API_KEY = "sk-ant-..."` を設定する。
-Console で月額の上限金額を設定してから使うこと。秘密情報は環境変数だけで渡し、設定ファイルには書かない。
+抽出は Strata（ローカルの推論サーバー）に対して行うので、API キーは要らない。秘密情報は `HF_TOKEN` だけで、環境変数で渡し、設定ファイルには書かない。
+
+### Strata と Qwen3.8-Flash-Next
+
+抽出の背面は、Strata で Qwen3.8-Flash-Next をローカル実行する（2026-11-03 決定。Ollama と Claude API は使わない）。
+
+- Strata は MoE 向けのローカル推論エンジンで、動的オフロードで大きい MoE を一般向けの PC で動かす。API サーバーの既定ポートは 8080。
+- Qwen3.8-Flash-Next は 125B の MoE（1トークンあたりの活性は約 6B）で、ネイティブの文脈長は 262,144 トークン。
+
+**動くかどうかは確かめられていない。** Unsloth はこのモデルに「1bit量子化で最低 75GB の RAM」としており、この PC は 64GB で 11GB 足りない。また Strata の API 仕様（構造化出力に対応するか、OpenAI 互換のパスが何か）も、実装時に確認できていない。
+
+そのため、設定には推測値を書かず、**`uv run kijun doctor` で実測してから `config.toml` に書く**手順にしてある。`doctor` は DuckDB も音声も GPU 用の依存も要らないので、Strata を起動すればすぐ実行できる。下の確認の順序では、torch を入れる前に `doctor` を実行する。
+
+動かなかった場合は、量子化を下げる・オフロードの設定を変えるなどでローカル実行の維持を試す。クラウドへの退避は実装していない。
 
 ## ユーザーが実機で行う確認の順序
 
@@ -72,13 +83,20 @@ Console で月額の上限金額を設定してから使うこと。秘密情報
 | 2 | `uv sync` | `uv run kijun --help` がサブコマンド一覧を出す |
 | 3 | `uv run pytest` | すべて通る（GPU とネットワークが要るテストはスキップされる） |
 | 4 | `uv run kijun db init` | `data/kijun.duckdb` ができ、テーブルが10個とビューが1つある |
-| 5 | `pyproject.toml` の torch のインデックスを確認して `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
-| 6 | Hugging Face で pyannote の2つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
-| 7 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する（CLAUDE.md 7章の未検証事項） |
-| 8 | `ollama list` で Qwen のタグを確認し、`config.toml` に書く | — |
-| 9 | 2時間の音声で `uv run kijun extract --provider ollama` | 抽出が JSON として取れる。VRAM が足りるかを記録する（CLAUDE.md 7章の未検証事項） |
-| 10 | `ANTHROPIC_API_KEY` を設定し、Console で月額上限を設定して `--provider claude` | 抽出が取れる。実際の費用を記録し、計画書 7-6 の概算と比べる |
-| 11 | `uv run kijun compare` | 対照表の Markdown が出る |
+| 5 | Strata を入れ、Qwen3.8-Flash-Next を取得して API サーバーを起動する | サーバーが起動する（既定ポート 8080）。**ここが最大の関門**。Unsloth の 75GB に対してこの PC は 64GB なので、起動しない・極端に遅い可能性がある |
+| 6 | `uv sync --extra extract` | `httpx` が入る |
+| 7 | `uv run kijun doctor` | 接続・スキーマ適合・速度・最大入力長の実測結果と、推奨値が出る。接続できなければ `config.toml` の `base_url` と `chat_path` を直して再実行する |
+| 8 | `doctor` が出した推奨値を `config.toml` に書く | `enforces_json_schema` / `max_input_tokens` / `timeout_sec` / `chunk_minutes` / `overlap_minutes` の5つ |
+| 9 | `doctor` の結果を `CLAUDE.md` 7章に書き込む | 未検証事項2件（Strata がスキーマ適合を保証するか、このモデルが 64GB で動くか）への回答になる |
+| 10 | `pyproject.toml` の torch のインデックスのコメントを外し、タグを確認して `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
+| 11 | Hugging Face で pyannote の2つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
+| 12 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する |
+| 13 | 音声を inbox に置いて `uv run kijun ingest` → `uv run kijun transcribe --conversation <ID>` | `utterances` に発話が入る |
+| 14 | `uv run kijun extract --conversation <ID>` | 抽出が `extracted_requests` に入る。`data/extract_logs/` の JSON で、修復したチャンク数と失敗したチャンク数を確認する |
+| 15 | `uv sync --extra match` して `uv run kijun match --conversation <ID> --dry-run` | 最類似の既存項目と類似度の一覧が出る（初回は既存項目が0件なので全件が新規候補） |
+| 16 | `config.toml` の `model` を変えてもう一度 `extract` し、`uv run kijun compare --conversation <ID>` | 対照表の Markdown が出る |
+
+手順5から9を手順10より前に置いてある理由は2つある。(1) Strata が 64GB で動くかどうかが最も不確かな部分で、動かないなら他の作業の前提が変わる。(2) `doctor` は音声も DB も GPU 用の依存も要らないので、torch の CUDA 版（数GB）を入れる前に、抽出が成立するかどうかを知れる。
 
 補足:
 
@@ -89,15 +107,18 @@ Console で月額の上限金額を設定してから使うこと。秘密情報
   - DB ファイルを削除してしまった場合は、`uv run kijun db init` でスキーマを作り直してから、`uv run kijun restore-transcript --all` で `conversations` と `utterances` を文字起こしの JSON（`[paths].transcripts`）から復元する。文字起こしをやり直す必要は無い（GPU 時間を使わない）。
   - ただし、`extracted_requests`、`knowledge_items`、`item_evidence`、`speaker_map` などは JSON に入っていないので復元されない。復元後に `kijun extract` と `kijun match` をやり直すこと。レビュー済みの `knowledge_items` を失うので、DB ファイルの削除は最後の手段にする（先に上の `DROP TABLE embeddings` で直す）。
 - 手順4の10テーブルは、CLAUDE.md 5章の8テーブルに、`schema_version` と `embeddings` の2テーブルを足したものである。ビューは `v_weekly_metrics`（抽出モデルごとの週次の指標）の1つ。
-- 手順7の `--audio` は DuckDB に書かず、結果を標準出力と JSON に出すだけである。VRAM 使用量は、実行中に別の端末で `nvidia-smi` を実行して記録する。
-- 手順7、9で記録した処理時間と VRAM 使用量は、CLAUDE.md 7章の未検証事項「Qwen の最新版と、VRAM 12GB での実際のメモリ使用量・処理時間」と「pyannote.audio が Windows + CUDA 環境で問題なく動くか」への回答になる。結果を CLAUDE.md 7章に書き込む。
-- 手順10の Claude 側の抽出は、動作確認として `claude-sonnet-5-5`（`effort = "low"`）を使う。承認件数が足りなければ `config.toml` の `extract.claude.effort` を `medium` に上げる。
+- 手順12の `--audio` は DuckDB に書かず、結果を標準出力と JSON に出すだけである。VRAM 使用量は、実行中に別の端末で `nvidia-smi` を実行して記録する。
+- 手順12で記録した処理時間と VRAM 使用量は、CLAUDE.md 7章の未検証事項「pyannote.audio が Windows + CUDA 環境で問題なく動くか」への回答になる。手順7の `doctor` の結果は「Strata が JSON スキーマに従った出力を保証するか」と「Qwen3.8-Flash-Next が 12GB VRAM ＋ 64GB RAM で動くか、動く場合の tokens/s と最大入力長」への回答になる。どちらも結果を CLAUDE.md 7章に書き込む。
+- 手順8で `chunk_minutes` を 180 にできるのは、`doctor` の手順5で2時間（約6万トークン）相当が1リクエストで通った場合だけである。既定の `chunk_minutes = 25` では、`doctor` が試す最大（4倍）でも100分相当にしかならず、2時間は確かめられない。確かめるには `chunk_minutes` を 30 以上にして `doctor` をもう一度実行する。`doctor` の出力にもそのことが出る。
+- 手順14で修復したチャンクが多い場合、背面が壊れた JSON を返している。`doctor` の手順3が「200 でスキーマに適合」と出ていれば `enforces_json_schema = true` にすると減る可能性がある。
 - `uv run pytest -m requires_gpu`、`uv run pytest -m requires_network` で、実機でだけ動く確認用のテストを実行できる（`KIJUN_TEST_AUDIO` に試験用の音声のパスを設定する）。
 
 ### VRAM の扱い
 
-faster-whisper・pyannote と Qwen は、同時に VRAM に載せない。`transcribe` と `extract` は別のプロセスとして順に実行する。
-プロセスが終われば OS が GPU メモリを解放する。Ollama は、リクエストに `keep_alive: 0` を付けて、1回の抽出が終わるとモデルをアンロードさせる。
+faster-whisper・pyannote と Qwen3.8-Flash-Next は、同時に VRAM に載せない。`transcribe` と `extract` は別のプロセスとして順に実行する。
+プロセスが終われば OS が GPU メモリを解放する。
+
+Strata に Ollama の `keep_alive: 0` に相当するアンロードの手段があるかは確認できていない。そのため、Strata をプロセスごと起動・停止する手段を設定（`extract.strata.start_command` / `stop_command`）で持たせてある。ただし**この2つを読む処理は第1弾には無い**（使うのは第2弾の夜間バッチ）。第1弾では、必要なら手で Strata を止めてから `transcribe` を実行する。
 
 ## CLI のサブコマンド
 
@@ -108,8 +129,10 @@ uv run kijun transcribe --conversation <ID>            # 文字起こしと話�
 uv run kijun transcribe --audio <ファイル>              # 単発の試し実行（作業表 #4 の用途）
 uv run kijun restore-transcript (--conversation <ID> | --all) [--force] [--dry-run]
                                                        # 文字起こしの JSON から conversations と utterances を復元
-uv run kijun extract --conversation <ID> --provider {ollama,claude}
-uv run kijun compare --conversation <ID> [--out <パス>]  # Qwen と Claude の対照表（作業表 #5）
+uv run kijun doctor [--out <パス>]                      # Strata の実測（接続・スキーマ適合・速度・最大入力長）
+uv run kijun extract --conversation <ID> [--provider strata]
+uv run kijun compare --conversation <ID> [--out <パス>] [--model <名前> --model <名前>]
+                                                       # 同じ会議を2回抽出した結果の対照表（作業表 #5）
 uv run kijun match --conversation <ID> [--dry-run]     # 既存項目との照合
 uv run kijun purge-audio [--execute]                   # 音声の30日削除
 ```
@@ -123,8 +146,9 @@ uv run kijun purge-audio [--execute]                   # 音声の30日削除
 | `transcribe --conversation <ID>` | 登録済みの会議の音声を文字起こしして話者を付け、`utterances` に書く。同じ内容を `[paths].transcripts/<ID>.json` に保存し、音声を `[paths].processed` に移す。 |
 | `transcribe --audio <ファイル>` | 1本の音声を試す。DuckDB には書かない。 |
 | `restore-transcript` | `[paths].transcripts` の JSON から、`conversations` と `utterances` を復元する（DB を失ったときに、文字起こしをやり直さずに済む）。`--conversation <ID>` で1会議、`--all` で全部。`conversations` に同じ会議が既にあれば、上書きせずスキップする（`--force` で上書き）。`extracted_requests`、`knowledge_items`、`item_evidence` は復元されないので、`extract` と `match` をやり直す。`--dry-run` は書かずに、復元される内容を出す。 |
-| `extract` | 発話を25分ごと（前後2分重ねる）に分け、Ollama または Claude API で要求・指摘を抽出し、`extracted_requests` に書く。`--provider` を省略すると設定の `extract.provider`。失敗したチャンクは記録して次に進む。 |
-| `compare` | 同じ会議の Qwen と Claude の抽出結果を、数字の表と、左右に並べた対照表の Markdown にする。 |
+| `doctor` | Strata を実測し、`config.toml` に書くべき値を出す。(1) `/v1/models` に接続できるか (2) `response_format` なしの出力がそのまま読めるか・修復が要るか (3) `response_format` ありでスキーマに適合するか (4) tokens/s と所要秒数 (5) 1リクエストに入る最大の入力長。DuckDB も音声も要らないので最初に実行できる。結果は `data/doctor/strata_<日時>.json` にも保存する。 |
+| `extract` | 発話を `chunk_minutes` ごと（`overlap_minutes` 重ねる）に分け、Strata で要求・指摘を抽出し、`extracted_requests` に書く。出力は必ず修復（前置きの散文、コードフェンス、トップレベルが配列、末尾が切れている）を通してから検証する。読めなければ同じチャンクを1回だけ投げ直し、2回失敗したらそのチャンクを失敗として記録して次に進む。 |
+| `compare` | 同じ会議を**設定を変えて2回抽出した結果**を、数字の表と、左右に並べた対照表の Markdown にする。比べる対象は `model_name` が違う2組なので、2回目の抽出の前に `config.toml` の `extract.strata.model` をその設定を表す名前（例: `qwen3.8-flash-next-q8`）に変えておく。同じ名前のまま2回抽出すると、2回目が1回目を置き換える。 |
 | `match` | `reusable = true` の抽出結果を、既存のチェック項目とコサイン類似度で照合する。閾値（既定 0.85）以上なら既存項目に紐付け、未満なら `status = 'candidate'` の新規候補を作る。`--dry-run` は書かず、類似度の降順の表を出す。`--provider` で、どのモデルの抽出結果を対象にするかを選ぶ（省略すると設定の `extract.provider`）。 |
 | `purge-audio` | 文字起こし完了から `retention.audio_days`（既定 30）日以上たった音声の一覧を出す。`--execute` を付けたときだけ削除する。文字起こしの JSON は削除しない。 |
 
@@ -135,14 +159,16 @@ uv run kijun purge-audio [--execute]                   # 音声の30日削除
 - `knowledge_items.importance`（重要度）は、Discord への投稿時に判定する処理なので、第2弾まで NULL のままにする。
 - `artifact_type` と `counterpart_role` の値は、LLM が自由な文字列を入れる。3回分の抽出結果を見て、よく出る値を決める。
 - 1つの会議が複数ファイルに分かれたときの束ね結果の確認は、第1弾では `ingest --dry-run` の標準出力で行う。
-- 失敗したチャンクの記録は、DuckDB のスキーマに列が無いので、DB と同じディレクトリの `extract_logs/` に JSON で保存する。`compare` がここを読む。
+- 失敗したチャンクの記録と、出力を修復した記録は、DuckDB のスキーマに列が無いので、DB と同じディレクトリの `extract_logs/` に JSON で保存する。`compare` がここを読む。
+- 抽出の良し悪しを数値で判断する手段が無い。背面が1つになったので、CLAUDE.md 4-4 にあった「Qwen の承認件数が Claude の8割以上なら一本化」という判断手順は使えない。代わりの指標は CLAUDE.md 6章の「LLM の提案文言を修正せず承認した割合」だが、その測定には承認の記録（#7、第2弾）が要る。第1弾でできるのは、`compare` の対照表を見て人が選ぶことである。
+- `extract.strata.start_command` / `stop_command` を読む処理は無い（第2弾の夜間バッチで使う）。
 
 ## テスト
 
 ```powershell
 uv run pytest                        # GPU とネットワークが要るテストを除いて実行
 uv run pytest -m requires_gpu        # 実機で、GPU を使う確認だけ実行
-uv run pytest -m requires_network    # 実機で、Ollama・Claude API・Hugging Face を使う確認だけ実行
+uv run pytest -m requires_network    # 実機で、Strata・Hugging Face を使う確認だけ実行
 ```
 
 GPU・ネットワーク・外部プロセスに触る処理は、すべて `typing.Protocol` で定義したインターフェース

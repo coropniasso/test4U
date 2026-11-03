@@ -1,7 +1,9 @@
 # 実装計画（第1弾：作業表 #4・#5・#6・#9）
 
 作成日：2026-10-04
-対象：`CLAUDE.md` 8章の作業表のうち #4（文字起こしと話者分離）、#5（Qwen と Claude の抽出比較）、#6（DuckDB のスキーマ）、#9（音声の30日削除）と、これらが共有する基盤。
+対象：`CLAUDE.md` 8章の作業表のうち #4（文字起こしと話者分離）、#5（同じ会議を2回抽出した結果の比較）、#6（DuckDB のスキーマ）、#9（音声の30日削除）と、これらが共有する基盤。
+
+2026-11-03 更新：抽出の背面を Strata + Qwen3.8-Flash-Next 1つに置き換えた。影響した節は 0、1、2、3、7-1、7-2、7-4、7-5、7-6、7-7、7-8（新規）、8、11、12、13、14 である。
 対象外：#7（Discord bot）、#8（夜間バッチの統合とタスクスケジューラ登録）。第2弾に回す。
 
 この文書は、実装を担当する者が設定値とファイル名のレベルまで迷わずに書ける水準で書いてある。
@@ -25,6 +27,9 @@
 | 抽出結果と既存項目のコサイン類似度の計算、閾値による分岐（CLAUDE.md 4-5） | pytest（埋め込みモデルの代わりに、文字列から決定的にベクトルを作る偽の実装を使う） |
 | 音声の30日削除の対象選定と、削除前の一覧表示 | pytest |
 | LLM に渡す抽出プロンプトの文面と、出力を受け取る JSON スキーマの定義 | pytest（スキーマの検証のみ。LLM は呼ばない） |
+| 壊れた JSON の修復（前置きの散文、コードフェンス、トップレベルが配列、末尾が切れている） | pytest（`extract/repair.py` は外部に一切接続しない純粋な関数。壊れ方の見本ごとに検証する） |
+| `kijun doctor` の判定（3分類）と推奨値の算出 | pytest（偽の HTTP 層を差し込む。`transport.py` の Protocol の背後なので実サーバーは不要） |
+| Strata に送るリクエストの形、再試行、応答の形が違うときのエラー | pytest（偽の HTTP 層を差し込む） |
 
 **クラウド側では書けるが、動作確認はユーザーの Windows PC でしかできないもの**
 
@@ -32,12 +37,15 @@
 |---|---|---|
 | faster-whisper による文字起こし | GPU と large-v3 のモデルファイルが必要 | `uv run kijun transcribe <音声ファイル>` |
 | pyannote.audio による話者分離 | GPU、Hugging Face のトークン、モデルページでの利用条件への同意が必要 | 同上 |
-| Ollama（Qwen）による抽出 | Ollama の常駐プロセスとモデルファイルが必要 | `uv run kijun extract --provider ollama --conversation <ID>` |
-| Claude API による抽出 | API キーと課金が必要 | `uv run kijun extract --provider claude --conversation <ID>` |
+| Strata が JSON スキーマへの適合を保証するか | Strata の API 仕様が、この計画を書いた環境から確認できない（`stratallm.org` に到達できない） | `uv run kijun doctor` |
+| Qwen3.8-Flash-Next が 64GB の RAM で動くか、動く場合の tokens/s と最大入力長 | Unsloth は1bit量子化で最低 75GB としており、実機は 64GB で 11GB 足りない | `uv run kijun doctor` |
+| Strata（Qwen3.8-Flash-Next）による抽出 | Strata の常駐プロセスとモデルファイルが必要 | `uv run kijun extract --conversation <ID>` |
 | sentence-transformers による埋め込み | モデルファイルのダウンロードが必要 | `uv run kijun match --conversation <ID>` |
 | torch の CUDA 版のインストール | Windows + CUDA の組み合わせ | `uv run python -c "import torch; print(torch.cuda.is_available())"` |
 
 この区別があるため、GPU・ネットワーク・外部プロセスに触る処理はすべて、呼び出し側から差し替えられる形（Python の `typing.Protocol`）にする。テストでは偽の実装を差し込む。偽の実装は `tests/fakes.py` に置く。
+
+この設計変更で特に重視したのは、**確認できない背面の挙動を、確認できる場所に寄せる**ことである。Strata の API 仕様が確認できないので、(1) 壊れた出力を吸収する `extract/repair.py` を外部に接続しない純粋な関数にし、(2) HTTP を `transport.py` の Protocol の背後に置いて偽の応答で判定を検査できるようにし、(3) 推測値を設定に決め打ちする代わりに `kijun doctor` で実測して推奨値を出す、という3つの手を打った。
 
 pytest のマーカーを2つ用意する。`requires_gpu` と `requires_network` を付けたテストは既定で実行しない。`pyproject.toml` に `addopts = "-m 'not requires_gpu and not requires_network'"` を書く。クラウド側では `uv run pytest` がすべて通ることを完了条件とする。
 
@@ -45,13 +53,13 @@ pytest のマーカーを2つ用意する。`requires_gpu` と `requires_network
 
 ## 1. VRAM の制約への対応方法：プロセスの境界を VRAM の境界にする
 
-CLAUDE.md 4-4 に「faster-whisper・pyannote と Qwen を同時に VRAM に載せない。文字起こし・話者分離の後に GPU メモリを解放してから Ollama のモデルを読み込む」とある。RTX 4070 Ti の VRAM は12GBで、large-v3（約3GB）＋ pyannote（約1GB）＋ Qwen3 14B の4bit量子化（約9GB）は同時には載らない。
+CLAUDE.md 4-4 に「faster-whisper・pyannote と Qwen を同時に VRAM に載せない。文字起こし・話者分離の後に GPU メモリを解放してから抽出のモデルを読み込む」とある。RTX 4070 Ti の VRAM は12GBで、large-v3（約3GB）＋ pyannote（約1GB）＋ Qwen3.8-Flash-Next は同時には載らない。Qwen3.8-Flash-Next は 125B の MoE を動的オフロードで動かすため、VRAM と RAM の両方を使い切る前提で考える必要がある（Unsloth は1bit量子化でも最低 75GB の RAM としており、実機の 64GB では足りない可能性がある）。
 
 Python の中で `del model` と `torch.cuda.empty_cache()` を呼ぶ方法は、PyTorch のキャッシュアロケータや CTranslate2 の確保分が残ることがあり、残ったかどうかを確認しにくい。そこで次の設計にする。
 
 - 文字起こしと話者分離を行う `transcribe` と、抽出を行う `extract` を、別の CLI サブコマンドにする。
 - 夜間バッチ（第2弾の #8）は、この2つを**別々のプロセスとして順番に起動する**。プロセスが終了すれば OS が GPU メモリを確実に解放するので、解放されたかどうかを疑う必要がなくなる。
-- Ollama はもともと別プロセスなので、`/api/chat` のリクエストに `keep_alive: 0` を付け、1回の抽出が終わったらモデルをアンロードさせる。これで次の `transcribe` が VRAM を使える。
+- Strata はもともと別プロセスなので、`extract` が終われば Strata 側にモデルが残るだけである。ただし Strata に Ollama の `keep_alive: 0` に相当するアンロードの手段があるかは**確認できていない**。そのため、プロセスごと起動・停止する手段を設定（`extract.strata.start_command` / `stop_command`）で持たせてある。夜間バッチ（第2弾の #8）がこれを使って、文字起こしの前に Strata を止め、抽出の前に起動する。第1弾では、この2つの設定値を読む処理はまだ無い。
 
 つまり「プロセスの境界 = VRAM の境界」とする。この方針により、`transcribe` と `extract` は Python のモジュールとしても互いを import しない。
 
@@ -91,14 +99,17 @@ test4U/
 │   │   ├── pyannote_impl.py         # pyannote speaker-diarization-3.1
 │   │   ├── merge.py                 # 文字起こしの区間と話者区間の突き合わせ
 │   │   └── restore.py               # 文字起こしの JSON から conversations と utterances を復元（6-5）
+│   ├── doctor.py                    # Strata の実測（接続・スキーマ適合・速度・最大入力長）
+│   ├── transport.py                 # Protocol: HttpTransport（偽の応答を差し込めるようにする）
 │   ├── extract/
 │   │   ├── __init__.py
-│   │   ├── base.py                  # Protocol: Extractor
+│   │   ├── base.py                  # Protocol: Extractor（能力の宣言を含む）
 │   │   ├── models.py                # 抽出結果の pydantic モデルと JSON スキーマ
 │   │   ├── prompt.py                # 抽出プロンプトの文面
 │   │   ├── chunk.py                 # チャンク分割と、発話番号の復元、重複排除
-│   │   ├── ollama_impl.py           # Ollama の /api/chat
-│   │   └── claude_impl.py           # Claude API（anthropic SDK）
+│   │   ├── repair.py                # 壊れた JSON の修復（純粋な関数。7-3 の後半）
+│   │   ├── tokens.py                # 入力長の概算の係数（doctor の実測で置き換える）
+│   │   └── strata_impl.py           # Strata の OpenAI 互換エンドポイント
 │   ├── match/
 │   │   ├── __init__.py
 │   │   ├── base.py                  # Protocol: Embedder
@@ -106,7 +117,7 @@ test4U/
 │   │   └── link.py                  # コサイン類似度と閾値による分岐
 │   ├── compare/
 │   │   ├── __init__.py
-│   │   └── report.py                # Qwen と Claude の抽出結果の比較表（#5）
+│   │   └── report.py                # 同じ会議を2回抽出した結果の比較表（#5）
 │   └── retention/
 │       ├── __init__.py
 │       └── purge.py                 # 音声の30日削除（#9）
@@ -119,6 +130,8 @@ test4U/
     ├── test_db_schema.py
     ├── test_chunk.py
     ├── test_extract_models.py
+    ├── test_repair.py
+    ├── test_doctor.py
     ├── test_link.py
     ├── test_compare_report.py
     └── test_purge.py
@@ -175,32 +188,33 @@ device = "cuda"
 num_speakers = 0
 
 [extract]
-# "ollama" または "claude"
-provider = "ollama"
-# 1チャンクの長さ（分）。CLAUDE.md 4-4 の「20〜30分ごとに区切り」。
+# Strata のみ。CLAUDE.md 4-4 の Qwen 対 Claude の比較は、2026-11-03 の決定で取りやめた。
+provider = "strata"
+# 既定は25分のまま。kijun doctor で6万トークンの入力が通ることを実測できたら
+# chunk_minutes = 180 / overlap_minutes = 0 に変え、会議全体を1リクエストで渡す。
 chunk_minutes = 25
-# 前後の重複（分）。CLAUDE.md 4-4 の「前後を2分程度重ねて」。
 overlap_minutes = 2
 
-[extract.ollama]
-base_url = "http://localhost:11434"
-# 実機で `ollama list` を実行し、実際に入っているタグに合わせて書き換える。
-# CLAUDE.md 4-4 の候補は qwen3:14b（4bit量子化で約9GB）と qwen3:30b-a3b（約18GB）。
-# このクラウド環境から ollama.com は egress proxy でブロックされているため、
-# 最新のタグ名は確認できていない。ユーザーが実機で確認して書き換える。
-model = "qwen3:14b"
-# 1回の抽出が終わったらモデルを VRAM からアンロードさせる（第1節の理由）。
-keep_alive = 0
-# 1リクエストの上限（秒）。25分のチャンクで余裕を持たせる。
-timeout_sec = 900
-
-[extract.claude]
-model = "claude-sonnet-5-5"
-# CLAUDE.md 4-4 の「Sonnet クラス」に対応するモデルID。
-max_tokens = 16000
-# 抽出は分類寄りの作業なので low から始め、承認件数を見て上げる。
-effort = "low"
-timeout_sec = 600
+[extract.strata]
+base_url = "http://localhost:8080"
+# OpenAI 互換のパス。Strata の版で異なる可能性があるため設定値にしてある。
+# kijun doctor で応答するパスを確認してから書き換える。
+chat_path = "/v1/chat/completions"
+model = "qwen3.8-flash-next"
+# 125B の MoE をオフロードして動かすため、応答に時間がかかる。
+# kijun doctor の実測値を見て詰める。
+timeout_sec = 3600
+# サーバーが JSON スキーマへの適合を保証するか。既定は false（保証しないという安全側の仮定）。
+# kijun doctor の手順3が (b) と出たら true にする。
+enforces_json_schema = false
+# 1リクエストの入力トークンの上限。0 は未確認を意味し、chunk_minutes の検査をしない。
+# kijun doctor の手順5の実測値を書く。
+max_input_tokens = 0
+# 文字起こしに VRAM を明け渡すための起動・停止コマンド（第2弾の夜間バッチで使う）。
+# Strata に Ollama の keep_alive: 0 に相当する手段があるか未確認のため、
+# プロセスごと止める手段を設定で持たせてある。空文字なら何もしない。
+start_command = ""
+stop_command = ""
 
 [match]
 backend = "e5"
@@ -223,9 +237,10 @@ audio_days = 30
 | 環境変数 | 用途 |
 |---|---|
 | `HF_TOKEN` | pyannote のモデル取得。Hugging Face のトークン |
-| `ANTHROPIC_API_KEY` | Claude API |
 
-`DISCORD_BOT_TOKEN` は第2弾で追加する。
+`ANTHROPIC_API_KEY` は、2026-11-03 の決定で抽出に Claude API を使わなくなったため不要になった。`DISCORD_BOT_TOKEN` は第2弾で追加する。
+
+Strata はローカルのサーバーなので、認証の秘密情報は無い。`base_url` と `chat_path` は秘密ではないので設定ファイルに書く。
 
 ---
 
@@ -368,11 +383,11 @@ CREATE SEQUENCE IF NOT EXISTS review_log_seq START 1;
 
 CLAUDE.md 6章の「毎週記録する指標」を SQL で出せるように、`schema.sql` の末尾にビューを作る。
 
-ビューは `model_name` ごとに行を分ける。パイロットの最初の3週は同じ会議を Qwen と Claude の両方で抽出する（CLAUDE.md 4-4）ので、`model_name` で分けないと、その会議の件数を二重に数えてしまい、指標が必要な時期に壊れるため。
+ビューは `model_name` ごとに行を分ける。同じ会議を設定を変えて2回抽出することがある（#5 の比較）ので、`model_name` で分けないと、その会議の件数を二重に数えてしまうため。比較を行う時期はパイロットの最初であり、まさに指標が必要な時期に壊れることになる。
 
 ```sql
 -- 会議ごと・抽出モデルごとの抽出件数と reusable の割合、形式別の比較に使う。
--- model_name で分けるのは、Qwen と Claude の両方で抽出した会議が二重に数えられないようにするため。
+-- model_name で分けるのは、設定を変えて2回抽出した会議が二重に数えられないようにするため。
 -- 1つの会議を2モデルで抽出すると2行になり、各行がその会議を1回だけ数える。
 -- 抽出が1件も無い会議は、model_name が NULL、requests が 0 の行になる。
 CREATE OR REPLACE VIEW v_weekly_metrics AS
@@ -554,7 +569,9 @@ class ExtractionResult(BaseModel):
     items: list[ExtractedRequest]
 ```
 
-トップレベルを `items` を持つオブジェクトにする理由：Ollama の `format` パラメータに渡す JSON スキーマは、トップレベルが配列だと従わないことがあるため、オブジェクトで包む。CLAUDE.md 4-4 の「出力は JSON 配列のみとし、前置きの文章を付けない」という要件はプロンプト側の指示として守り、受け取る形は `{"items": [...]}` にして、Python 側で配列に展開する。この差はプロンプトの文面にも書く。
+トップレベルを `items` を持つオブジェクトにする理由：構造化出力（`response_format`）に渡す JSON スキーマは、トップレベルが配列だとモデルが従わないことがあるため、オブジェクトで包む。CLAUDE.md 4-4 の「出力は JSON 配列のみとし、前置きの文章を付けない」という要件はプロンプト側の指示として守り、受け取る形は `{"items": [...]}` にして、Python 側で配列に展開する。この差はプロンプトの文面にも書く。
+
+プロンプトが「配列のみ」と指示している結果として、モデルが素直に従って素の配列を返すことがある。それは誤りではないので、7-4 の修復が `{"items": [...]}` に包んで受け取る。
 
 ### 7-2. `extract/prompt.py`
 
@@ -566,7 +583,7 @@ CLAUDE.md 4-4 の「抽出プロンプトの要件（決定）」をそのまま
 
 入力は、話者ラベル付きの発話を `[seq] SPEAKER_00: 本文` の形で並べたもの。発話番号を行頭に入れるのは、抽出結果の `seq_from` / `seq_to` をモデルに書かせるため。
 
-プロンプトは1つの関数 `build_messages(chunk, cfg) -> tuple[str, str]`（system と user）にして、Ollama と Claude の両方で同じ文面を使う。これが #5 の比較の前提になる。文面が違えば比較が成立しない。
+プロンプトは1つの関数 `build_messages(chunk, cfg) -> tuple[str, str]`（system と user）にまとめる。背面が1つになっても、この関数を1か所に保つ理由は2つある。(1) #5 の比較（同じ会議を設定を変えて2回抽出する）は、プロンプトが同一であることを前提にしている。文面が違えば、違いが設定によるものかプロンプトによるものか分からなくなる。(2) `doctor` が投げる試しのリクエストも同じ文面を使うので、実測した速度と入力長が本番の抽出にそのまま当てはまる。
 
 ### 7-3. `extract/chunk.py`
 
@@ -580,38 +597,64 @@ CLAUDE.md 4-4 の「20〜30分ごとに区切り、前後を2分程度重ねて�
 
 この処理はすべて純粋な計算なのでクラウド側で pytest で検証する。テストでは、境界をまたぐ抽出結果が1件に落ちることと、`seq` がグローバルな番号として正しく復元されることを確認する。
 
-### 7-4. `extract/ollama_impl.py`
+### 7-4. `extract/repair.py`（壊れた JSON の修復）
 
-`httpx` で `POST {base_url}/api/chat` を呼ぶ。`ollama` パッケージは使わない（依存を1つ減らすため）。
+Strata が JSON スキーマへの適合を保証するかは**確認できていない**（`stratallm.org` にこのクラウド環境から到達できない）。保証しない場合、モデルの出力には次の壊れ方が混じる。
+
+| 壊れ方 | 例 | 修復 |
+|---|---|---|
+| 前置き・後書きの散文 | `はい、抽出しました。\n{"items": ...}` | 最初の `{` または `[` より前、最後の `}` または `]` より後を捨てる |
+| コードフェンス | ` ```json ... ``` ` | 中身だけを取り出す（閉じるフェンスが無くても動く） |
+| トップレベルが配列 | `[{...}, {...}]` | `{"items": [...]}` に包む |
+| 末尾が切れている | 出力の上限に達して `{"items": [{...}, {"seq_f` | `items` の最後の完全な要素までで切り詰めて閉じる |
+
+`repair_json_text(text) -> RepairOutcome` が上を順に行い、`RepairOutcome` に修復後の文字列・行った修復の識別子（`actions`）・切り詰めて捨てた要素数（`truncated_items`）を入れる。例外は出さない（読めるかどうかの判断は次の関数が行う）。
+
+`parse_with_repair(text) -> ParsedExtraction` が、修復してから `ExtractionResult` として検証する。読めなければ `UnrepairableJsonError` を出す。**テキストから `ExtractionResult` を作る経路はこの関数だけにする。** 修復を通さずに検証してしまう経路を残さないため。
+
+1つだけ例外的な扱いがある。**完全な要素が1件も無いまま切れている場合は、あえて修復しない。** 空の `items` として閉じると「抽出0件」と区別が付かず、出力が切れてデータを失ったことが呼び出し側から見えなくなるため。この場合は検証で落ち、チャンクは失敗として記録される。
+
+行った修復の識別子は英数字で持ち、画面表示のときに日本語にする（CLAUDE.md 4-2 の方針を記録の値にも適用する）。修復の内容は `extract_logs` の JSON の `repaired_chunks` に残すので、背面が壊れた JSON を返していることにユーザーが気付ける。
+
+このモジュールは外部に一切接続しないので、壊れ方の見本ごとにクラウド環境で完全にテストできる。**確認できない背面の挙動を、確認できる場所に寄せるのがこの設計変更の中心である。**
+
+### 7-5. `extract/strata_impl.py`
+
+OpenAI 互換のエンドポイントに `httpx` で直接投げる。
 
 ```python
 payload = {
-    "model": cfg.extract.ollama.model,
+    "model": cfg.extract.strata.model,
     "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-    "format": ExtractionResult.model_json_schema(),   # CLAUDE.md 4-4 の「format パラメータに JSON スキーマを渡し」
+    "temperature": 0,
     "stream": False,
-    "keep_alive": cfg.extract.ollama.keep_alive,      # 0 で処理後にアンロード（第1節）
-    "options": {"temperature": 0},
 }
+if enforces_json_schema:            # 設定で保証すると宣言されたときだけ付ける
+    payload["response_format"] = {
+        "type": "json_schema",
+        "json_schema": {"name": "extraction", "schema": ExtractionResult.model_json_schema(), "strict": True},
+    }
 ```
 
-`format` にスキーマを渡しても出力が壊れることはあるので、`model_validate_json` が失敗したら、同じチャンクをもう1回だけ投げ直す。2回失敗したら、そのチャンクを失敗として記録して次に進む（会議全体を落とさない）。失敗したチャンクの `seq` の範囲は標準エラーに出す。
-
-### 7-5. `extract/claude_impl.py`
-
-`anthropic` SDK を使う。モデルは `claude-sonnet-5-5`（CLAUDE.md 4-4 の「Sonnet クラス」に対応）。
+Anthropic 互換側を `anthropic` SDK で叩く案は採らない。理由は、SDK の構造化出力（`messages.parse`）・`betas`・`fallbacks` はローカルサーバーが実装している保証がなく、失敗したときに原因が SDK 側かサーバー側か切り分けられなくなるため。
 
 実装時に守る点：
 
-- 構造化出力は `client.messages.parse()` を使い、`ExtractionResult` を渡してスキーマ検証を SDK に任せる。
-- `output_config={"effort": cfg.extract.claude.effort}` を渡す。Claude Sonnet 5.5 の effort の既定は `high` で、抽出は分類に近い作業なので設定の既定値は `low` にしてある。承認件数が足りなければ `medium` に上げる。
-- `thinking={"type": "disabled"}` は Claude Sonnet 5.5 では 400 エラーになるので渡さない。渡さなければ adaptive で動く。
-- 安全性の分類器によって応答が拒否される場合がある（HTTP 200 で `stop_reason == "refusal"`）。会議の録音には感情的なやり取りが含まれ得るので、`betas=["server-side-fallback-2026-07-01"]` と `fallbacks="default"` を付けてサーバー側のフォールバックを有効にし、`stop_reason` を読む前に `content` を触らないようにする。拒否された場合はそのチャンクを失敗として記録する。
-- システムプロンプト（抽出プロンプト）はチャンク間で変わらないので `cache_control={"type": "ephemeral"}` を付ける。ただしキャッシュの最小長（モデルによって512〜4096トークン）に届かないとキャッシュされないので、`response.usage.cache_read_input_tokens` を標準エラーに出し、0 のままなら効いていないことが分かるようにする。
+- `response_format` は `enforces_json_schema` が true のときだけ付ける。対応していないサーバーが 400 を返す可能性があるため。既定は false（保証しないという安全側の仮定）。
+- 応答の本文（`choices[0].message.content`）を `parse_with_repair` に通してから検証する。`enforces_json_schema` が true でも通す（保証が実際に効いていれば修復は何もしないので、結果は変わらない）。
+- 読めなければ、同じチャンクをもう1回だけ投げ直す。2回失敗したら、そのチャンクを失敗として記録して次に進む（会議全体を落とさない）。失敗したチャンクの `seq` の範囲は標準エラーに出す。
+- 応答に `usage` があれば入力・出力のトークン数を標準エラーに出す。無ければ「サーバーが usage を返さない」と1行出す。どちらなのかが分からないと、速度や費用の見積りの根拠が分からなくなるため。
+- 接続できない場合、HTTP エラーの場合、応答が OpenAI 互換の形でない場合は、原因が切り分かる文面にし、`chat_path` を疑うよう `uv run kijun doctor` を案内する。
+- プロンプトは `prompt.py` の `build_messages` をそのまま使う。文面は背面を変えても変更しない。
+- リクエストの組み立ては `build_payload(cfg, chunk, enforces_json_schema)` というモジュールの関数にする。`doctor.py` が「抽出が実際に送るのと同じ形」を組み立てるのに使うため。doctor が測るものと extract が送るものを食い違わせない。
 
-### 7-6. Claude API の費用
+HTTP の送受信は `transport.py` の `HttpTransport` Protocol の背後に置く。`StrataExtractor(cfg, transport)` の第2引数で差し替えられるので、偽の応答でリクエストの形・再試行・修復・エラーの文面をテストできる。
 
-CLAUDE.md 7章の「Claude API の最新単価」に対する回答。2026-10-04 時点の Claude Sonnet 5.5（`claude-sonnet-5-5`）の単価は、入力 $2.00 / 100万トークン、出力 $10.00 / 100万トークン。
+### 7-6. Claude API の費用（記録。抽出には使わない）
+
+**2026-11-03 の決定により、抽出は Claude API を使わない。** この節は、CLAUDE.md 7章の「Claude API の最新単価」に対する回答として調べた内容を記録として残すものである。将来 Claude API を使う判断をするときの出発点になるので、節ごと削除はしない。
+
+2026-10-04 時点の Claude Sonnet 5.5（`claude-sonnet-5-5`）の単価は、入力 $2.00 / 100万トークン、出力 $10.00 / 100万トークン。
 
 2時間の会議1回（日本語3〜4万字）の概算：
 
@@ -623,28 +666,82 @@ CLAUDE.md 7章の「Claude API の最新単価」に対する回答。2026-10-04
 | 出力の費用 | $0.15 | 1.5万 × $10.00 / 100万 |
 | 合計 | 約 $0.27（1ドル150円換算で約40円） | |
 
-CLAUDE.md 4-4 の「1回数十円程度」という概算は妥当だった。Batch API を使うと半額になるが、第1弾の比較では即時に結果が要るので使わない。第2弾の夜間バッチは待てる処理なので、Batch API への切り替えを費用削減の手段として検討する。
+CLAUDE.md 4-4 の「1回数十円程度」という概算は妥当だった。
 
-Console で月額の上限金額を設定できるので、比較を始める前に設定することをユーザーに勧める。3回分の比較で Claude 側に発生する費用は、上の概算の3倍で約120円。
+この見積りの入力トークン数（2時間で約6万）は、抽出の背面が Strata になった後も使っている。`extract/tokens.py` の概算の係数（日本語1文字あたり1.5トークン、会議1分あたり500トークン）はこの表から導いたもので、`kijun doctor` の実測で置き換えるべき値である。
 
 ### 7-7. 抽出結果の保存
 
-`extracted_requests` に書き込む。`request_id` は `{conversation_id}#{model_name}#{連番}` とする。Qwen と Claude の両方で抽出すると同じ会議に2組の行が入るので、`model_name` を ID に含めて衝突を避ける。CLAUDE.md 5章の `model_name` 列はこのために使う。
+`extracted_requests` に書き込む。`request_id` は `{conversation_id}#{model_name}#{連番}` とする。同じ会議を設定を変えて2回抽出すると2組の行が入るので、`model_name` を ID に含めて衝突を避ける。CLAUDE.md 5章の `model_name` 列はこのために使う。
+
+`model_name` には背面が宣言したモデル名（`extract.strata.model`）が入る。量子化を変えて比較したい場合は、`config.toml` の `model` をその量子化を表す名前（例: `qwen3.8-flash-next-q4`）にしてから抽出する。同じ名前のまま2回抽出すると、2回目が1回目を置き換える。
 
 `direction` はこの時点では NULL のままにする（第4節の理由）。`source_type` は `live_conversation` を入れる。
 
 ---
 
-## 8. Qwen と Claude の比較（作業表 #5 の後半）
+### 7-8. `doctor.py`（推論サーバーの実測）
 
-CLAUDE.md 4-4 の「最初の3回分の会議は、同じ文字起こしを Qwen と Claude API の両方で抽出し、承認件数を比較する。Qwen の承認件数が Claude の8割以上なら Qwen に一本化し、未満なら Claude API を使う」を支える道具を作る。
+このコマンドの目的は、**推測を測定に置き換える**ことである。Strata の API 仕様が確認できず、Qwen3.8-Flash-Next が 64GB の RAM で動くかも分からない状態で、設定に推測値を書いて決め打ちする代わりに置く。
+
+```
+uv run kijun doctor [--out <パス>]
+```
+
+DuckDB は使わないので、`db init` の前でも実行できる。音声が1本も無くても実行できるよう、入力は固定の日本語の文を繰り返して作る。途中の手順が失敗しても残りを続け、最後にまとめを出す。
+
+| 手順 | 測るもの | 分類・出力 |
+|---|---|---|
+| 1 | `GET {base_url}/v1/models` に応答するか | 応答すればモデルIDの一覧を出し、設定の `model` がその中にあるかを照合する。応答の形が分からないので `data`/`id`、`models`/`name`、素の配列の3つに備える |
+| 2 | 固定の短い抽出を `response_format` **なし**で投げる | (a) そのまま JSON として読めた / (b) `repair.py` を通せば読めた（行った修復も出す） / (c) どちらでもない |
+| 3 | 同じものを `response_format` **あり**で投げる | (a) 400 等のエラー → サーバーは非対応 / (b) 200 でスキーマに適合 → `enforces_json_schema = true` を推奨 / (c) 200 だが不適合 → 受け付けるが保証しない |
+| 4 | 約1,000トークンと `chunk_minutes` 相当の2つを投げる | 入力・出力のトークン数、所要秒数、出力の tokens/s。`usage` が無ければそのことを出す |
+| 5 | `chunk_minutes` 相当・2倍・4倍の3段階を投げる | エラーになる手前の長さ。4倍まで通ったら「4倍でも通った（上限は未確定）」と出す |
+| 6 | 上の結果から推奨値を出す | `enforces_json_schema` / `max_input_tokens` / `timeout_sec` / `chunk_minutes` / `overlap_minutes` |
+
+手順3の3分類を必ず区別する理由：`enforces_json_schema` を true にしてよいかは、「エラーになる」と「200 だが保証しない」を分けないと決められない。後者で true にすると、保証されていない出力をスキーマ適合と信じてしまう。
+
+手順5で段階を3つにとどめる理由：1段階ごとに実機で分単位の時間がかかるため。通らなかった段階が見つかればそこで打ち切る。200 が返れば、出力が読めるかどうかに関わらず「その長さは通った」とみなす（長さの問題と出力の壊れ方は別の問題なので、分けて報告する）。
+
+推奨値の算出で守る点：
+
+- 測れなかった項目は「現在の値のまま」とし、**推測値を書かない**。
+- `chunk_minutes` は、2時間（120分）相当が1リクエストで通れば `180` と `overlap_minutes = 0`（会議全体を分割せずに渡す）。届かなければ、通った長さの8割を5分単位に切り下げた値にする（概算の係数に余裕を持たせるため）。
+- **既定の `chunk_minutes = 25` では、手順5の4倍でも100分相当にしかならず、2時間は確かめられない。** そのため、4倍まで通ったときの出力に「2時間相当はまだ確かめていない。確かめるには `chunk_minutes` を 30 以上にして doctor をもう一度実行する」と出す。120分相当を確かめないまま `chunk_minutes = 180` を推奨することはしない。
+- `timeout_sec` は、実測の所要秒数の3倍を分単位に切り上げた値（下限600秒）。
+
+結果は表を標準出力に出し、同じ内容を `<db と同じディレクトリ>/doctor/strata_<日時>.json` に保存する。いずれかの手順が失敗したときは終了コードを 1 にする。
+
+判定と推奨値の算出は、`transport.py` の Protocol に偽の応答を差し込んでクラウド環境でテストする。実サーバーへの接続は `requires_network` のマーカーを付ける。
+
+## 8. 同じ会議を2回抽出した結果の比較（作業表 #5 の後半）
+
+**2026-11-03 の決定で、この節の位置づけが変わった。** 背面が Strata だけになったので、CLAUDE.md 4-4 にあった「Qwen の承認件数が Claude の8割以上なら一本化」という判断手順は使えなくなった（比較対象が無い）。
+
+代わりにこの道具が支えるのは、**同じ Strata で設定を変えた2回の実行のどちらを採るか**という判断である。比べる対象になるのは次のような違いである。
+
+| 変える設定 | 何を知りたいか |
+|---|---|
+| モデル（量子化） | 量子化を下げると抽出の質がどれだけ落ちるか。64GB で動かない場合に下げる必要がある |
+| `chunk_minutes` | 会議全体を1リクエストで渡すと、分割したときより良くなるか |
+| `enforces_json_schema` | `response_format` を付けると出力の質が変わるか（付けると壊れ方が減る一方、モデルの自由度が落ちる可能性がある） |
+
+承認件数そのものを指標として記録するには、CLAUDE.md 6章の「LLM の提案文言を修正せず承認した割合」が必要で、その測定には #7（Discord、第2弾）が要る。第1弾でできるのは、対照表を見て人が選ぶことである。
 
 ### 8-1. コマンド
 
+`extracted_requests.model_name` が比較の鍵になるので、2回目の抽出の前に `config.toml` の `extract.strata.model` を、その設定を表す名前に変えておく（同じ名前のまま2回抽出すると、2回目が1回目を置き換える）。
+
 ```
-uv run kijun extract --conversation <ID> --provider ollama
-uv run kijun extract --conversation <ID> --provider claude
+# 1回目（例: 4bit量子化）。config.toml の model = "qwen3.8-flash-next-q4"
+uv run kijun extract --conversation <ID>
+
+# 2回目（例: 8bit量子化）。config.toml の model = "qwen3.8-flash-next-q8" に変えてから
+uv run kijun extract --conversation <ID>
+
 uv run kijun compare --conversation <ID> --out ./data/compare/<ID>.md
+# 比べる2つを明示する場合
+uv run kijun compare --conversation <ID> --model qwen3.8-flash-next-q4 --model qwen3.8-flash-next-q8
 ```
 
 ### 8-2. `compare/report.py` が出す内容
@@ -660,10 +757,13 @@ uv run kijun compare --conversation <ID> --out ./data/compare/<ID>.md
 | `stated_reason` が非 NULL の件数 | 推測で補っていないかの手がかり。この値が大きすぎる場合、モデルが推測で埋めている疑いがある |
 | `applies_when` が非 NULL の件数 | 同上 |
 | `pass_criterion` が非 NULL の件数 | モデルごと |
-| 対応付いた件数 | 両モデルの抽出結果を `seq_from` の近さ（差が2以内）と `quote` の文字列類似度（difflib の比率が0.6以上）で突き合わせ、片方にしか無い件数を出す |
-| 失敗したチャンク数 | モデルごと |
+| 対応付いた件数 | 両方の抽出結果を `seq_from` の近さ（差が2以内）と `quote` の文字列類似度（difflib の比率が0.6以上）で突き合わせ、片方にしか無い件数を出す |
+| 失敗したチャンク数 | モデルごと（`extract_logs` の JSON から読む） |
+| 出力を修復したチャンク数 | `extract_logs` の `repaired_chunks` に記録される。設定を変えて壊れ方が減ったかどうかの手がかりになる |
 
-レビュー用の対照表：`seq_from` で並べ、同じ発話に対する Qwen の出力と Claude の出力を左右に並べた Markdown の表を出す。ユーザーはこれを見て、どちらを承認するかを決める。承認の記録は第2弾の Discord で行うので、第1弾ではこの Markdown に手で印を付ける運用になる。この制約は README に書く。
+レビュー用の対照表：`seq_from` で並べ、同じ発話に対する2回の実行の出力を左右に並べた Markdown の表を出す。ユーザーはこれを見て、どちらを採るかを決める。承認の記録は第2弾の Discord で行うので、第1弾ではこの Markdown に手で印を付ける運用になる。この制約は README に書く。
+
+比べるモデルは `--model` を2回指定して選ぶ。省略した場合は、抽出結果のあるモデルをすべて使い、設定の `extract.strata.model` があればそれを左（A）に置く。2つでないときは数字の表だけを出し、対照表は出さない。
 
 ---
 
@@ -728,8 +828,7 @@ dependencies = [
 
 [project.optional-dependencies]
 transcribe = ["faster-whisper>=1.0", "pyannote.audio>=3.3", "torch>=2.4", "torchaudio>=2.4"]
-extract-ollama = ["httpx>=0.27"]
-extract-claude = ["anthropic>=0.40"]
+extract = ["httpx>=0.27"]
 match = ["sentence-transformers>=3.0"]
 
 [dependency-groups]
@@ -742,13 +841,17 @@ kijun = "kijun.cli:app"
 addopts = "-m 'not requires_gpu and not requires_network'"
 markers = [
     "requires_gpu: GPU と大きなモデルファイルが必要。クラウド環境では実行しない",
-    "requires_network: 外部サービス（Ollama、Claude API、Hugging Face）への通信が必要",
+    "requires_network: 外部サービス（Strata の推論サーバー、Hugging Face）への通信が必要",
 ]
 ```
 
 `requires-python` を `>=3.11` にする理由：このクラウド環境の Python が 3.11 であり、基盤部分のテストを動かすのに 3.11 で足りる。実機の Windows には Python 3.12 を入れることを README に書く（pyannote と torch の対応が確実な版）。
 
 依存を用途別の extra に分ける理由：クラウド側で基盤のテストを動かすときに、torch や sentence-transformers（合計で数GB）をダウンロードさせないため。
+
+抽出の extra が `httpx` だけになった理由（2026-11-03）：背面が Strata 1つになり、`anthropic` SDK を使わなくなった。`extract-ollama` と `extract-claude` を `extract` に統合し、`anthropic` の依存は完全に消えた。Strata は別プロセスのサーバーなので、Python の依存としては HTTP クライアントだけで足りる。
+
+torch の CUDA 版の index について1つ注意がある。`[[tool.uv.index]]` を有効にすると、uv は `uv sync` のたびにその index へ接続して全 extra のパッケージ情報を取得する。`download.pytorch.org` に接続できない環境（外向き通信を制限したクラウドコンテナなど）では、extra を使わない場合でも `uv sync` 自体が失敗する。そのため `pyproject.toml` では既定でコメントアウトしてあり、Windows の実機で `uv sync --extra transcribe` を行う前にコメントを外す。手順は README に書く。
 
 torch の CUDA 版について。Windows で `uv sync --extra transcribe` をそのまま実行すると CPU 版の torch が入り、`torch.cuda.is_available()` が False になる。CUDA 版を入れるには `pyproject.toml` に次を書く必要がある。
 
@@ -776,13 +879,19 @@ uv run kijun transcribe --conversation <ID>            # 文字起こしと話�
 uv run kijun transcribe --audio <ファイル>              # 単発の試し実行（作業表 #4 の用途）
 uv run kijun restore-transcript (--conversation <ID> | --all) [--force] [--dry-run]
                                                        # 文字起こしの JSON から conversations と utterances を復元
-uv run kijun extract --conversation <ID> --provider {ollama,claude}
-uv run kijun compare --conversation <ID> [--out <パス>]  # Qwen と Claude の対照表（作業表 #5）
+uv run kijun doctor [--out <パス>]                      # Strata の実測（接続・スキーマ適合・速度・最大入力長）
+uv run kijun extract --conversation <ID> [--provider strata]
+uv run kijun compare --conversation <ID> [--out <パス>] [--model <名前> --model <名前>]
+                                                       # 同じ会議を2回抽出した結果の対照表（作業表 #5）
 uv run kijun match --conversation <ID> [--dry-run]     # 既存項目との照合
 uv run kijun purge-audio [--execute]                   # 音声の30日削除
 ```
 
-`transcribe` に `--audio` を用意するのは、CLAUDE.md 8章 #4 の「1ファイルで faster-whisper と pyannote を試すスクリプト」が、DuckDB への登録を経ずに1本の音声で試せる必要があるため。`--audio` を使った場合は DuckDB には書かず、結果を標準出力と JSON ファイルに出すだけにする。これがユーザーが最初に実行するコマンドになる。
+`transcribe` に `--audio` を用意するのは、CLAUDE.md 8章 #4 の「1ファイルで faster-whisper と pyannote を試すスクリプト」が、DuckDB への登録を経ずに1本の音声で試せる必要があるため。`--audio` を使った場合は DuckDB には書かず、結果を標準出力と JSON ファイルに出すだけにする。
+
+`doctor` は DuckDB を使わないので、`db init` の前でも実行できる。音声も要らない。したがって**ユーザーが最初に実行できるコマンドは `doctor` である**（Strata を起動すれば、音声も DB も無い状態で動く）。`extract` の設定値は `doctor` の結果から決めるので、この順序になる。
+
+`extract` の `--provider` は値が `strata` の1つだけだが、オプションとして残してある。将来背面を足すときの受け皿であり、`config.toml` の `extract.provider` を上書きして試せるようにするため。
 
 ---
 
@@ -796,15 +905,26 @@ README にこの順序で書く。
 | 2 | `uv sync` | `uv run kijun --help` がサブコマンド一覧を出す |
 | 3 | `uv run pytest` | すべて通る（GPU とネットワークが要るテストはスキップされる） |
 | 4 | `uv run kijun db init` | `data/kijun.duckdb` ができ、テーブルが10個（CLAUDE.md 5章の8テーブルに `schema_version` と `embeddings` を足したもの）と、ビュー `v_weekly_metrics` が1つある |
-| 5 | `pyproject.toml` の torch のインデックスを確認して `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
-| 6 | Hugging Face で pyannote の2つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
-| 7 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する（CLAUDE.md 7章の未検証事項） |
-| 8 | `ollama list` で Qwen のタグを確認し、`config.toml` に書く | — |
-| 9 | 2時間の音声で `uv run kijun extract --provider ollama` | 抽出が JSON として取れる。VRAM が足りるかを記録する（CLAUDE.md 7章の未検証事項） |
-| 10 | `ANTHROPIC_API_KEY` を設定し、Console で月額上限を設定して `--provider claude` | 抽出が取れる。実際の費用を記録し、7-6 の概算と比べる |
-| 11 | `uv run kijun compare` | 対照表の Markdown が出る |
+| 5 | Strata を入れ、Qwen3.8-Flash-Next を取得して API サーバーを起動する | サーバーが起動する。既定ポートは 8080。**ここが最大の関門**で、Unsloth の 75GB に対して実機は 64GB なので、起動しない・極端に遅い可能性がある |
+| 6 | `uv sync --extra extract` | `httpx` が入る |
+| 7 | `uv run kijun doctor` | 手順1〜5の実測結果と推奨値が出る。接続できなければ `base_url` と `chat_path` を直して再実行する |
+| 8 | `doctor` が出した推奨値を `config.toml` に書く | `enforces_json_schema` / `max_input_tokens` / `timeout_sec` / `chunk_minutes` / `overlap_minutes` の5つ |
+| 9 | `doctor` の結果を CLAUDE.md 7章に書き込む | 未検証事項「Strata が JSON スキーマに従った出力を保証するか」「Qwen3.8-Flash-Next が 12GB VRAM ＋ 64GB RAM で動くか、動く場合の tokens/s と最大入力長」への回答になる |
+| 10 | `pyproject.toml` の torch のインデックスのコメントを外し、タグを確認して `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
+| 11 | Hugging Face で pyannote の2つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
+| 12 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する（CLAUDE.md 7章の未検証事項） |
+| 13 | 音声を inbox に置いて `uv run kijun ingest` → `uv run kijun transcribe --conversation <ID>` | `utterances` に発話が入る |
+| 14 | `uv run kijun extract --conversation <ID>` | 抽出が `extracted_requests` に入る。`extract_logs` の JSON で、修復したチャンク数と失敗したチャンク数を確認する |
+| 15 | `uv sync --extra match` して `uv run kijun match --conversation <ID> --dry-run` | 最類似の既存項目と類似度の一覧が出る（初回は既存項目が0件なので全件が新規候補になる） |
+| 16 | `config.toml` の `model` を変えてもう一度 `extract` し、`uv run kijun compare --conversation <ID>` | 対照表の Markdown が出る |
 
-手順7と9で記録した処理時間と VRAM 使用量は、CLAUDE.md 7章の未検証事項「Qwen の最新版と、VRAM 12GB での実際のメモリ使用量・処理時間」と「pyannote.audio が Windows + CUDA 環境で問題なく動くか」への回答になる。結果を CLAUDE.md 7章に書き込む。
+手順5から9を手順10より前に置いた理由は2つある。(1) Strata が 64GB で動くかどうかが、この計画で最も不確かな部分であり、動かないなら他の作業の前提が変わる。(2) `doctor` は音声も DB も GPU 用の依存も要らないので、最も早く実行できる。torch の CUDA 版（数GB）を入れる前に、抽出が成立するかどうかを知れる。
+
+手順7で接続できない場合、`doctor` の手順1の出力に `base_url` を疑うよう書いてある。応答があるのに手順2が「応答が OpenAI 互換の形ではない」と出る場合は、`chat_path` が違う。Strata の版によってパスが異なる可能性があるため、設定値にしてある。
+
+手順12で記録した処理時間と VRAM 使用量は、CLAUDE.md 7章の未検証事項「pyannote.audio が Windows + CUDA 環境で問題なく動くか」への回答になる。手順7の `doctor` の結果は「Strata が JSON スキーマに従った出力を保証するか」と「Qwen3.8-Flash-Next が 12GB VRAM ＋ 64GB RAM で動くか、動く場合の tokens/s と最大入力長」への回答になる。どちらも結果を CLAUDE.md 7章に書き込む。
+
+手順5で Strata が動かなかった場合は、量子化を下げる・オフロードの設定を変えるなどでローカル実行の維持を試す（2026-11-03 決定）。QwenCloud への退避は実装しない。量子化を下げた場合は、手順16の比較で抽出の質がどれだけ落ちたかを見る。
 
 ---
 
@@ -812,11 +932,18 @@ README にこの順序で書く。
 
 | 事項 | 現状 | いつ決めるか |
 |---|---|---|
-| Qwen の具体的なタグ名 | `qwen3:14b` を設定の既定値にしてあるが、ollama.com がこのクラウド環境からブロックされているため最新版を確認できていない | ユーザーが実機で `ollama list` を実行したとき |
-| torch の CUDA のタグ（`cu126` か別か） | 推測で書いてある | ユーザーが pytorch.org で確認したとき |
+| Strata の OpenAI 互換のパス | `/v1/chat/completions` を設定の既定値にしてあるが、`stratallm.org` がこのクラウド環境からブロックされているため確認できていない | ユーザーが `uv run kijun doctor` を実行したとき（手順1・2） |
+| Strata が JSON スキーマへの適合を保証するか | 保証しない（`enforces_json_schema = false`）という安全側の仮定を既定にし、出力は必ず修復を通す | ユーザーが `uv run kijun doctor` を実行したとき（手順3） |
+| 1リクエストの入力トークンの上限 | `max_input_tokens = 0`（未確認）。未確認のうちは入力長の検査をしない | ユーザーが `uv run kijun doctor` を実行したとき（手順5） |
+| Qwen3.8-Flash-Next が 64GB の RAM で動くか | 動くかどうか分からない。Unsloth は1bit量子化でも最低 75GB としており 11GB 足りない。動かない場合は量子化を下げる・オフロードの設定を変えるなどでローカル実行の維持を試す（QwenCloud への退避は実装しない） | ユーザーが実機で Strata を起動したとき（13節の手順5）と `doctor` の手順4 |
+| `chunk_minutes` を 180 に変えるか | 既定は 25 のまま。2時間（約6万トークン）が1リクエストで通ると実測できたら 180 / overlap 0 に変える | ユーザーが `uv run kijun doctor` を実行したとき（手順5）。既定の `chunk_minutes = 25` では4倍でも100分相当なので、2時間を確かめるには `chunk_minutes` を 30 以上にして再実行する |
+| 入力長の概算の係数 | 日本語1文字あたり1.5トークン、会議1分あたり500トークン（`extract/tokens.py`）。7-6 の概算から導いた値で、実測ではない | `doctor` の手順4・5で実測した値と比べたとき |
+| Strata のモデルの VRAM からのアンロード手段 | Ollama の `keep_alive: 0` に相当する手段があるか未確認。プロセスごと止める手段を設定（`start_command` / `stop_command`）で持たせたが、第1弾では読む処理が無い | #8（夜間バッチ）の実装時 |
 | `artifact_type` の値の一覧 | LLM が自由な文字列を入れる。候補を固定していない | 3回分の抽出結果を見て、よく出る値を `config.toml` に列挙する |
 | `counterpart_role` の値の一覧 | 同上 | 同上 |
+| torch の CUDA のタグ（`cu126` か別か） | 推測で書いてあり、既定ではコメントアウトしてある | ユーザーが pytorch.org で確認したとき |
 | 重要度の3段階判定 | 第2弾（Discord への投稿時に行う処理） | #7 の実装時 |
 | `direction` の確定 | `speaker_map` が埋まらないと決まらない。第1弾では NULL のまま | #7 で話者の対応付けを実装したとき |
+| 抽出の良し悪しを数値で判断する手段 | 背面が1つになり「Qwen 対 Claude の承認件数」が使えなくなった。代わりの指標は6章の「LLM の提案文言を修正せず承認した割合」だが、その測定には承認の記録が必要 | #7（Discord）の実装時。第1弾では `compare` の対照表を人が見る |
 | 承認件数の記録 | 第1弾では Markdown に手で印を付ける運用 | #7 の実装時 |
 | 1つの会議が複数ファイルに分かれたときの束ね結果の確認 | 第1弾では `ingest --dry-run` の標準出力 | #7 で Discord への投稿を実装したとき |
