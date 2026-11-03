@@ -89,3 +89,25 @@ def test_toml_の構文エラー(tmp_path):
     p.write_text("[bundle\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="構文"):
         load_config(p)
+
+
+def _path_settings(model, prefix=""):
+    """Config の中の Path 型の値を (設定名, 値) で列挙する。入れ子のセクションも辿る。"""
+    from pathlib import Path
+
+    from pydantic import BaseModel
+
+    for name in type(model).model_fields:
+        value = getattr(model, name)
+        if isinstance(value, Path):
+            yield f"{prefix}{name}", value
+        elif isinstance(value, BaseModel):
+            yield from _path_settings(value, f"{prefix}{name}.")
+
+
+def test_cfg_フィクスチャの_Path_設定はすべて_tmp_path_の下(cfg, tmp_path):
+    found = dict(_path_settings(cfg))
+    # 列挙が空だと検査が素通りするので、既知の設定が見えていることを確かめる
+    assert {"paths.inbox", "paths.db", "batch.log_dir"} <= set(found)
+    outside = {k: str(v) for k, v in found.items() if not v.resolve().is_relative_to(tmp_path.resolve())}
+    assert outside == {}, f"一時ディレクトリの外を指す設定がある（テストが利用者のデータを汚す）: {outside}"

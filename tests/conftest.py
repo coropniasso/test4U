@@ -12,12 +12,17 @@ from kijun.models import Conversation, Utterance
 
 @pytest.fixture
 def cfg(tmp_path: Path) -> Config:
-    """パスを一時ディレクトリにした設定。それ以外は既定値。"""
+    """Path 型の設定をすべて一時ディレクトリにした設定。それ以外は既定値。
+
+    1つでも漏れるとテストが利用者の data/ を汚す。漏れは tests/test_config.py の
+    test_cfg_フィクスチャの_Path_設定はすべて_tmp_path_の下 が検出する。
+    """
     c = Config()
     c.paths.inbox = tmp_path / "inbox"
     c.paths.processed = tmp_path / "processed"
     c.paths.transcripts = tmp_path / "transcripts"
     c.paths.db = tmp_path / "kijun.duckdb"
+    c.batch.log_dir = tmp_path / "batch_logs"
     return c
 
 
