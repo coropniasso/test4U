@@ -15,7 +15,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 DEFAULT_CONFIG_PATH = Path("config.toml")
 
@@ -63,6 +63,11 @@ class DiarizeConfig(_Section):
     num_speakers: int = 0
 
 
+# Strata が答え用の取り置きを計算する下限（control/serve/server.py の ANSWER_ROOM_MIN_CAP）。
+# max_tokens がこれ未満だと逆算が働かず、推論が本当に途中で切られて答えが1文字も出ない。
+ANSWER_ROOM_MIN_CAP = 1024
+
+
 class StrataConfig(_Section):
     base_url: str = "http://localhost:8080"
     chat_path: str = "/v1/chat/completions"
@@ -76,6 +81,22 @@ class StrataConfig(_Section):
     # 既定値 20000 は、実測（2分5秒の音声1チャンクで出力 13,050 トークン、finish_reason = stop）に
     # 余裕を持たせた値。推論トークンを含むので、本文（JSON）に必要な長さでは決めない。
     max_tokens: int = Field(default=20000, ge=0)
+    # 1リクエストで推論に使ってよいトークン数の上限。OpenAI 互換 API の reasoning_budget_tokens に
+    # 渡す。0 なら送らず、Strata が max_tokens から逆算した予算（下記）に任せる。
+    # max_tokens との関係（2026-11-03、実機で Strata の control/serve/server.py と
+    # サーバーのログで確認）:
+    # - Strata は max_tokens から推論の予算を逆算し、残りを答え用に取り置く。
+    #   取り置き = min(max(512, max_tokens // 4), max_tokens // 2)。
+    #   max_tokens = 20000 なら取り置き 5,000・推論の予算 15,000。ログの
+    #   「thinking: 1736 of budget 15000 (max 20000) tokens」で裏が取れている。
+    # - 予算に達しても推論は途中で切られない。推論を閉じて答えを書かせる。
+    # - max_tokens を送らないと、推論の予算は文脈長から逆算されて 151,851 になる。
+    #   実機では 2,604 秒の時点で 48,764 トークン推論してまだ終わらず、予算いっぱいなら
+    #   18.8 tokens/s で 8,077 秒（2.24 時間）の見込みだった。2分5秒の音声の1チャンクでこれである。
+    # この設定を使うのは、max_tokens（答えの長さの上限）と推論の量を別々に決めたいときである。
+    # 抽出にかかる時間はほぼ推論の長さで決まる（実測では出力 13,050 トークンのうち約 12,000 が推論）
+    # ので、時間を詰めるならここが直接の手段になる。
+    reasoning_budget_tokens: int = Field(default=0, ge=0)
     # 推論の量。OpenAI 互換 API の reasoning_effort に渡す。空文字なら送らず、サーバーの既定に任せる。
     # 既定を空文字にしてあるのは、"xhigh" が「このときのサーバーの既定がそれだった」という観測であり、
     # 入力として送って 200 が返るかを確認していないためである。受け付けない値を送ると全チャンクが
@@ -98,6 +119,17 @@ class StrataConfig(_Section):
     # Strata を使う手順の前後で実行する。空文字なら何もしない（Strata を手で起動・停止する運用）。
     start_command: str = ""
     stop_command: str = ""
+
+    @field_validator("max_tokens")
+    @classmethod
+    def _答えの分が取り置かれる大きさであること(cls, v: int) -> int:
+        if 0 < v < ANSWER_ROOM_MIN_CAP:
+            raise ValueError(
+                f"max_tokens は 0（上限なし）か {ANSWER_ROOM_MIN_CAP} 以上にしてください。"
+                f"{ANSWER_ROOM_MIN_CAP} 未満だと Strata が答え用の取り置きを計算せず、"
+                "推論が途中で切られて JSON が1文字も出ません（2026-11-03 実機で Strata のソースを確認）"
+            )
+        return v
 
 
 class ExtractConfig(_Section):

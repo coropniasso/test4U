@@ -53,6 +53,9 @@ def build_payload(cfg: Config, chunk: Chunk, enforces_json_schema: bool) -> dict
     # StrataConfig.reasoning_effort のコメントにある。
     if cfg.extract.strata.reasoning_effort:
         payload["reasoning_effort"] = cfg.extract.strata.reasoning_effort
+    # 0 なら送らず、Strata が max_tokens から逆算した予算に任せる（config.py のコメント参照）。
+    if cfg.extract.strata.reasoning_budget_tokens > 0:
+        payload["reasoning_budget_tokens"] = cfg.extract.strata.reasoning_budget_tokens
     if enforces_json_schema:
         # 対応していないサーバーが 400 を返す可能性があるので、保証すると宣言されたときだけ付ける。
         payload["response_format"] = {
@@ -120,21 +123,24 @@ class StrataExtractor:
                 "`uv run kijun doctor` で確認してください。"
             ) from e
 
-    def _report_truncation(self, response, chunk: Chunk) -> None:
-        """finish_reason が length なら、出力が max_tokens に達して切れたことを標準エラーに出す。
+    def _report_truncation(self, response, chunk: Chunk) -> bool:
+        """finish_reason が length なら標準エラーに出し、True を返す。
 
         例外にはしない。途中まで読める出力は repair.py が最後の完全な要素まで切り詰める。
+        戻り値は extract が再試行の可否を決めるのに使う。
         """
         try:
             reason = response.json()["choices"][0].get("finish_reason")
         except (TransportError, KeyError, IndexError, TypeError, AttributeError):
-            return
-        if reason == "length":
-            print(
-                f"警告: 出力が max_tokens に達して切れた（発話 {chunk.seq_from}〜{chunk.seq_to}）。"
-                "`extract.strata.max_tokens` を上げるか `chunk_minutes` を下げてください",
-                file=sys.stderr,
-            )
+            return False
+        if reason != "length":
+            return False
+        print(
+            f"警告: 出力が max_tokens に達して切れた（発話 {chunk.seq_from}〜{chunk.seq_to}）。"
+            "`extract.strata.max_tokens` を上げるか `chunk_minutes` を下げてください",
+            file=sys.stderr,
+        )
+        return True
 
     def _report_usage(self, response) -> None:
         """サーバーが返したトークン数を標準エラーに出す。返さない場合はそのことを出す。"""
@@ -172,7 +178,7 @@ class StrataExtractor:
         for attempt in range(1, 2 + RETRY_COUNT):
             response = self._post(payload)
             self._report_usage(response)
-            self._report_truncation(response, chunk)
+            truncated = self._report_truncation(response, chunk)
             text = self._message_content(response)
             try:
                 parsed = parse_with_repair(text)
@@ -183,6 +189,26 @@ class StrataExtractor:
                     f"（発話 {chunk.seq_from}〜{chunk.seq_to}）: {e}",
                     file=sys.stderr,
                 )
+                if truncated:
+                    # ここに来たということは、推論ではなく「答え」を書く分が足りなかったということ。
+                    # Strata は max_tokens から推論の予算を逆算し、残りを答え用に取り置く
+                    # （max_tokens=20000 なら推論 15,000・答え 5,000。2026-11-03 実機のログと
+                    # control/serve/server.py で確認）。推論が予算に達した場合は途中で切られるのではなく、
+                    # 推論を閉じて答えを書かせる。したがって finish_reason=length で完全な要素が1件も
+                    # 読めないのは、取り置かれた分でも答えが収まらなかった場合であり、設定の問題である。
+                    # 投げ直さないのは、temperature 0 でも出力が決定的だからではない（同一ペイロードで
+                    # completion_tokens が 13,050 と 48,764 以上、3.7 倍の振れが実測されている）。
+                    # 再試行に賭けるには代償が大きすぎるからである。実機の最も遅い生成速度 14 tokens/s で
+                    # max_tokens=20000 なら、1回の投げ直しに最大 1,400 秒かかる。
+                    # 設定を直す方が速く、確実である。
+                    raise ExtractionError(
+                        f"Strata の出力が max_tokens（{self._strata.max_tokens}）に達し、"
+                        f"完全な要素が1件も読めませんでした（発話 {chunk.seq_from}〜{chunk.seq_to}）。"
+                        "Strata は max_tokens の約4分の1を答え用に取り置くので、これは答えがその分に"
+                        "収まらなかったことを意味します。`extract.strata.max_tokens` を上げるか "
+                        "`extract.chunk_minutes` を下げてください。"
+                        "投げ直しは最大で max_tokens 分の生成時間を使うため、していません"
+                    ) from e
                 continue
             if parsed.repair.actions or parsed.repair.truncated_items:
                 self.repair_events.append(

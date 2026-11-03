@@ -275,10 +275,33 @@ def test_finish_reason_が_stop_なら警告しない(capsys):
 
 
 def test_content_が_null_なら読めない出力として扱う():
-    body = json.dumps({"choices": [{"message": {"content": None}, "finish_reason": "length"}]})
+    body = json.dumps({"choices": [{"message": {"content": None}, "finish_reason": "stop"}]})
     transport = FakeTransport([(200, body), (200, body)])
     with pytest.raises(ExtractionError, match="2 回とも"):
         StrataExtractor(Config(), transport).extract(a_chunk())
+
+
+def test_max_tokens_で切れて1件も読めなければ_投げ直さずに失敗する():
+    # Strata は max_tokens の約4分の1を答え用に取り置くので、ここに来るのは答えがその分に
+    # 収まらなかった場合、つまり設定の問題である。投げ直さないのは出力が決定的だからではなく
+    # （同一ペイロード・temperature 0 で completion_tokens が 13,050 と 48,764 以上の実測がある）、
+    # 1回の投げ直しに最大 max_tokens 分の生成時間（14 tokens/s なら約 1,400 秒）がかかるためである。
+    body = json.dumps({"choices": [{"message": {"content": None}, "finish_reason": "length"}]})
+    transport = FakeTransport([(200, body), (200, body)])
+    with pytest.raises(ExtractionError, match="max_tokens") as e:
+        StrataExtractor(Config(), transport).extract(a_chunk())
+    assert "答え用に取り置く" in str(e.value) and "していません" in str(e.value)
+    assert len(transport.posts) == 1  # 2回目は投げない
+
+
+def test_max_tokens_で切れても1件でも読めれば_修復して返す():
+    # 末尾が切れていても完全な要素があれば repair.py が切り詰めて返す。失敗にはしない。
+    broken = '{"items": [' + json.dumps(ITEM, ensure_ascii=False) + ', {"seq_from": 1, "quo'
+    body = json.dumps({"choices": [{"message": {"content": broken}, "finish_reason": "length"}]})
+    transport = FakeTransport([(200, body)])
+    result = StrataExtractor(Config(), transport).extract(a_chunk())
+    assert len(result.items) == 1
+    assert len(transport.posts) == 1
 
 
 def test_プロンプトの文面は_prompt_py_のものをそのまま使う():
@@ -479,3 +502,18 @@ def test_match_が使う_model_name_は_extract_が書くものと一致する()
     cfg.extract.run_label = "xhigh"
     _p, model_name = _provider_model(cfg, Provider.strata)
     assert model_name == StrataExtractor(cfg, FakeTransport([])).model_name
+
+
+def test_reasoning_budget_tokens_は既定で送らない():
+    transport = FakeTransport([(200, chat_body(EMPTY))])
+    StrataExtractor(Config(), transport).extract(a_chunk())
+    assert "reasoning_budget_tokens" not in transport.posts[0]["payload"]
+
+
+def test_reasoning_budget_tokens_を書いたらそのまま送る():
+    # max_tokens（答えを含む全体の上限）と推論の量を別々に決めるための手段。
+    cfg = Config()
+    cfg.extract.strata.reasoning_budget_tokens = 8000
+    transport = FakeTransport([(200, chat_body(EMPTY))])
+    StrataExtractor(cfg, transport).extract(a_chunk())
+    assert transport.posts[0]["payload"]["reasoning_budget_tokens"] == 8000

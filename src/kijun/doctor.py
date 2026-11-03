@@ -619,13 +619,16 @@ def _fit_generation(measurements: list[dict]) -> dict | None:
     if not usable:
         return None
     # 生成速度は測定ごとに 出力 ÷ 所要秒数（プロンプト処理の時間を含む）。最も遅いものを採る。
-    # 同じ profile・モデルでも 61〜69 tokens/s と 14 tokens/s が観測されており、1回の測定では決められない。
+    # 同じ profile・モデルでも 14.0〜68.9 tokens/s が観測されており、1回の測定では決められない。
     min_speed = min(m["output_tokens"] / m["elapsed_sec"] for m in usable)
     long_ = usable[-1]
     base = {
         "output_ratio": long_["output_tokens"] / long_["input_tokens"],
         "input_tokens": long_["input_tokens"],
         "min_output_speed": min_speed,
+        # 実測した出力トークン数の最大。max_tokens の推奨値がこれを下回らないようにするために使う。
+        # 下回ると、推奨値を書いた瞬間に全チャンクが max_tokens で切れて失敗する。
+        "max_output_tokens": max(m["output_tokens"] for m in usable),
         "measured_points": len(usable),
         "truncated": any(m.get("finish_reason") == "length" for m in usable),
     }
@@ -658,7 +661,16 @@ def _recommend_with_output_length(
     scale = recommended_chunk_minutes / cfg.extract.chunk_minutes
     planned_in = int(gen["input_tokens"] * scale)
     planned_out = int(planned_in * gen["output_ratio"])
-    max_tokens = max(MAX_TOKENS_FLOOR, int(math.ceil(planned_out * MAX_TOKENS_MARGIN / 1000) * 1000))
+    # 推奨値は3つの下限の最大にする。(1) 固定の下限、(2) 推奨 chunk_minutes での出力見込みの余裕込み、
+    # (3) この doctor 自身が実測した出力トークン数の余裕込み。(3) が要るのは、(2) が検査4の
+    # 固定の文を繰り返した入力から出した比に依存しており、実際の抽出の出力より小さくなり得るためである。
+    # 推奨値が実測を下回ると、その値を config.toml に書いた瞬間に全チャンクが切れて失敗する。
+    observed_floor = int(math.ceil(gen["max_output_tokens"] * MAX_TOKENS_MARGIN / 1000) * 1000)
+    max_tokens = max(
+        MAX_TOKENS_FLOOR,
+        int(math.ceil(planned_out * MAX_TOKENS_MARGIN / 1000) * 1000),
+        observed_floor,
+    )
     prompt_sec = gen["sec_per_input"] * planned_in
     generation_sec = max_tokens / gen["min_output_speed"]
     estimated_sec = prompt_sec + generation_sec * TIMEOUT_GENERATION_SAFETY
@@ -686,8 +698,9 @@ def _recommend_with_output_length(
             f"timeout_sec = プロンプト処理の秒数 + max_tokens ÷ 観測された最も遅い生成速度 × {TIMEOUT_GENERATION_SAFETY}"
             f"（下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）。検査4で観測された最も遅い生成速度は "
             f"{gen['min_output_speed']:.1f} tokens/s（プロンプト処理を含む）、推奨の max_tokens={max_tokens}。{fit_note}"
-            "生成速度は同じ profile・モデルでも 61〜69 tokens/s と 14 tokens/s の4.4倍の振れが観測されているため、"
-            "1回の測定の定数倍では決めていない。"
+            "生成速度は同じ profile・モデルでも 14.0〜68.9 tokens/s（約4.9倍）の振れが観測されているため、"
+            "1回の測定の定数倍では決めていない。速いのも遅いのもサーバーの起動直後に出ており、"
+            "温まると速くなるという関係ではない（何が決めているかは分かっていない）。"
             f"参考: 推奨する chunk_minutes={recommended_chunk_minutes} では、入力約{planned_in}トークン、"
             f"出力約{planned_out}トークン（実測の比 {gen['output_ratio']:.2f} 倍）と見込み、"
             f"最も遅い速度での見込みは約{expected_sec:.0f} 秒。"
@@ -695,13 +708,24 @@ def _recommend_with_output_length(
             + truncated_note
         ),
     }
+    lowering_note = ""
+    if max_tokens < cfg.extract.strata.max_tokens:
+        lowering_note = (
+            f" 注意: この推奨値は、いまの設定 max_tokens={cfg.extract.strata.max_tokens} より小さい。"
+            "doctor が測れるのは doctor 自身が投げた入力に対する出力だけで、実際の会議の抽出では"
+            "推論トークンがこれより多く出ることがある（実機では2分5秒の音声1チャンクで 13,050 トークンの"
+            "出力が観測されている）。いまの設定値が実際の抽出の実測から決められたものなら、下げないこと。"
+        )
     rec["max_tokens"] = {
         "value": max_tokens,
         "reason": (
             f"推奨する chunk_minutes={recommended_chunk_minutes} での出力見込み約{planned_out}トークン"
             f"（入力約{planned_in}トークン × 実測の比 {gen['output_ratio']:.2f}）の {MAX_TOKENS_MARGIN} 倍"
-            f"（下限 {MAX_TOKENS_FLOOR}、1000 単位に切り上げ）。推論トークンを含む。"
+            f"（下限 {MAX_TOKENS_FLOOR}、1000 単位に切り上げ）と、"
+            f"この doctor が実測した最大の出力 {gen['max_output_tokens']} トークンの {MAX_TOKENS_MARGIN} 倍"
+            f"（{observed_floor}）の、大きい方。推論トークンを含む。"
             + truncated_note
+            + lowering_note
         ),
     }
 

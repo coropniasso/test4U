@@ -124,3 +124,18 @@ def test_run_label_は英数字と記号3種だけ許す(tmp_path):
     for bad in ["medium 1", "日本語", "a/b", "a#b", "a+b"]:
         with pytest.raises(ValidationError):
             Config.model_validate({"extract": {"run_label": bad}})
+
+
+def test_max_tokens_は_0_か_1024_以上でなければ拒否する():
+    # Strata は max_tokens の約4分の1を答え用に取り置くが、1024 未満ではその逆算が働かず、
+    # 推論が途中で切られて JSON が1文字も出ない（2026-11-03 実機で Strata のソースを確認）。
+    import pytest
+    from pydantic import ValidationError
+
+    from kijun.config import Config
+
+    for ok in [0, 1024, 20000]:
+        assert Config.model_validate({"extract": {"strata": {"max_tokens": ok}}})
+    for bad in [1, 512, 1023]:
+        with pytest.raises(ValidationError, match="1024"):
+            Config.model_validate({"extract": {"strata": {"max_tokens": bad}}})
