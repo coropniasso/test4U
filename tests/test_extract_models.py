@@ -165,3 +165,12 @@ def test_プロンプトは_文字起こしが壊れた発話の扱いを指示�
     # 試験対象の語（「感嘆符」→「簡単フォーイス」）を文面に書いていない。
     # 書くと、その語の正解を教えることになり、実機での比較が成立しない。
     assert "簡単フォーイス" not in s and "感嘆符" not in s
+
+
+def test_プロンプトは_request_summary_に注釈を付けさせない():
+    # pass_criterion が無いとき request_summary がそのまま check_text になる（match/link.py）。
+    # 「（意味が取れない）」のような注釈を書かせると、それがチェック項目の文言として Discord に出る。
+    # 実機で「（「過剰書き」は意味が取れない）」が request_summary に入ったので指示を外した（2026-11-03）。
+    s = SYSTEM_PROMPT
+    assert "のような注釈は付けない" in s
+    assert "チェック項目として読めなくなる" in s
