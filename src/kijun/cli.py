@@ -29,6 +29,11 @@ app = typer.Typer(
 )
 db_app = typer.Typer(help="DuckDB の操作。", no_args_is_help=True)
 app.add_typer(db_app, name="db")
+discord_app = typer.Typer(
+    help="Discord でのレビュー(bot は常駐しない。夜間バッチが read と post を順に起動する)。",
+    no_args_is_help=True,
+)
+app.add_typer(discord_app, name="discord")
 
 
 class Provider(str, Enum):
@@ -421,6 +426,83 @@ def match(
         typer.echo(f"\n閾値: {cfg.match.similarity_threshold}")
         if dry_run:
             typer.echo("--dry-run のため、DB には書いていません。")
+
+
+# --- discord -----------------------------------------------------------------
+
+
+@discord_app.command("read")
+def discord_read(ctx: typer.Context) -> None:
+    """前回までに投稿したメッセージのリアクションと返信を読み取り、DB に反映する(夜間バッチの手順1)。"""
+    from kijun.discord.run import read_command
+
+    with _errors():
+        cfg = _config(ctx)
+        con = _open_db(cfg)
+        try:
+            code = read_command(con, cfg, echo=typer.echo)
+        finally:
+            con.close()
+        if code:
+            raise typer.Exit(code=code)
+
+
+@discord_app.command("post")
+def discord_post(ctx: typer.Context) -> None:
+    """新規候補・矛盾の可能性がある組・話者の対応付けの依頼・束ね結果を投稿する(夜間バッチの手順8)。"""
+    from kijun.discord.run import post_command
+
+    with _errors():
+        cfg = _config(ctx)
+        con = _open_db(cfg)
+        try:
+            code = post_command(con, cfg, echo=typer.echo)
+        finally:
+            con.close()
+        if code:
+            raise typer.Exit(code=code)
+
+
+# --- derive-direction --------------------------------------------------------
+
+
+@app.command("derive-direction")
+def derive_direction(
+    ctx: typer.Context,
+    conversation: Annotated[
+        str | None, typer.Option("--conversation", help="direction を導出する会議ID。")
+    ] = None,
+    all_: Annotated[
+        bool, typer.Option("--all", help="speaker_map がある会議すべてについて導出する。")
+    ] = False,
+) -> None:
+    """speaker_map から extracted_requests.direction を導出する(speaker_map を手で直した後にも使う)。"""
+    from kijun.review.direction import conversations_with_speaker_map, derive_directions
+
+    if (conversation is None) == (not all_):
+        raise _fail("--conversation と --all のどちらか一方を指定してください。")
+    with _errors():
+        cfg = _config(ctx)
+        con = _open_db(cfg)
+        try:
+            ids = [conversation] if conversation else conversations_with_speaker_map(con)
+            results = [derive_directions(con, i) for i in ids]
+        finally:
+            con.close()
+        if not results:
+            typer.echo("speaker_map のある会議がありません。")
+            return
+        rows = [
+            [
+                r.conversation_id,
+                "導出した" if r.derived else "導出しない",
+                str(r.total), str(r.self_to_other), str(r.other_to_self), str(r.undetermined), r.note,
+            ]
+            for r in results
+        ]
+        typer.echo(
+            format_table(["会議ID", "結果", "抽出件数", "自分→相手", "相手→自分", "未確定(NULL)", "備考"], rows)
+        )
 
 
 # --- purge-audio -------------------------------------------------------------
