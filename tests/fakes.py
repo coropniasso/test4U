@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from kijun.discord.base import DiscordError, Reaction, Reply
 from kijun.extract.base import ExtractionError, RepairEvent
 from kijun.extract.chunk import Chunk
 from kijun.extract.models import ExtractedRequest, ExtractionResult
@@ -150,3 +151,42 @@ def make_item(
         reusable=reusable,
         pass_criterion=criterion,
     )
+
+
+class FakeDiscordClient:
+    """実際の Discord に接続しない偽の DiscordClient。
+
+    - post は message_id を "m1", "m2", ... と採番し、posted に (channel_id, content, message_id) を記録する。
+    - reactions / replies に message_id をキーにして値を入れると、fetch が返す。
+      入れていない message_id は「リアクションも返信も無い」として空のリストを返す。
+    - missing に入れた message_id は「取得できなかった(削除された)」として、結果のキーに含めない。
+    - fail_post_when に関数を渡すと、content がその条件を満たす投稿は DiscordError にする。
+    """
+
+    def __init__(self, fail_post_when=None) -> None:
+        self.posted: list[tuple[str, str, str]] = []
+        self.reactions: dict[str, list[Reaction]] = {}
+        self.replies: dict[str, list[Reply]] = {}
+        self.missing: set[str] = set()
+        self.fetch_calls: list[str] = []
+        self._fail_post_when = fail_post_when
+
+    def post(self, channel_id: str, content: str) -> str:
+        if self._fail_post_when is not None and self._fail_post_when(content):
+            raise DiscordError("偽の投稿失敗")
+        message_id = f"m{len(self.posted) + 1}"
+        self.posted.append((channel_id, content, message_id))
+        return message_id
+
+    def fetch_reactions(self, channel_id: str, message_ids: list[str]) -> dict[str, list[Reaction]]:
+        self.fetch_calls.append("reactions")
+        return {
+            m: list(self.reactions.get(m, [])) for m in message_ids if m not in self.missing
+        }
+
+    def fetch_thread_replies(self, channel_id: str, message_ids: list[str]) -> dict[str, list[Reply]]:
+        self.fetch_calls.append("replies")
+        return {m: list(self.replies.get(m, [])) for m in message_ids if m not in self.missing}
+
+    def contents(self) -> list[str]:
+        return [c for _, c, _ in self.posted]

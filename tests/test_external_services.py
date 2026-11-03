@@ -76,3 +76,22 @@ def test_e5_で埋め込みが取れる():
 
     e = E5Embedder(Config().match)
     assert e.encode_queries(["告知文の冒頭に行動を書く"]).shape == (1, e.dim)
+
+
+@pytest.mark.requires_network
+def test_discord_py_でチャンネルに投稿してリアクションと返信を読める():
+    """実機でだけ動かす。DISCORD_BOT_TOKEN と、投稿してよい試験用チャンネルの ID(KIJUN_TEST_DISCORD_CHANNEL)が要る。
+
+    Message Content Intent が無効だと、返信の読み取りで DiscordError になる(それも確認の対象)。
+    """
+    token = os.environ.get("DISCORD_BOT_TOKEN")
+    channel = os.environ.get("KIJUN_TEST_DISCORD_CHANNEL")
+    if not token or not channel:
+        pytest.skip("環境変数 DISCORD_BOT_TOKEN と KIJUN_TEST_DISCORD_CHANNEL を設定してください")
+    from kijun.discord.impl import DiscordPyClient
+
+    client = DiscordPyClient(token)
+    message_id = client.post(channel, "kijun の接続確認です。このメッセージは削除して構いません。")
+    assert message_id.isdigit()
+    assert message_id in client.fetch_reactions(channel, [message_id])
+    assert message_id in client.fetch_thread_replies(channel, [message_id])
