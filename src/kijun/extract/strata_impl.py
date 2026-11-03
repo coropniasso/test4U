@@ -46,7 +46,7 @@ def build_payload(cfg: Config, chunk: Chunk, enforces_json_schema: bool) -> dict
     }
     # 0 は「上限なし」。そのときは max_tokens を送らない。上限が無いと、推論トークンを含む生成が
     # n_ctx（実機で 204,800）まで走り得る（実機で 2,383 秒経っても終わらなかった事例がある）。
-    # 既定値 32000 は実測1点からの推測である（設定 extract.strata.max_tokens）。
+    # 既定値 20000 は実測（出力 13,050 トークンで stop）に余裕を持たせた値（設定 extract.strata.max_tokens）。
     if cfg.extract.strata.max_tokens > 0:
         payload["max_tokens"] = cfg.extract.strata.max_tokens
     if enforces_json_schema:

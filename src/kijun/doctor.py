@@ -73,6 +73,8 @@ TIMEOUT_MARGIN = 3
 TIMEOUT_FLOOR_SEC = 600
 # max_tokens の推奨値は、出力見込みのこの倍数。下限は 4096
 MAX_TOKENS_MARGIN = 2
+# timeout_sec = プロンプト処理の秒数 + max_tokens ÷ 観測された最も遅い生成速度 × この係数
+TIMEOUT_GENERATION_SAFETY = 1.5
 MAX_TOKENS_FLOOR = 4096
 # 会議1回を1リクエストで渡せると判断する分数（2時間の会議を想定）
 WHOLE_MEETING_MINUTES = 120
@@ -607,17 +609,29 @@ def _fit_generation(measurements: list[dict]) -> dict | None:
 
     2点・2係数（切片なし）の連立方程式を解く。2点の「出力 ÷ 入力」の比がほぼ同じだと、入力と出力の
     寄与を分けられない（連立方程式が特異に近づく）。そのとき、または係数が負になるときは、
-    所要時間の合計 ÷ 出力トークンの合計を出力1トークンあたりの秒数とし（プロンプト処理の時間を含む
-    保守的な値）、入力の係数は 0 とする。
+    入力の係数は 0 とする（プロンプト処理の時間は出力の速度に含まれる）。
 
-    戻り値: sec_per_input, sec_per_output, output_ratio（長い側の 出力 ÷ 入力）, mode, 測定の詳細。
-    usage が取れない、または2点が揃わなければ None。
+    戻り値: sec_per_input（分けられないときは 0）, min_output_speed（測定ごとの 出力 ÷ 秒数 の最小）,
+    output_ratio（長い側の 出力 ÷ 入力）, mode（separated / output_only / single）など。
+    usage が取れた測定が1点も無ければ None。1点だけのときは、その値を使う（mode = single）。
     """
-    if len(measurements) < 2:
+    usable = [m for m in measurements[:2] if _usable(m)]
+    if not usable:
         return None
-    short, long_ = measurements[0], measurements[1]
-    if not (_usable(short) and _usable(long_)):
-        return None
+    # 生成速度は測定ごとに 出力 ÷ 所要秒数（プロンプト処理の時間を含む）。最も遅いものを採る。
+    # 同じ profile・モデルでも 61〜69 tokens/s と 14 tokens/s が観測されており、1回の測定では決められない。
+    min_speed = min(m["output_tokens"] / m["elapsed_sec"] for m in usable)
+    long_ = usable[-1]
+    base = {
+        "output_ratio": long_["output_tokens"] / long_["input_tokens"],
+        "input_tokens": long_["input_tokens"],
+        "min_output_speed": min_speed,
+        "measured_points": len(usable),
+        "truncated": any(m.get("finish_reason") == "length" for m in usable),
+    }
+    if len(usable) < 2:
+        return {**base, "sec_per_input": 0.0, "mode": "single"}
+    short = usable[0]
     i1, o1, t1 = short["input_tokens"], short["output_tokens"], short["elapsed_sec"]
     i2, o2, t2 = long_["input_tokens"], long_["output_tokens"], long_["elapsed_sec"]
     r1, r2 = o1 / i1, o2 / i2
@@ -630,15 +644,7 @@ def _fit_generation(measurements: list[dict]) -> dict | None:
     if not (a > 0 and b > 0):
         mode = "output_only"
         a = 0.0
-        b = (t1 + t2) / (o1 + o2)
-    return {
-        "sec_per_input": a,
-        "sec_per_output": b,
-        "output_ratio": r2,
-        "mode": mode,
-        "input_tokens": i2,
-        "truncated": long_.get("finish_reason") == "length" or short.get("finish_reason") == "length",
-    }
+    return {**base, "sec_per_input": a, "mode": mode}
 
 
 def _recommend_with_output_length(
@@ -652,20 +658,22 @@ def _recommend_with_output_length(
     scale = recommended_chunk_minutes / cfg.extract.chunk_minutes
     planned_in = int(gen["input_tokens"] * scale)
     planned_out = int(planned_in * gen["output_ratio"])
-    estimated_sec = gen["sec_per_input"] * planned_in + gen["sec_per_output"] * planned_out
-    suggested = max(TIMEOUT_FLOOR_SEC, int(math.ceil(estimated_sec * TIMEOUT_MARGIN / 60) * 60))
     max_tokens = max(MAX_TOKENS_FLOOR, int(math.ceil(planned_out * MAX_TOKENS_MARGIN / 1000) * 1000))
-    worst_sec = gen["sec_per_output"] * max_tokens
+    prompt_sec = gen["sec_per_input"] * planned_in
+    generation_sec = max_tokens / gen["min_output_speed"]
+    estimated_sec = prompt_sec + generation_sec * TIMEOUT_GENERATION_SAFETY
+    suggested = max(TIMEOUT_FLOOR_SEC, int(math.ceil(estimated_sec / 60) * 60))
+    expected_sec = prompt_sec + planned_out / gen["min_output_speed"]
     if gen["mode"] == "separated":
         fit_note = (
-            f"入力と出力を分けて当てはめた（入力 1トークンあたり {gen['sec_per_input']:.4f} 秒、"
-            f"出力 1トークンあたり {gen['sec_per_output']:.4f} 秒）。"
+            f"プロンプト処理は入力 1トークンあたり {gen['sec_per_input']:.4f} 秒と当てはめた"
+            f"（約{prompt_sec:.0f} 秒）。"
         )
     else:
         fit_note = (
-            "2点の 出力÷入力 の比が近い、または分けると係数が負になるため、入力と出力を分けられなかった。"
-            f"所要時間の合計 ÷ 出力トークンの合計から、出力 1トークンあたり {gen['sec_per_output']:.4f} 秒"
-            "（プロンプト処理の時間を含む）とした。"
+            "プロンプト処理の時間は、出力の速度に含まれるものとして別には足していない"
+            + ("（測定が1点しか取れなかった）" if gen["mode"] == "single" else "（2点の 出力÷入力 の比が近い、または分けると係数が負になるため、入力と出力を分けられなかった）")
+            + "。"
         )
     truncated_note = (
         " 注意: 検査4の出力は max_tokens で切れていた（finish_reason = length）ので、出力の比は下限である。"
@@ -675,11 +683,14 @@ def _recommend_with_output_length(
     rec["timeout_sec"] = {
         "value": suggested,
         "reason": (
-            f"{fit_note}検査4の長い側の実測では、入力 {gen['input_tokens']} トークンに対し出力の比が "
-            f"{gen['output_ratio']:.2f} 倍。推奨する chunk_minutes={recommended_chunk_minutes} では、"
-            f"入力約{planned_in}トークン、出力約{planned_out}トークンと見込み、推定所要時間は約{estimated_sec:.0f} 秒。"
-            f"その {TIMEOUT_MARGIN} 倍（下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）。"
-            f"なお推奨の max_tokens={max_tokens} まで生成が続いた場合は約{worst_sec:.0f} 秒かかる。"
+            f"timeout_sec = プロンプト処理の秒数 + max_tokens ÷ 観測された最も遅い生成速度 × {TIMEOUT_GENERATION_SAFETY}"
+            f"（下限 {TIMEOUT_FLOOR_SEC} 秒、分単位に切り上げ）。検査4で観測された最も遅い生成速度は "
+            f"{gen['min_output_speed']:.1f} tokens/s（プロンプト処理を含む）、推奨の max_tokens={max_tokens}。{fit_note}"
+            "生成速度は同じ profile・モデルでも 61〜69 tokens/s と 14 tokens/s の4.4倍の振れが観測されているため、"
+            "1回の測定の定数倍では決めていない。"
+            f"参考: 推奨する chunk_minutes={recommended_chunk_minutes} では、入力約{planned_in}トークン、"
+            f"出力約{planned_out}トークン（実測の比 {gen['output_ratio']:.2f} 倍）と見込み、"
+            f"最も遅い速度での見込みは約{expected_sec:.0f} 秒。"
             "出力の比は固定の文を繰り返した入力からの値で、実際の会議では異なる可能性がある。"
             + truncated_note
         ),

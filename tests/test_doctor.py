@@ -595,7 +595,8 @@ def test_入力と出力の比が違えば_入力と出力の秒数を分けて�
     ]
     gen = _fit_generation(ms)
     assert gen["mode"] == "separated"
-    assert gen["sec_per_input"] == pytest.approx(0.01) and gen["sec_per_output"] == pytest.approx(0.02)
+    assert gen["sec_per_input"] == pytest.approx(0.01)
+    assert gen["min_output_speed"] == pytest.approx(min(2000 / 50.0, 3000 / 90.0))
     assert gen["output_ratio"] == pytest.approx(1.0)  # 長い側の比
 
 
@@ -609,14 +610,14 @@ def test_入力と出力の比が近ければ分けられないので_出力あ�
     ]
     gen = _fit_generation(ms)
     assert gen["mode"] == "output_only" and gen["sec_per_input"] == 0
-    assert gen["sec_per_output"] == pytest.approx((113.64 + 280.0) / (6952 + 16800))
+    assert gen["min_output_speed"] == pytest.approx(min(6952 / 113.64, 16800 / 280.0))
 
 
 def test_usage_が無ければ_出力長の当てはめはしない():
     from kijun.doctor import _fit_generation
 
     assert _fit_generation([{"elapsed_sec": 1.0}, {"elapsed_sec": 2.0}]) is None
-    assert _fit_generation([{"input_tokens": 1, "output_tokens": 1, "elapsed_sec": 1.0}]) is None
+    assert _fit_generation([]) is None
 
 
 def test_推奨値_timeout_と_max_tokens_は出力見込みから出す():
@@ -628,12 +629,36 @@ def test_推奨値_timeout_と_max_tokens_は出力見込みから出す():
     minutes = rec["chunk_minutes"]["value"]
     planned_in = int(2500 * minutes / 5)
     planned_out = int(planned_in * 10500 / 2500)
-    rate = (113.64 + 170.0) / (6952 + 10500)
-    assert rec["max_tokens"]["value"] == -(-planned_out * 2 // 1000) * 1000
-    expected = planned_out * rate * 3
+    max_tokens = -(-planned_out * 2 // 1000) * 1000
+    assert rec["max_tokens"]["value"] == max_tokens
+    slowest = min(6952 / 113.64, 10500 / 170.0)
+    expected = max_tokens / slowest * 1.5
     assert rec["timeout_sec"]["value"] == max(600, int(-(-expected // 60) * 60))
-    assert "4.20" in rec["timeout_sec"]["reason"] and "出力約" in rec["timeout_sec"]["reason"]
-    assert str(rec["max_tokens"]["value"]) in rec["timeout_sec"]["reason"]  # max_tokens まで続いた場合
+    reason = rec["timeout_sec"]["reason"]
+    assert "最も遅い生成速度" in reason and "4.4倍" in reason and "定数倍では決めていない" in reason
+    assert "4.20" in reason
+
+
+def test_推奨値_timeout_は生成速度が遅い測定に引きずられる():
+    """実機で 61 tokens/s と 14 tokens/s が観測された。遅いほうで決まり、速いほうの3倍にはならない。"""
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    fast = _usage_report(cfg, [(1000, 4000, 65.0, 2000), (2500, 10000, 160.0, 5000)])
+    slow = _usage_report(cfg, [(1000, 4000, 65.0, 2000), (2500, 10000, 715.0, 5000)])  # 14 tokens/s
+    t_fast = build_recommendations(cfg, fast)["timeout_sec"]["value"]
+    t_slow = build_recommendations(cfg, slow)["timeout_sec"]["value"]
+    assert t_slow > t_fast * 3
+
+
+def test_推奨値_測定が1点だけでもその値で決める():
+    cfg = Config()
+    cfg.extract.chunk_minutes = 5
+    report = _usage_report(cfg, [(2500, 10000, 160.0, 5000), (0, 0, 0, 0)])
+    ms = report.get("speed").detail["measurements"]
+    ms[1].pop("input_tokens"), ms[1].pop("output_tokens")
+    rec = build_recommendations(cfg, report)
+    assert "1点しか取れなかった" in rec["timeout_sec"]["reason"]
+    assert rec["max_tokens"]["value"] >= 4096
 
 
 def test_推奨値_max_tokens_の下限は_4096():

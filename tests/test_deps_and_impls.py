@@ -242,10 +242,10 @@ def test_Strata_のリクエストの形():
 
 
 def test_max_tokens_を既定で送る():
-    # 既定値 32000 は実測1点からの推測。上限が無いと n_ctx まで走り得る。
+    # 既定値 20000 は実測 13,050 トークンに余裕を持たせた値。上限が無いと n_ctx まで走り得る。
     transport = FakeTransport([(200, chat_body(EMPTY))])
     StrataExtractor(Config(), transport).extract(a_chunk())
-    assert transport.posts[0]["payload"]["max_tokens"] == 32000
+    assert transport.posts[0]["payload"]["max_tokens"] == 20000
 
 
 def test_max_tokens_が_0_なら送らない():
