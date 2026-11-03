@@ -111,7 +111,6 @@ def test_HF_TOKEN_が無ければ3つのモデルページへの同意を案内�
     fake_pyannote.Pipeline = object
     monkeypatch.setitem(sys.modules, "pyannote.audio", fake_pyannote)
     monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
-    monkeypatch.setitem(sys.modules, "faster_whisper.audio", types.ModuleType("faster_whisper.audio"))
     monkeypatch.delenv("HF_TOKEN", raising=False)
     from kijun.transcribe.pyannote_impl import PyannoteDiarizer
 
@@ -141,7 +140,6 @@ def test_モデル読み込みが失敗したときも3つのURLを案内する(
     fake_pyannote.Pipeline = FakePipeline
     monkeypatch.setitem(sys.modules, "pyannote.audio", fake_pyannote)
     monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
-    monkeypatch.setitem(sys.modules, "faster_whisper.audio", types.ModuleType("faster_whisper.audio"))
     monkeypatch.setenv("HF_TOKEN", "hf_dummy")
     from kijun.transcribe.pyannote_impl import PyannoteDiarizer
 

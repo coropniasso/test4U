@@ -306,7 +306,13 @@ FROM per_model;
 
 **複数ファイルは1本につないでから話者分離する。** ファイルごとに pyannote を走らせると `SPEAKER_00` が別人を指してしまうためである。
 
-pyannote には、PyAV（faster-whisper と同じデコーダー）で読んだ波形を渡す。torchaudio が Windows で m4a を読めないことがあるためである。pyannote 4.x にも対応しており、`from_pretrained` の引数名は `token` と `use_auth_token` のうち署名を見て選ぶ。
+**音声のデコードは自前で持つ（`transcribe/audio_decode.py` の `decode_to_mono_16k`）。** PyAV（`av`）を直接使い、16,000Hz・モノラル・float32（-1.0〜1.0）の配列を返す。サンプルレートの定数 `SAMPLE_RATE` はこのモジュールに1つだけ置く。faster-whisper には、パスではなくこの配列を渡す（配列なら faster-whisper は内部の `decode_audio` を呼ばない）。pyannote にも同じ配列を渡す。自前にした理由は3つある。
+
+1. `faster_whisper.audio.decode_audio` は公開 API ではなく、今後も壊れ得る。実機で初めて動かしたとき、新しい PyAV が `av.open()` から `metadata_errors` 引数を削除していて、`TypeError` で落ちた。
+2. 文字起こしと話者分離が同じ関数で同じ波形を作るので、両者の時刻が原理的にずれない。以前は別々にデコードしていた。ファイルをつなぐ際のオフセットも、`info.duration` ではなくデコードした配列の長さから計算する。
+3. `av` を古い版に固定すると、pyannote.audio 4.x が新しい `av` を要求したときに解決できなくなる。そのため `av` は `transcribe` extra と dev に、上限を付けずに直接の依存として宣言する。
+
+pyannote に PyAV で読んだ波形を渡す理由は、torchaudio が Windows で m4a を読めないことがあるためである。pyannote 4.x にも対応しており、`from_pretrained` の引数名は `token` と `use_auth_token` のうち署名を見て選ぶ。
 
 `HF_TOKEN` が未設定の場合は、`pyannote/speaker-diarization-3.1`、`pyannote/segmentation-3.0`、`pyannote/speaker-diarization-community-1` の3つのモデルページで利用条件に同意する必要があることを含めたエラーメッセージを出して終了する。
 
@@ -527,7 +533,7 @@ uv run kijun compare --conversation <ID> [--model <名前> --model <名前>] [--
 | extra | 入るもの |
 |---|---|
 | （既定） | duckdb、pydantic、typer、mutagen、numpy |
-| `transcribe` | faster-whisper、pyannote.audio、torch、torchaudio |
+| `transcribe` | av、faster-whisper、pyannote.audio、torch、torchaudio |
 | `extract` | httpx |
 | `match` | sentence-transformers |
 | `discord` | discord.py（無料。運転費用はゼロのまま） |

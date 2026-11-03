@@ -14,13 +14,13 @@ dependencies = [
 
 # 重い依存は用途別の extra に分ける。`uv sync` の既定では入らない。
 [project.optional-dependencies]
-transcribe = ["faster-whisper>=1.0", "pyannote.audio>=3.3", "torch>=2.4", "torchaudio>=2.4"]
+transcribe = ["av", "faster-whisper>=1.0", "pyannote.audio>=3.3", "torch>=2.4", "torchaudio>=2.4"]
 extract = ["httpx>=0.27"]
 match = ["sentence-transformers>=3.0"]
 discord = ["discord.py>=2.4"]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "av"]
 
 [project.scripts]
 kijun = "kijun.cli:app"

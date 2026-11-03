@@ -10,6 +10,7 @@ from pathlib import Path
 
 from kijun.config import TranscribeConfig
 from kijun.deps import import_optional
+from kijun.transcribe.audio_decode import SAMPLE_RATE, decode_to_mono_16k
 from kijun.transcribe.base import TranscribedSegment, shift_items
 
 
@@ -25,8 +26,11 @@ class FasterWhisperTranscriber:
         result: list[TranscribedSegment] = []
         offset = 0.0  # これまでに処理したファイルの長さの合計（秒）
         for path in audio_paths:
-            segments, info = self._model.transcribe(
-                str(path),
+            # 自前でデコードした配列を渡す。np.ndarray なら faster-whisper は内部の decode_audio を呼ばない
+            # （その関数は非公開で、PyAV の版との組み合わせで壊れたことがある）。
+            audio = decode_to_mono_16k(path)
+            segments, _info = self._model.transcribe(
+                audio,
                 language=self._cfg.language,
                 vad_filter=self._cfg.vad_filter,
                 word_timestamps=False,
@@ -36,5 +40,7 @@ class FasterWhisperTranscriber:
                 TranscribedSegment(start_sec=s.start, end_sec=s.end, text=s.text) for s in list(segments)
             ]
             result.extend(shift_items(one_file, offset))
-            offset += info.duration
+            # info.duration ではなく、デコードした配列の長さから秒数を出す。話者分離が同じ配列の
+            # 長さでファイルをつなぐので、両者のオフセットが常に一致する。
+            offset += len(audio) / SAMPLE_RATE
         return result

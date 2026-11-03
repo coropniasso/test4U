@@ -14,9 +14,8 @@ import numpy as np
 
 from kijun.config import DiarizeConfig
 from kijun.deps import import_optional
+from kijun.transcribe.audio_decode import SAMPLE_RATE, decode_to_mono_16k
 from kijun.transcribe.base import SpeakerTurn
-
-_SAMPLE_RATE = 16000
 
 MODEL_PAGES_TEXT = (
     "     - https://huggingface.co/pyannote/speaker-diarization-3.1\n"
@@ -41,10 +40,6 @@ class PyannoteDiarizer:
     def __init__(self, cfg: DiarizeConfig) -> None:
         pyannote_audio = import_optional("pyannote.audio", "transcribe", "pyannote による話者分離")
         torch = import_optional("torch", "transcribe", "pyannote による話者分離")
-        # faster_whisper の decode_audio（PyAV）で音声を読むために使う。
-        self._fw_audio = import_optional(
-            "faster_whisper.audio", "transcribe", "pyannote に渡す音声の読み込み"
-        )
         token = os.environ.get("HF_TOKEN")
         if not token:
             raise RuntimeError(HF_TOKEN_MISSING_MESSAGE)
@@ -74,18 +69,16 @@ class PyannoteDiarizer:
     def _load_waveform(self, audio_paths: list[Path]) -> dict:
         """全ファイルを 16kHz モノラルで読み込んで時間方向につなぎ、pyannote が受け取る辞書にする。
 
-        読み込みに faster-whisper が使う PyAV を使う理由は、pyannote が内部で使う torchaudio が
-        Windows で m4a を読めないことがあるため。
+        読み込みに自前の PyAV デコーダ（audio_decode）を使う理由は、pyannote が内部で使う torchaudio が
+        Windows で m4a を読めないことがあるため。文字起こしも同じデコーダを使うので、両者の時刻はずれない。
         複数ファイルを1本につなぐ理由は、ファイルごとに話者分離すると SPEAKER_00 が
         ファイルによって別人を指し、同じ会議の中で話者ラベルが一貫しなくなるため。
         つないだ後の時刻は、会議の先頭からの秒数になる。
         """
-        arrays = [
-            self._fw_audio.decode_audio(str(p), sampling_rate=_SAMPLE_RATE) for p in audio_paths
-        ]
+        arrays = [decode_to_mono_16k(p) for p in audio_paths]
         audio = arrays[0] if len(arrays) == 1 else np.concatenate(arrays)
         waveform = self._torch.from_numpy(audio).unsqueeze(0)  # (チャンネル数 1, サンプル数)
-        return {"waveform": waveform, "sample_rate": _SAMPLE_RATE}
+        return {"waveform": waveform, "sample_rate": SAMPLE_RATE}
 
     def diarize(self, audio_paths: list[Path]) -> list[SpeakerTurn]:
         num_speakers = self._cfg.num_speakers or None  # 0 は「指定なし」
