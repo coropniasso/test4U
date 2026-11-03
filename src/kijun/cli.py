@@ -502,6 +502,41 @@ def batch_run(
             raise typer.Exit(code=1)
 
 
+@batch_app.command("install-task")
+def batch_install_task(
+    ctx: typer.Context,
+    time: Annotated[str, typer.Option("--time", help="毎日実行する時刻(HH:MM)。")] = "23:30",
+    out: Annotated[
+        Path | None, typer.Option("--out", help="XML の保存先。省略すると ./kijun-nightly-task.xml。")
+    ] = None,
+) -> None:
+    """Windows のタスクスケジューラに登録するための XML を作り、登録コマンドを案内する(登録はしない)。"""
+    import shutil
+
+    from kijun.batch.task_xml import TASK_NAME, build_task_xml, schtasks_command
+
+    with _errors():
+        _config(ctx)  # 設定ファイルの誤りを先に報告する
+        config_args = f'--config "{Path(ctx.obj).resolve()}" ' if ctx.obj else ""
+        uv = shutil.which("uv") or "uv"
+        try:
+            xml = build_task_xml(time, uv, f"run kijun {config_args}batch run", Path.cwd())
+        except ValueError as e:
+            raise _fail(str(e)) from e
+        path = (out or Path("kijun-nightly-task.xml")).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(xml)
+        typer.echo(f"タスクスケジューラ用の XML を保存しました: {path}")
+        typer.echo(f"  毎日 {time} に、{Path.cwd()} で `{uv} run kijun {config_args}batch run` を実行します。")
+        typer.echo("  スリープ中でも起動し(WakeToRun)、電源が切れていた場合は次の起動時に実行します(StartWhenAvailable)。")
+        typer.echo("\n登録するには、PowerShell(管理者権限が必要なことがあります)で次を実行してください。")
+        typer.echo(f"  {schtasks_command(path)}")
+        typer.echo(f'同じ名前({TASK_NAME})のタスクを置き換えるときは、末尾に /f を付けます。')
+        if uv == "uv":
+            typer.echo("注意: uv のフルパスが見つからなかったので `uv` と書きました。タスクスケジューラの PATH に uv が無い場合は、XML の Command を uv.exe のフルパスに書き換えてください。")
+        typer.echo("注意: ユーザーがログオンしている間(画面ロックを含む)に実行します。ログオフ中は実行されません。")
+
+
 # --- derive-direction --------------------------------------------------------
 
 
