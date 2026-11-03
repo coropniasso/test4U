@@ -59,8 +59,16 @@ CUDA 版を入れるには、`pyproject.toml` の末尾近くにある、コメ�
 
 1. Hugging Face のアカウントでアクセストークンを作る（https://huggingface.co/settings/tokens）。
 2. https://huggingface.co/pyannote/speaker-diarization-3.1 のページで利用条件に同意する。
-3. https://huggingface.co/pyannote/segmentation-3.0 のページでも利用条件に同意する。両方に同意しないと、モデルの取得が失敗する。
-4. PowerShell で `$env:HF_TOKEN = "hf_..."` を実行する。
+3. https://huggingface.co/pyannote/segmentation-3.0 のページでも利用条件に同意する。
+4. https://huggingface.co/pyannote/speaker-diarization-community-1 のページでも利用条件に同意する。これは pyannote.audio 4.x で必要になる。`speaker-diarization-3.1` のパイプラインが内部で、このリポジトリの `plda/xvec_transform.npz`（話者の声の特徴を比較するファイル）を読むためである。3.1 を使っていても必要になる。
+5. PowerShell で `$env:HF_TOKEN = "hf_..."` を実行する。
+
+3つのどれか1つでも同意していないと、モデルの取得が失敗する（`Cannot access gated repo` と出る）。
+
+実機で確認した事実（pyannote.audio 4.0.7、2026-11-03）:
+
+- 3つとも、同意した直後に許可された。手動の承認待ちはない。
+- gated repo の同意フォームでは Company/university と Website が必須だが、内容は検証されない。個人なら `Individual` と、自分の GitHub のプロフィール URL を書けばよい。
 
 抽出は Strata（ローカルの推論サーバー）に対して行うので、API キーは要らない。秘密情報は `HF_TOKEN` だけで、環境変数で渡し、設定ファイルには書かない。
 
@@ -116,7 +124,7 @@ Discord でのレビュー（`discord read` / `discord post`）には、Discord 
 | 8 | `doctor` が出した推奨値を `config.toml` に書く | `enforces_json_schema` / `max_input_tokens` / `timeout_sec` / `chunk_minutes` / `overlap_minutes` の5つ |
 | 9 | `doctor` の結果を `CLAUDE.md` 7章に書き込む | 未検証事項2件（Strata がスキーマ適合を保証するか、このモデルが 64GB で動くか）への回答になる |
 | 10 | `pyproject.toml` の torch のインデックスのコメントを外し、タグを確認して `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
-| 11 | Hugging Face で pyannote の2つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
+| 11 | Hugging Face で pyannote の3つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
 | 12 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する |
 | 13 | 音声を inbox に置いて `uv run kijun ingest` → `uv run kijun transcribe --conversation <ID>` | `utterances` に発話が入る |
 | 14 | `uv run kijun extract --conversation <ID>` | 抽出が `extracted_requests` に入る。`data/extract_logs/` の JSON で、修復したチャンク数と失敗したチャンク数を確認する |

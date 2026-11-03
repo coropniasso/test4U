@@ -91,7 +91,7 @@
 ### 4-3. 文字起こしと話者分離（決定：ローカルで行う）
 
 - 文字起こし：faster-whisper の large-v3 を既定とする（2026-10-04 決定）。kotoba-whisper は実装しないが、`Transcriber` という1つのインターフェースの背後に置き、後から実装を足せる形にする。
-- 話者分離：pyannote.audio（speaker-diarization-3.1）。Hugging Faceのトークンと、モデルページでの利用条件への同意が必要。
+- 話者分離：pyannote.audio（speaker-diarization-3.1）。Hugging Faceのトークンと、モデルページ3つ（`pyannote/speaker-diarization-3.1`、`pyannote/segmentation-3.0`、`pyannote/speaker-diarization-community-1`）での利用条件への同意が必要。3つ目は pyannote.audio 4.x で必要になる（3.1 のパイプラインが内部で `plda/xvec_transform.npz` を読むため。2026-11-03 実機で確認）。
 - 話者ラベル（`SPEAKER_00` など）と人物の対応付けは、Discordで行う（4-6参照）。
 - 音声は PC の外に出さない。
 

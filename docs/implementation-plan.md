@@ -308,7 +308,7 @@ FROM per_model;
 
 pyannote には、PyAV（faster-whisper と同じデコーダー）で読んだ波形を渡す。torchaudio が Windows で m4a を読めないことがあるためである。pyannote 4.x にも対応しており、`from_pretrained` の引数名は `token` と `use_auth_token` のうち署名を見て選ぶ。
 
-`HF_TOKEN` が未設定の場合は、`pyannote/speaker-diarization-3.1` と `pyannote/segmentation-3.0` の両方のモデルページで利用条件に同意する必要があることを含めたエラーメッセージを出して終了する。
+`HF_TOKEN` が未設定の場合は、`pyannote/speaker-diarization-3.1`、`pyannote/segmentation-3.0`、`pyannote/speaker-diarization-community-1` の3つのモデルページで利用条件に同意する必要があることを含めたエラーメッセージを出して終了する。
 
 faster-whisper の `segments` は generator なので、使う前に list にする。generator のまま次の処理に渡すと、モデルを解放した後に評価されて落ちる。
 
@@ -578,7 +578,7 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 | 4 | `uv run kijun db init` | `data/kijun.duckdb` に10テーブルとビュー1つができる |
 | 5 | Strata を起動し `uv run kijun doctor` | 実測の表が出る。**音声が無くても実行できる。** 出た推奨値を `config.toml` に書き写す |
 | 6 | `pyproject.toml` の torch のインデックスを有効にして `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
-| 7 | Hugging Face で pyannote の2つのモデルページの利用条件に同意し `HF_TOKEN` を設定 | 次の手順が通る |
+| 7 | Hugging Face で pyannote の3つのモデルページの利用条件に同意し `HF_TOKEN` を設定 | 次の手順が通る |
 | 8 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する（別の端末で `nvidia-smi`） |
 | 9 | 2時間の音声で `uv run kijun extract` | 抽出が取れる。所要時間とメモリ使用量を記録する |
 | 10 | `uv run kijun match` | 初回は全件が新規候補になる |

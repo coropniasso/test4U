@@ -106,7 +106,7 @@ def test_依存が無ければ_extra_名を含むエラーになる(monkeypatch,
     assert f"uv sync --extra {extra}" in str(e.value)
 
 
-def test_HF_TOKEN_が無ければ両方のモデルページへの同意を案内する(monkeypatch):
+def test_HF_TOKEN_が無ければ3つのモデルページへの同意を案内する(monkeypatch):
     fake_pyannote = types.ModuleType("pyannote.audio")
     fake_pyannote.Pipeline = object
     monkeypatch.setitem(sys.modules, "pyannote.audio", fake_pyannote)
@@ -119,7 +119,38 @@ def test_HF_TOKEN_が無ければ両方のモデルページへの同意を案�
         PyannoteDiarizer(Config().diarize)
     msg = str(e.value)
     assert "HF_TOKEN" in msg
-    assert "pyannote/speaker-diarization-3.1" in msg and "pyannote/segmentation-3.0" in msg
+    for url in PYANNOTE_PAGE_URLS:
+        assert url in msg
+    assert "4.x" in msg
+
+
+PYANNOTE_PAGE_URLS = [
+    "https://huggingface.co/pyannote/speaker-diarization-3.1",
+    "https://huggingface.co/pyannote/segmentation-3.0",
+    "https://huggingface.co/pyannote/speaker-diarization-community-1",
+]
+
+
+def test_モデル読み込みが失敗したときも3つのURLを案内する(monkeypatch):
+    class FakePipeline:
+        @staticmethod
+        def from_pretrained(name, token=None):
+            raise OSError("Cannot access gated repo (403)")
+
+    fake_pyannote = types.ModuleType("pyannote.audio")
+    fake_pyannote.Pipeline = FakePipeline
+    monkeypatch.setitem(sys.modules, "pyannote.audio", fake_pyannote)
+    monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+    monkeypatch.setitem(sys.modules, "faster_whisper.audio", types.ModuleType("faster_whisper.audio"))
+    monkeypatch.setenv("HF_TOKEN", "hf_dummy")
+    from kijun.transcribe.pyannote_impl import PyannoteDiarizer
+
+    with pytest.raises(RuntimeError) as e:
+        PyannoteDiarizer(Config().diarize)
+    msg = str(e.value)
+    for url in PYANNOTE_PAGE_URLS:
+        assert url in msg
+    assert "4.x" in msg
 
 
 # --- Strata ---------------------------------------------------------------------------------

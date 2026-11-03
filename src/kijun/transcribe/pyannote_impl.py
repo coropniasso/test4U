@@ -1,6 +1,6 @@
 """pyannote.audio による話者分離（計画書 6-3）。
 
-GPU、Hugging Face のトークン、モデルページでの利用条件への同意が必要。
+GPU、Hugging Face のトークン、3つのモデルページでの利用条件への同意が必要。
 動作確認は Windows の実機で行う。モジュールのトップレベルでは重い依存を import しない。
 """
 
@@ -18,12 +18,19 @@ from kijun.transcribe.base import SpeakerTurn
 
 _SAMPLE_RATE = 16000
 
+MODEL_PAGES_TEXT = (
+    "     - https://huggingface.co/pyannote/speaker-diarization-3.1\n"
+    "     - https://huggingface.co/pyannote/segmentation-3.0\n"
+    "     - https://huggingface.co/pyannote/speaker-diarization-community-1\n"
+    "       （3つ目は pyannote.audio 4.x で必要。speaker-diarization-3.1 の内部から"
+    " plda/xvec_transform.npz として読まれる）\n"
+    "     （1つでも欠けると、モデルの取得が 401 / 403 で失敗する）\n"
+)
+
 HF_TOKEN_MISSING_MESSAGE = (
-    "環境変数 HF_TOKEN が設定されていません。pyannote のモデルを取得するには次の3つが必要です。\n"
+    "環境変数 HF_TOKEN が設定されていません。pyannote のモデルを取得するには次が必要です。\n"
     "  1. Hugging Face のアカウントでアクセストークンを作る（https://huggingface.co/settings/tokens）。\n"
-    "  2. https://huggingface.co/pyannote/speaker-diarization-3.1 のページで利用条件に同意する。\n"
-    "  3. https://huggingface.co/pyannote/segmentation-3.0 のページでも利用条件に同意する。\n"
-    "     （2 と 3 の両方に同意しないと、モデルの取得が 401 / 403 で失敗する）\n"
+    f"  2. 次の3つのページすべてで利用条件に同意する。\n{MODEL_PAGES_TEXT}"
     "  そのうえで、PowerShell なら `$env:HF_TOKEN = \"hf_...\"` を実行してから再度実行してください。"
 )
 
@@ -53,8 +60,8 @@ class PyannoteDiarizer:
         except Exception as e:
             raise RuntimeError(
                 f"pyannote のモデル '{cfg.model}' を読み込めませんでした: {e}\n"
-                "HF_TOKEN が有効か、speaker-diarization-3.1 と segmentation-3.0 の両方の"
-                "モデルページで利用条件に同意したかを確認してください。"
+                "HF_TOKEN が有効か、次の3つのモデルページすべてで利用条件に同意したかを"
+                f"確認してください。\n{MODEL_PAGES_TEXT}"
             ) from e
         if pipeline is None:
             raise RuntimeError(
