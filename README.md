@@ -3,16 +3,18 @@
 会話の録音から、自分の判断基準を「用途別のチェックリスト」として文書化するための個人用ツール。
 目的と制約は `CLAUDE.md`、実装の設計は `docs/implementation-plan.md` に書いてある。
 
-この版（第1弾）で動くのは、次の4つの作業と、それらが共有する基盤である。
+この版で動くのは、次の作業と、それらが共有する基盤である。
 
 | 作業表 | 内容 | サブコマンド |
 |---|---|---|
 | #4 | 文字起こし（faster-whisper）と話者分離（pyannote.audio） | `transcribe` |
 | #5 | Strata（Qwen3.8-Flash-Next）による抽出と、設定を変えた2回の実行の比較 | `doctor`、`extract`、`compare` |
 | #6 | DuckDB のスキーマ | `db init` |
+| #7 | Discord でのレビュー（投稿と、リアクション・返信の読み取り）。`direction` の導出、重要度の判定、矛盾の検出を含む | `discord read`、`discord post`、`derive-direction` |
+| #8 | 夜間バッチの統合とタスクスケジューラへの登録 | `batch run`、`batch install-task` |
 | #9 | 音声の30日削除 | `purge-audio` |
 
-Discord bot（#7）と、夜間バッチの統合・タスクスケジューラへの登録（#8）は、まだ作っていない（第2弾）。
+#7 と #8 は自動テストで確認しているが、**実際の Discord への接続と、Windows のタスクスケジューラへの登録はまだ確認していない**（クラウド環境に Discord のトークンも Windows も無いため）。下の「ユーザーが実機で行う確認の順序」の手順17以降で確認する。
 
 ## 導入
 
@@ -32,6 +34,7 @@ copy config.example.toml config.toml   # 必要な項目だけ書き換える。
 | 文字起こしと話者分離 | `uv sync --extra transcribe` | faster-whisper、pyannote.audio、torch、torchaudio |
 | 抽出（Strata への通信）と `doctor` | `uv sync --extra extract` | httpx |
 | 埋め込みによる照合 | `uv sync --extra match` | sentence-transformers |
+| Discord でのレビュー | `uv sync --extra discord` | discord.py |
 
 複数の extra を同時に入れるときは `uv sync --extra transcribe --extra extract` のように並べる。
 extra が足りない状態でサブコマンドを実行すると、どの extra を入れればよいかを示すエラーで終了する。
@@ -59,6 +62,29 @@ CUDA 版を入れるには、`pyproject.toml` の末尾近くにある、コメ�
 4. PowerShell で `$env:HF_TOKEN = "hf_..."` を実行する。
 
 抽出は Strata（ローカルの推論サーバー）に対して行うので、API キーは要らない。秘密情報は `HF_TOKEN` だけで、環境変数で渡し、設定ファイルには書かない。
+
+### Discord bot の準備
+
+Discord でのレビュー（`discord read` / `discord post`）には、Discord の bot が要る。**プロジェクトのサーバーではなく、自分だけの個人サーバーに作る**（メッセージに他のメンバーの発言が引用されるため。`CLAUDE.md` 2章）。bot が使うのは Discord の REST だけで、常駐しない。夜間バッチが動く間だけ接続する。
+
+1. https://discord.com/developers/applications でアプリケーションを作り、Bot を追加してトークンを取得する。
+2. Bot の設定で **Message Content Intent を有効にする。** 無効のままだと、返信の本文が空で返ってきて読めない（`discord read` が、有効にするよう示すエラーを出す）。
+3. OAuth2 の URL Generator で scope に `bot` を選び、権限に「チャンネルを見る」「メッセージを送信」「メッセージ履歴を読む」を付けて、個人サーバーに招待する。
+4. 個人サーバーに `#review`（新規候補・話者の対応付け・束ね結果）と `#contradictions`（矛盾の可能性がある組）を作る。Discord の設定でデベロッパーモードを有効にし、各チャンネルを右クリックして「チャンネルIDをコピー」する。
+5. `config.toml` の `[discord]` に `review_channel_id` と `contradictions_channel_id` を書く（数字の文字列）。
+6. `uv sync --extra discord` を実行する。
+7. PowerShell で `$env:DISCORD_BOT_TOKEN = "..."` を実行する。トークンは環境変数で渡し、設定ファイルには書かない。タスクスケジューラから実行する場合は、ユーザー環境変数に登録する（`setx DISCORD_BOT_TOKEN "..."`）。
+
+投稿へのリアクションと返信は、次のとおり使う。
+
+| 操作 | 意味 |
+|---|---|
+| ✅ / ❌ / ⏸ | 承認 / 却下 / 保留。**1つだけ付ける。** 複数付けると判定できないので何も変えず、`discord read` が会議IDと項目IDを出す |
+| 1️⃣ / 2️⃣ / 3️⃣ | 重要度（LLM の案を上書きする） |
+| 投稿への返信（スレッド、または返信） | 理由・適用条件・適用しない条件・文言の修正を、自由な文章で書く。原文は必ず `review_log` に残る |
+| 話者の対応付けへの返信 | `00=self 01=kouhai_a` と書く（確実）。自分を必ず `self` と書く。「00は自分、01は後輩A」のような文章でも読み取る |
+| 矛盾の投稿への返信 | A か B のどちらについてかが分かるように書く（例：「Aは社外向けの告知のとき。Bは社内連絡のとき」） |
+| 束ね結果への ❌ | 束ね方の誤り。自動では分割し直さない。`bundle.gap_minutes` を調整して `kijun ingest` をやり直す |
 
 ### Strata と Qwen3.8-Flash-Next
 
@@ -95,11 +121,17 @@ CUDA 版を入れるには、`pyproject.toml` の末尾近くにある、コメ�
 | 14 | `uv run kijun extract --conversation <ID>` | 抽出が `extracted_requests` に入る。`data/extract_logs/` の JSON で、修復したチャンク数と失敗したチャンク数を確認する |
 | 15 | `uv sync --extra match` して `uv run kijun match --conversation <ID> --dry-run` | 最類似の既存項目と類似度の一覧が出る（初回は既存項目が0件なので全件が新規候補） |
 | 16 | `config.toml` の `model` を変えてもう一度 `extract` し、`uv run kijun compare --conversation <ID>` | 対照表の Markdown が出る |
+| 17 | 上の「Discord bot の準備」を行う | `uv run pytest -m requires_network`（`KIJUN_TEST_DISCORD_CHANNEL` に試験用チャンネルのID）で、投稿・リアクションの取得・返信の取得が通る |
+| 18 | `uv run kijun discord post` | 話者の対応付けと新規候補が Discord に出る |
+| 19 | Discord で ✅ とスレッドへの返信を付け、話者の対応付けに `00=self 01=...` と返信してから `uv run kijun discord read` | `knowledge_items` の status、`review_log` の返信の原文、`speaker_map`、`direction` に反映される。返信の振り分けには Strata が要る |
+| 20 | `uv run kijun batch run --dry-run`、続けて `uv run kijun batch run` | 手順と順序が出る。実行すると `data/batch_logs/` に記録が残り、最後に成否の表が出る |
+| 21 | `uv run kijun batch install-task` が作った XML を、表示された `schtasks /create /xml` のコマンドで登録する | タスクスケジューラに登録され、翌晩にスリープ解除を含めて起動する。翌朝 `data/batch_logs/` を見る |
 
 手順5から9を手順10より前に置いてある理由は2つある。(1) Strata が 64GB で動くかどうかが最も不確かな部分で、動かないなら他の作業の前提が変わる。(2) `doctor` は音声も DB も GPU 用の依存も要らないので、torch の CUDA 版（数GB）を入れる前に、抽出が成立するかどうかを知れる。
 
 補足:
 
+- 手順4の注意（スキーマバージョン1の DB が既にある場合）: 第1弾で作った DB には、`kijun db init` が `ALTER TABLE` で `discord_posts` の `channel_id` と `pair_item_id` を足す（バージョン2への移行）。既存の行は残る。何度実行しても安全。
 - 手順4の注意（DB ファイルが既にある場合）: 埋め込みの `text_hash` 列とビュー `v_weekly_metrics` の修正より前に `kijun db init` を実行して作った DB ファイルがある場合、`embeddings` テーブルには `text_hash` 列が無い。`db init` は `CREATE TABLE IF NOT EXISTS` なので、既存のテーブルに列を足さない。
   - ビュー `v_weekly_metrics` は `CREATE OR REPLACE` なので、`kijun db init` をもう一度実行すれば新しい定義になる。
   - `embeddings` は、再計算できるキャッシュにすぎない。次の2コマンドで、他のテーブルの内容を残したまま作り直せる。
@@ -118,7 +150,7 @@ CUDA 版を入れるには、`pyproject.toml` の末尾近くにある、コメ�
 faster-whisper・pyannote と Qwen3.8-Flash-Next は、同時に VRAM に載せない。`transcribe` と `extract` は別のプロセスとして順に実行する。
 プロセスが終われば OS が GPU メモリを解放する。
 
-Strata に Ollama の `keep_alive: 0` に相当するアンロードの手段があるかは確認できていない。そのため、Strata をプロセスごと起動・停止する手段を設定（`extract.strata.start_command` / `stop_command`）で持たせてある。ただし**この2つを読む処理は第1弾には無い**（使うのは第2弾の夜間バッチ）。第1弾では、必要なら手で Strata を止めてから `transcribe` を実行する。
+Strata に Ollama の `keep_alive: 0` に相当するアンロードの手段があるかは確認できていない。そのため、Strata をプロセスごと起動・停止する手段を設定（`extract.strata.start_command` / `stop_command`）で持たせてある。夜間バッチ（`kijun batch run`）がこの2つを読み、Strata を使う手順（Discord の返信の読み取り、抽出、Discord への投稿）の前後で実行する。`start_command` は Strata を起動したらすぐに戻るコマンド（バックグラウンドで起動するもの）を書く。戻ったあと、Strata が応答するまで `batch.strata_ready_timeout_sec` を上限に待つ。空にすると、バッチは Strata を起動も停止もしない（手で起動しておく運用）。夜間バッチを使わず手で実行するときは、必要なら手で Strata を止めてから `transcribe` を実行する。
 
 ## CLI のサブコマンド
 
@@ -135,6 +167,13 @@ uv run kijun compare --conversation <ID> [--out <パス>] [--model <名前> --mo
                                                        # 同じ会議を2回抽出した結果の対照表（作業表 #5）
 uv run kijun match --conversation <ID> [--dry-run]     # 既存項目との照合
 uv run kijun purge-audio [--execute]                   # 音声の30日削除
+uv run kijun discord read                              # Discord のリアクションと返信を読み取って DB に反映（作業表 #7）
+uv run kijun discord post                              # 新規候補・矛盾・話者の対応付け・束ね結果を Discord に投稿（作業表 #7）
+uv run kijun derive-direction (--conversation <ID> | --all)
+                                                       # speaker_map から direction（自分→相手 / 相手→自分）を導出
+uv run kijun batch run [--dry-run]                     # 夜間バッチ（作業表 #8）。--dry-run は順序とコマンドを表示するだけ
+uv run kijun batch install-task [--time 23:30] [--out <パス>]
+                                                       # タスクスケジューラ登録用の XML を生成（登録は schtasks をユーザーが実行）
 ```
 
 全体に共通して `--config <パス>` で設定ファイルを指定できる（省略すると `./config.toml`、無ければ既定値）。
@@ -150,18 +189,24 @@ uv run kijun purge-audio [--execute]                   # 音声の30日削除
 | `extract` | 発話を `chunk_minutes` ごと（`overlap_minutes` 重ねる）に分け、Strata で要求・指摘を抽出し、`extracted_requests` に書く。出力は必ず修復（前置きの散文、コードフェンス、トップレベルが配列、末尾が切れている）を通してから検証する。読めなければ同じチャンクを1回だけ投げ直し、2回失敗したらそのチャンクを失敗として記録して次に進む。 |
 | `compare` | 同じ会議を**設定を変えて2回抽出した結果**を、数字の表と、左右に並べた対照表の Markdown にする。比べる対象は `model_name` が違う2組なので、2回目の抽出の前に `config.toml` の `extract.strata.model` をその設定を表す名前（例: `qwen3.8-flash-next-q8`）に変えておく。同じ名前のまま2回抽出すると、2回目が1回目を置き換える。 |
 | `match` | `reusable = true` の抽出結果を、既存のチェック項目とコサイン類似度で照合する。閾値（既定 0.85）以上なら既存項目に紐付け、未満なら `status = 'candidate'` の新規候補を作る。`--dry-run` は書かず、類似度の降順の表を出す。`--provider` で、どのモデルの抽出結果を対象にするかを選ぶ（省略すると設定の `extract.provider`）。 |
+| `discord read` | 前回までに投稿したメッセージのリアクションと返信を読む。✅❌⏸が1つだけ付いていれば status を更新し、**2つ以上付いていたら何も変えずに会議IDと項目IDを出す**（次回また対象になる）。1️⃣2️⃣3️⃣は重要度の上書き。返信は原文を `review_log` に残してから LLM で `reason` / `applies_when` / `not_applies_when` / `check_text` に振り分ける。話者の対応付けの返信は `speaker_map` に反映し、`self` が決まった会議の `direction` を導出する。`[discord]` のチャンネルIDが空なら何もせず、設定が必要だと出して終わる。 |
+| `discord post` | 新規候補（重要度の降順、同じなら新しい順に、`max_candidates_per_run` 件まで。残りの件数を出す）、矛盾の可能性がある組、話者の対応付けの依頼、複数ファイルを束ねた会議の一覧を投稿する。重要度が未判定の候補は投稿の前に LLM で判定する。`DISCORD_BOT_TOKEN` が要る。 |
+| `derive-direction` | `speaker_map` から `extracted_requests.direction` を導出する。`self` が決まっていない会議は導出しない。`speaker_map` を手で直した後や、`extract` をやり直した後に使う。 |
+| `batch run` | 夜間バッチ。`discord read` → `ingest` → `transcribe`（会議ごと）→ `extract`（会議ごと。前後で `start_command` / `stop_command`）→ `match`（会議ごと）→ `discord post` を、別プロセスとして順に起動する。`ingest` が失敗したら止め、それ以外は1つの会議の失敗で止めない。各手順の記録を `batch.log_dir` に JSON で保存し、最後に成否の表を出す。失敗があれば終了コード 1。 |
+| `batch install-task` | Windows のタスクスケジューラ用の XML（毎日 `--time` に実行。`WakeToRun` と `StartWhenAvailable` が true）を作り、登録用の `schtasks /create /xml` のコマンドを案内する。登録そのものはしない。 |
 | `purge-audio` | 文字起こし完了から `retention.audio_days`（既定 30）日以上たった音声の一覧を出す。`--execute` を付けたときだけ削除する。文字起こしの JSON は削除しない。 |
 
-## 第1弾の制約
+## 既知の制約
 
-- 承認件数は、レビューして初めて決まる数字なので、`compare` の出力には出ない。第1弾では、出力した Markdown に手で印を付ける（Discord での記録は第2弾）。
-- `extracted_requests.direction`（自分→相手 / 相手→自分）は、話者と人物の対応付け（`speaker_map`、第2弾の Discord）が済むまで確定できないので、NULL のままにする。
-- `knowledge_items.importance`（重要度）は、Discord への投稿時に判定する処理なので、第2弾まで NULL のままにする。
+- 承認件数そのものは `compare` の出力には出ない。承認の記録は `review_log`（`status_changed` と `check_text_edited`）にあり、「LLM の提案文言を修正せず承認した割合」（`CLAUDE.md` 6章）は、そこから数える。
+- 判定できないリアクション（✅と❌が両方など）は、推測で決めずに未処理のまま残る。標準出力（夜間バッチでは `batch_logs`）に出る会議IDと項目IDを見て、リアクションを1つに直す。
+- 承認のリアクションを付けて処理された後の返信は取り込まれない。リアクションと返信は、同じ時間帯に付ける。
+- 話者の対応付けの返信の原文は残らない（`review_log` は項目に属する出来事だけを入れる）。結果の `speaker_map` だけが残る。
+- `extract` をやり直した会議の `direction` は NULL に戻る。`derive-direction` で導出し直す。
 - `artifact_type` と `counterpart_role` の値は、LLM が自由な文字列を入れる。3回分の抽出結果を見て、よく出る値を決める。
-- 1つの会議が複数ファイルに分かれたときの束ね結果の確認は、第1弾では `ingest --dry-run` の標準出力で行う。
-- 失敗したチャンクの記録と、出力を修復した記録は、DuckDB のスキーマに列が無いので、DB と同じディレクトリの `extract_logs/` に JSON で保存する。`compare` がここを読む。
-- 抽出の良し悪しを数値で判断する手段が無い。背面が1つになったので、CLAUDE.md 4-4 にあった「Qwen の承認件数が Claude の8割以上なら一本化」という判断手順は使えない。代わりの指標は CLAUDE.md 6章の「LLM の提案文言を修正せず承認した割合」だが、その測定には承認の記録（#7、第2弾）が要る。第1弾でできるのは、`compare` の対照表を見て人が選ぶことである。
-- `extract.strata.start_command` / `stop_command` を読む処理は無い（第2弾の夜間バッチで使う）。
+- 矛盾の検出規則と重要度の3段階の基準は、設計者（Claude）が考案したもので、`CLAUDE.md` に根拠が無い。運用して見直す。
+- 失敗したチャンクの記録と、出力を修復した記録は、DuckDB のスキーマに列が無いので、DB と同じディレクトリの `extract_logs/` に JSON で保存する。`compare` と夜間バッチ（0件で済んだ抽出を毎晩やり直さないため）がここを読む。
+- 夜間バッチは、Strata を最大3回起動する（返信の読み取り、抽出、投稿）。起動が重いときは `start_command` を空にして、Strata を手で起動しておく。
 
 ## テスト
 
@@ -172,4 +217,4 @@ uv run pytest -m requires_network    # 実機で、Strata・Hugging Face を使�
 ```
 
 GPU・ネットワーク・外部プロセスに触る処理は、すべて `typing.Protocol` で定義したインターフェース
-（`Transcriber`、`Diarizer`、`Extractor`、`Embedder`）の背後に置いてある。テストでは `tests/fakes.py` の偽の実装を使う。
+（`Transcriber`、`Diarizer`、`Extractor`、`Embedder`、`DiscordClient`、`CommandRunner` と、LLM の3用途の `ImportanceJudge`、`ReplyRouter`、`SpeakerReplyInterpreter`）の背後に置いてある。テストでは `tests/fakes.py` の偽の実装を使う。
