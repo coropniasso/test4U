@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from kijun.extract.base import ExtractionError
+from kijun.extract.base import ExtractionError, RepairEvent
 from kijun.extract.chunk import Chunk
 from kijun.extract.models import ExtractedRequest, ExtractionResult
 from kijun.transcribe.base import SpeakerTurn, TranscribedSegment
@@ -44,6 +44,9 @@ class FakeExtractor:
     responses は、チャンクの番号（chunk.index）から「そのチャンク内の番号で書いた抽出結果」への辞書。
     無いチャンクは空の結果を返す。fail_chunks に入れた番号のチャンクは ExtractionError を出す。
     handler を渡すと、それを優先して使う。
+
+    enforces_json_schema と max_input_tokens は、背面の宣言を変えたときの呼び出し側の挙動を
+    テストするための引数である（どちらの値でもテストできるようにしてある）。
     """
 
     def __init__(
@@ -52,8 +55,14 @@ class FakeExtractor:
         fail_chunks: set[int] | None = None,
         model_name: str = "fake-model",
         handler: Callable[[Chunk], ExtractionResult] | None = None,
+        enforces_json_schema: bool = False,
+        max_input_tokens: int | None = None,
+        repair_events: list[RepairEvent] | None = None,
     ) -> None:
         self.model_name = model_name
+        self.enforces_json_schema = enforces_json_schema
+        self.max_input_tokens = max_input_tokens
+        self.repair_events = repair_events if repair_events is not None else []
         self._responses = responses or {}
         self._fail_chunks = fail_chunks or set()
         self._handler = handler
