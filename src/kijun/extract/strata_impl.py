@@ -71,6 +71,7 @@ class StrataExtractor:
         # 設定の 0 は「未確認」を表す（TOML に null が無いため）。属性では None にする。
         self.max_input_tokens = self._strata.max_input_tokens or None
         self.repair_events: list[RepairEvent] = []
+        self.last_usage: dict | None = None
         self._transport = transport or HttpxTransport()
 
     @property
@@ -136,6 +137,11 @@ class StrataExtractor:
             usage = response.json().get("usage")
         except TransportError:
             return
+        if isinstance(usage, dict):
+            self.last_usage = {
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+            }
         if not usage:
             print(
                 "注意: サーバーが usage を返さないため、入力・出力のトークン数は記録できません"
@@ -156,6 +162,7 @@ class StrataExtractor:
         （保証が実際に効いていれば、修復は何もしないので結果は変わらない）。
         """
         payload = self.build_payload(chunk)
+        self.last_usage = None
         last_error: Exception | None = None
         for attempt in range(1, 2 + RETRY_COUNT):
             response = self._post(payload)

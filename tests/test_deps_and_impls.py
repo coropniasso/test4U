@@ -422,3 +422,17 @@ def test_usage_が無ければそのことを出す(capsys):
     transport = FakeTransport([(200, chat_body(EMPTY))])
     StrataExtractor(Config(), transport).extract(a_chunk())
     assert "usage を返さない" in capsys.readouterr().err
+
+
+def test_last_usage_に直近の_usage_を残す():
+    transport = FakeTransport([(200, chat_body_with_usage(EMPTY, 2325, 13050))])
+    ex = StrataExtractor(Config(), transport)
+    assert ex.last_usage is None
+    ex.extract(a_chunk())
+    assert ex.last_usage == {"prompt_tokens": 2325, "completion_tokens": 13050}
+
+
+def test_usage_が無ければ_last_usage_は_None():
+    ex = StrataExtractor(Config(), FakeTransport([(200, chat_body(EMPTY))]))
+    ex.extract(a_chunk())
+    assert ex.last_usage is None

@@ -207,3 +207,23 @@ def test_概算の係数の既定値():
 
     c = Config().extract
     assert c.tokens_per_character == 0.55 and c.tokens_per_meeting_minute == 180
+
+
+def test_チャンクごとに開始と完了を標準エラーに出す(con, cfg, conv, capsys):
+    extractor = FakeExtractor({0: [make_item(1, quote="a")]})
+    extractor.last_usage = {"prompt_tokens": 2325, "completion_tokens": 13050}
+    run_extraction(con, cfg, conv, extractor, now=NOW)
+    err = capsys.readouterr().err
+    assert "チャンク 1/" in err and "を送ります" in err and "推定" in err
+    assert "完了（" in err and "入力 2325 トークン、出力 13050 トークン" in err and "抽出 1 件" in err
+
+
+def test_usage_が取れなければその旨を出す(con, cfg, conv, capsys):
+    run_extraction(con, cfg, conv, FakeExtractor({0: [make_item(1, quote="a")]}), now=NOW)
+    assert "トークン数は取れず" in capsys.readouterr().err
+
+
+def test_失敗の表示にチャンクの番号が入る(con, cfg, conv, capsys):
+    run_extraction(con, cfg, conv, FakeExtractor({0: [make_item(1, quote="a")]}, fail_chunks={1}), now=NOW)
+    err = capsys.readouterr().err
+    assert "失敗: チャンク 2/" in err

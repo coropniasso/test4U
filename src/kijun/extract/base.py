@@ -54,6 +54,9 @@ class Extractor(Protocol):
     # 出力を修復した記録。実装は空のリストで初期化し、修復するたびに追加する。
     # run.py がこれを読んで extract_logs に書く。
     repair_events: list[RepairEvent]
+    # 直近の extract() でサーバーが返した usage（{"prompt_tokens": 入力, "completion_tokens": 出力}）。
+    # サーバーが返さなかった、または背面が持たないときは None。run.py が進捗の表示に使う。
+    last_usage: dict | None
 
     def extract(self, chunk: Chunk) -> ExtractionResult:
         """チャンクから要求・指摘を抽出する。

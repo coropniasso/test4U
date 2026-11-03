@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -146,6 +147,13 @@ def check_chunk_input_size(
     )
 
 
+def _usage_text(usage: dict | None) -> str:
+    """完了の表示に入れる入力・出力のトークン数。取れなければその旨を返す。"""
+    if not usage or usage.get("prompt_tokens") is None or usage.get("completion_tokens") is None:
+        return "トークン数は取れず（サーバーが usage を返さない）"
+    return f"入力 {usage['prompt_tokens']} トークン、出力 {usage['completion_tokens']} トークン"
+
+
 def run_extraction(
     con: duckdb.DuckDBPyConnection,
     cfg: Config,
@@ -181,13 +189,23 @@ def run_extraction(
         if warning is not None:
             run.oversize_warnings.append(warning)
             log(f"警告: {warning}")
+        system, user = build_messages(chunk, cfg)
+        estimated = estimate_messages_tokens(system, user, cfg.extract.tokens_per_character)
+        label = f"チャンク {chunk.index + 1}/{len(chunks)}"
+        log(f"{label}（発話 {chunk.seq_from}〜{chunk.seq_to}、推定 {estimated} トークン）を送ります")
+        started = time.monotonic()
         try:
             result = extractor.extract(chunk)
             results.append((chunk, result.items))
+            log(
+                f"{label} 完了（{time.monotonic() - started:.0f} 秒、"
+                f"{_usage_text(getattr(extractor, 'last_usage', None))}、抽出 {len(result.items)} 件）"
+            )
         except ExtractionError as e:
             run.failures.append(ChunkFailure(chunk.index, chunk.seq_from, chunk.seq_to, str(e)))
             log(
-                f"失敗: チャンク {chunk.index + 1}/{len(chunks)}（発話 {chunk.seq_from}〜{chunk.seq_to}）: {e}"
+                f"失敗: {label}（発話 {chunk.seq_from}〜{chunk.seq_to}、"
+                f"{time.monotonic() - started:.0f} 秒で失敗）: {e}"
             )
             results.append((chunk, None))
 
