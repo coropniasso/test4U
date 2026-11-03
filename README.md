@@ -48,9 +48,10 @@ CUDA 版を入れるには、`pyproject.toml` の末尾近くにある、コメ�
 
 1. https://pytorch.org/get-started/locally/ を開く。
 2. Stable、Windows、Pip、Python、CUDA を選ぶ。表示される `pip install ... --index-url https://download.pytorch.org/whl/cuXXX` の `cuXXX` が、現在のタグである。
-   RTX 4070 Ti は CUDA 12 系で動く。計画書では `cu126` と書いたが、これは書いた時点の推測なので、画面に出たタグを優先する。
+   2026-11-03 に確認した値は `cu132`（CUDA 13.2、torch 2.15.0、Windows）。CUDA 13.4 を選ぶと `cu134` になる。
+   RTX 4070 Ti はどちらでも動くが、新しいほうはより新しいドライバを要求するので、迷ったら `cu132` を使う。画面に出たタグを優先する。
 3. `pyproject.toml` のコメントアウトした部分の `#` を外す。
-4. 3 か所の `cu126` を、2 で確認したタグに書き換える（`[[tool.uv.index]]` の `name` と `url`、`[tool.uv.sources]` の `index` 名の 2 行）。
+4. 4 か所の `cu132` が、2 で確認したタグと違っていれば書き換える（`[[tool.uv.index]]` の `name` と `url`、`[tool.uv.sources]` の `index` 名の 2 行）。
 5. `uv sync --extra transcribe` を実行する。
 6. `uv run python -c "import torch; print(torch.cuda.is_available())"` が `True` になることを確認する。
 

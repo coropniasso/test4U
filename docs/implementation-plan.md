@@ -532,7 +532,9 @@ uv run kijun compare --conversation <ID> [--model <名前> --model <名前>] [--
 | `match` | sentence-transformers |
 | `discord` | discord.py（無料。運転費用はゼロのまま） |
 
-**torch の CUDA 版について。** `pyproject.toml` に CUDA 版のインデックス指定（`[[tool.uv.index]]` と `[tool.uv.sources]`）を書いてあるが、**コメントアウトしてある**。`uv lock` は extra を使わなくても `download.pytorch.org` に接続し、開発環境の proxy がそれを 403 で拒否して `uv sync` が失敗するためである。Windows では**コメントを外し、`cu126` というタグを現在の値に書き換えてから** `uv sync --extra transcribe` を実行する。現在のタグは https://pytorch.org/get-started/locally/ で確認する。RTX 4070 Ti は CUDA 12 系で動く。
+**torch の CUDA 版について。** `pyproject.toml` に CUDA 版のインデックス指定（`[[tool.uv.index]]` と `[tool.uv.sources]`）を書いてあるが、**コメントアウトしてある**。`uv lock` は extra を使わなくても `download.pytorch.org` に接続し、開発環境の proxy がそれを 403 で拒否して `uv sync` が失敗するためである。Windows では**コメントを外してから** `uv sync --extra transcribe` を実行する。タグは 2026-11-03 に https://pytorch.org/get-started/locally/ で確認した `cu132`（CUDA 13.2、torch 2.15.0、Windows）を書いてある。CUDA 13.4 を選ぶ場合は `cu134`。実機の Strata のエンジンも CUDA 13 系（`cublas64_13.dll`）なので一致する。
+
+この変更は実機の環境に固有なので、**コミットしない**。コミットすると、開発環境の `uv sync` が `download.pytorch.org` に接続できずに失敗する。
 
 ### 11-2. CLI のサブコマンド
 
@@ -605,7 +607,7 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 | トークン数の概算の係数 | 日本語1文字あたり1.5トークン、会議1分あたり500トークン。**実測ではなく概算** | `doctor` の実測で置き換える |
 | pyannote.audio が Windows + CUDA で動くか | 未確認 | 実機手順8 |
 | Qwen3.8-Flash-Next の量子化版の入手先とタグ | 未確認 | ユーザーが Strata のモデル一覧で確認 |
-| torch の CUDA のタグ（`cu126` か別か） | 未確認 | https://pytorch.org/get-started/locally/ |
+| ~~torch の CUDA のタグ~~ | **2026-11-03 確認済み。`cu132`（CUDA 13.2、torch 2.15.0、Windows）** | — |
 | 通話を PC スピーカー出力で録音したときに相手の声が十分に入るか | 未確認（`CLAUDE.md` 7章） | 30分の実通話テスト |
 | `artifact_type` と `counterpart_role` の値の一覧 | LLM が自由な文字列を入れる。候補を固定していない | 3回分の抽出結果を見て、よく出る値を `config.toml` に列挙する |
 
