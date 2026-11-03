@@ -34,6 +34,11 @@ discord_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(discord_app, name="discord")
+batch_app = typer.Typer(
+    help="夜間バッチ(CLAUDE.md 4-8)。既存の CLI を別プロセスとして順に起動する。",
+    no_args_is_help=True,
+)
+app.add_typer(batch_app, name="batch")
 
 
 class Provider(str, Enum):
@@ -461,6 +466,40 @@ def discord_post(ctx: typer.Context) -> None:
             con.close()
         if code:
             raise typer.Exit(code=code)
+
+
+# --- batch -------------------------------------------------------------------
+
+
+@batch_app.command("run")
+def batch_run(
+    ctx: typer.Context,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="実行する順序と各コマンドを表示するだけで、何も実行しない。")
+    ] = False,
+) -> None:
+    """夜間バッチを実行する(discord read -> ingest -> transcribe -> extract -> match -> discord post)。"""
+    from kijun.batch.run import format_summary, plan_lines, run_batch, write_log
+    from kijun.batch.runner import SubprocessRunner
+
+    with _errors():
+        cfg = _config(ctx)
+        if dry_run:
+            for line in plan_lines(cfg, ctx.obj):
+                typer.echo(line)
+            typer.echo("\n--dry-run のため、何も実行していません。")
+            return
+        transport = None
+        if cfg.extract.strata.start_command:
+            from kijun.transport import HttpxTransport
+
+            transport = HttpxTransport()  # Strata の応答を待つのに使う
+        result = run_batch(cfg, ctx.obj, SubprocessRunner(), transport, echo=typer.echo)  # type: ignore[arg-type]
+        log_path = write_log(cfg, result)
+        typer.echo("\n" + format_summary(result))
+        typer.echo(f"\n記録を保存しました: {log_path}")
+        if not result.ok:
+            raise typer.Exit(code=1)
 
 
 # --- derive-direction --------------------------------------------------------

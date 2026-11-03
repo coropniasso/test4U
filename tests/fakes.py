@@ -283,3 +283,55 @@ class FakeChatTransport:
         if self.get_error is not None or len(self.gets) <= self.get_ready_after:
             raise self.get_error or TransportError("まだ応答しません")
         return self._response(200, '{"data": []}', 0.1)
+
+
+class FakeCommandRunner:
+    """外部コマンドを実行せず、決めた結果を返す偽の CommandRunner。
+
+    handler(command) -> int | tuple[int, str] | None。int は終了コード、tuple は (終了コード, 出力)、
+    None は成功(0)。command は、list(kijun の起動)なら ["python", "-m", "kijun.cli", ...] の引数列、
+    str(start_command など)ならその文字列。calls に実行順に記録する。
+    handler の中で DB を書き換えて、子プロセスの副作用を再現できる。
+    """
+
+    def __init__(self, handler=None) -> None:
+        from datetime import datetime
+
+        self._handler = handler
+        self._datetime = datetime
+        self.calls: list[list[str] | str] = []
+        self.timeouts: list[float | None] = []
+
+    def run(self, command, timeout_sec=None):
+        from kijun.batch.runner import CommandResult
+
+        self.calls.append(command)
+        self.timeouts.append(timeout_sec)
+        outcome = self._handler(command) if self._handler else None
+        code, output = (outcome if isinstance(outcome, tuple) else (0 if outcome is None else outcome, ""))
+        now = self._datetime(2026, 11, 4, 23, 30)
+        return CommandResult(code, output, now, now)
+
+    def kijun_calls(self) -> list[str]:
+        """kijun のサブコマンド(--config を除く)を「ingest」「transcribe --conversation X」の形で返す。"""
+        out = []
+        for c in self.calls:
+            if isinstance(c, list):
+                args = c[3:]
+                if args[:1] == ["--config"]:
+                    args = args[2:]
+                out.append(" ".join(args))
+        return out
+
+    def commands(self) -> list[str]:
+        """実行したコマンドを順に、kijun のものは「kijun ingest」、シェルのものはそのままの形で返す。"""
+        out = []
+        for c in self.calls:
+            if isinstance(c, list):
+                args = c[3:]
+                if args[:1] == ["--config"]:
+                    args = args[2:]
+                out.append("kijun " + " ".join(args))
+            else:
+                out.append(c)
+        return out
