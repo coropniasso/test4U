@@ -97,7 +97,7 @@
 
 **実機で踏んだ2つの問題と対処（2026-11-03）**
 
-1. **CTranslate2 が CUDA 12 の DLL を要求する。** faster-whisper の計算エンジンである CTranslate2 4.8.2 は `cublas64_12.dll` を探すが、torch 2.15.0+cu132 が同梱するのは `cublas64_13.dll` である。torch を下げる必要はなく、名前が違う別の DLL なので共存できる。`uv pip install nvidia-cublas-cu12 nvidia-cudnn-cu12` を入れ、`.venv\Lib\site-packages\nvidia\cublas\bin` と `...\cudnn\bin` を DLL の探索対象にする。**PowerShell の `$env:PATH` に足すのは、そのウィンドウの間だけ有効である。夜間バッチはタスクスケジューラから起動するので、コード側で `os.add_dll_directory()` を呼ぶ必要がある。**
+1. **CTranslate2 が CUDA 12 の DLL を要求する。** faster-whisper の計算エンジンである CTranslate2 4.8.2 は `cublas64_12.dll` を探すが、torch 2.15.0+cu132 が同梱するのは `cublas64_13.dll` である。torch を下げる必要はなく、名前が違う別の DLL なので共存できる。`nvidia-cublas-cu12` と `nvidia-cudnn-cu12` を入れる（2026-11-03 以降は `transcribe` の extra に Windows 限定の依存として入っているので、`uv sync --extra transcribe` で入る）。**DLL の探索対象への登録は、コード側で行う（`src/kijun/transcribe/cuda_dlls.py`）。** PowerShell の `$env:PATH` に足す方法はそのウィンドウの間だけ有効で、タスクスケジューラから起動する夜間バッチでは効かないためである。登録は `faster_whisper` を import する前に行う必要がある（import した時点で `ctranslate2` の拡張モジュールが DLL を解決するため）。
 2. **faster-whisper の内部のデコード関数が PyAV の新しい版で壊れる。** `faster_whisper.audio.decode_audio` が `av.open()` に `metadata_errors` を渡すが、PyAV 18.1.0 はこの引数を削除した。対処として、音声のデコードを `src/kijun/transcribe/audio_decode.py` に自前で持ち、文字起こしと話者分離の両方がそれを使う形にした（faster-whisper の非公開関数に依存しない。両者が同じ波形を見るので時刻もずれない）。
 
 **発話の長さの上限（2026-11-03 追加）**
