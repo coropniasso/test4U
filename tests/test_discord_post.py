@@ -1,0 +1,201 @@
+"""Discord への投稿(仕様 1-4、2-3、テスト 7)。"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
+from kijun.db import repo
+from kijun.discord.post import count_candidates_needing_importance, run_post
+from tests.conftest import make_conversation
+from tests.fakes import FakeDiscordClient, FakeImportanceJudge
+from tests.review_helpers import CID, NOW, add_item, add_request, candidate, setup_conversation
+
+
+def configure(cfg, review="111", contra="222", max_candidates=20):
+    cfg.discord.review_channel_id = review
+    cfg.discord.contradictions_channel_id = contra
+    cfg.discord.max_candidates_per_run = max_candidates
+    return cfg
+
+
+def candidate_messages(client: FakeDiscordClient) -> list[str]:
+    return [c for c in client.contents() if c.startswith("【新規候補 #")]
+
+
+def numbers(client: FakeDiscordClient) -> list[str]:
+    """投稿した新規候補の項目番号を、投稿順に返す。"""
+    out = []
+    for c in client.contents():
+        if c.startswith("【新規候補 #"):
+            out.append(c.split("#")[1].split("】")[0])
+    return out
+
+
+def test_重要度の降順_同じ重要度なら新しい順に投稿する(con, cfg):
+    configure(cfg)
+    base = datetime(2026, 11, 3, 12, 0)
+    candidate(con, 1, importance=1, linked_at=base)
+    candidate(con, 2, importance=3, linked_at=base)
+    candidate(con, 3, importance=3, linked_at=datetime(2026, 11, 3, 13, 0))  # 重要度3のうち新しい
+    candidate(con, 4, importance=2, linked_at=base)
+    client = FakeDiscordClient()
+
+    run_post(con, cfg, client, None, NOW)
+
+    assert numbers(client) == ["0003", "0002", "0004", "0001"]
+
+
+def test_上限を超えた分は投稿されず_次回に回る(con, cfg):
+    configure(cfg, max_candidates=2)
+    for n, imp in [(1, 1), (2, 3), (3, 2), (4, 3)]:
+        candidate(con, n, importance=imp)
+    client = FakeDiscordClient()
+
+    first = run_post(con, cfg, client, None, NOW)
+
+    assert len(numbers(client)) == 2
+    assert set(numbers(client)) == {"0002", "0004"}  # 重要度の高い2件が先に出る
+    assert first.not_posted_candidates == 2  # 投稿していない件数を報告する
+    assert {p.item_id for p in repo.list_discord_posts(con, "new_candidate")} == {"item_0002", "item_0004"}
+
+    second = run_post(con, cfg, client, None, NOW)  # 次回に残りが出る。投稿済みは再投稿しない
+    assert set(numbers(client)) == {"0001", "0002", "0003", "0004"} and len(numbers(client)) == 4
+    assert second.not_posted_candidates == 0
+
+    third = run_post(con, cfg, client, None, NOW)
+    assert len(numbers(client)) == 4 and third.posted == {}
+
+
+def test_投稿の記録にチャンネルIDが残る(con, cfg):
+    configure(cfg, review="111", contra="222")
+    candidate(con, 1, importance=2)
+    run_post(con, cfg, FakeDiscordClient(), None, NOW)
+    post = repo.list_discord_posts(con, "new_candidate")[0]
+    assert post.channel_id == "111" and post.item_id == "item_0001" and post.processed_at is None
+    assert post.message_id.startswith("m") and post.conversation_id == CID
+
+
+def test_重要度が未判定の候補はLLMで判定して保存し_根拠を_review_log_に残す(con, cfg):
+    configure(cfg)
+    candidate(con, 1, importance=None, check_text="項目A")
+    candidate(con, 2, importance=3, check_text="項目B")  # 判定済みは再判定しない
+    judge = FakeImportanceJudge(importance=2)
+    assert count_candidates_needing_importance(con) == 1
+
+    run_post(con, cfg, FakeDiscordClient(), judge, NOW)
+
+    assert [c[0] for c in judge.calls] == ["項目A"]
+    assert judge.calls[0][1] == ["発言1"]  # 根拠の発言を渡す
+    assert repo.get_knowledge_item(con, "item_0001").importance == 2
+    log = repo.list_review_log(con, "item_0001", "importance_proposed")
+    assert [(r.before, r.after) for r in log] == [(None, "根拠:項目A")]
+    assert count_candidates_needing_importance(con) == 0
+
+
+def test_重要度の判定に失敗しても投稿し_重要度案はなしと出る(con, cfg):
+    configure(cfg)
+    candidate(con, 1, importance=None, check_text="項目A")
+    client = FakeDiscordClient()
+
+    report = run_post(con, cfg, client, FakeImportanceJudge(fail_for={"項目A"}), NOW)
+
+    assert "重要度案：なし" in candidate_messages(client)[0]
+    assert repo.get_knowledge_item(con, "item_0001").importance is None
+    assert not report.failed  # 判定の失敗は投稿の失敗ではない
+
+
+def test_LLMを使えないときも投稿できる(con, cfg):
+    configure(cfg)
+    candidate(con, 1, importance=None)
+    client = FakeDiscordClient()
+    run_post(con, cfg, client, None, NOW)
+    assert "重要度案：なし" in candidate_messages(client)[0]
+
+
+def test_status_が候補でない項目は投稿しない(con, cfg):
+    configure(cfg)
+    candidate(con, 1, importance=2, status="approved")
+    candidate(con, 2, importance=2, status="rejected")
+    client = FakeDiscordClient()
+    run_post(con, cfg, client, None, NOW)
+    assert numbers(client) == []
+
+
+def test_2000文字を超えて収まらない文面は投稿せず_失敗として報告する(con, cfg):
+    configure(cfg)
+    candidate(con, 1, importance=2, check_text="あ" * 2500)
+    candidate(con, 2, importance=1)
+    client = FakeDiscordClient()
+
+    report = run_post(con, cfg, client, None, NOW)
+
+    assert numbers(client) == ["0002"]  # 他の候補は投稿される
+    assert report.failed and "上限" in report.failures[0] and "item_0001" in report.failures[0]
+    assert report.not_posted_candidates == 1  # 投稿できなかった分は未投稿として残る
+
+
+def test_1件の投稿の失敗で全体を止めない(con, cfg):
+    configure(cfg)
+    candidate(con, 1, importance=3, check_text="失敗させる項目")
+    candidate(con, 2, importance=2)
+    client = FakeDiscordClient(fail_post_when=lambda c: "失敗させる項目" in c)
+
+    report = run_post(con, cfg, client, None, NOW)
+
+    assert numbers(client) == ["0002"] and report.failed
+    assert [p.item_id for p in repo.list_discord_posts(con, "new_candidate")] == ["item_0002"]  # 失敗は記録しない
+
+
+def test_話者の対応付けは会議ごとに1回だけ投稿する(con, cfg):
+    configure(cfg)
+    setup_conversation(con)
+    client = FakeDiscordClient()
+
+    first = run_post(con, cfg, client, None, NOW)
+    second = run_post(con, cfg, client, None, NOW)
+
+    samples = [c for c in client.contents() if c.startswith("【話者の対応付け】")]
+    assert len(samples) == 1 and "00=self 01=kouhai_a" in samples[0]
+    assert first.posted == {"speaker_sample": 1} and second.posted == {}
+    post = repo.list_discord_posts(con, "speaker_sample")[0]
+    assert post.conversation_id == CID and post.channel_id == "111"
+
+
+def test_self_が決まっている会議には話者の対応付けを投稿しない(con, cfg):
+    configure(cfg)
+    setup_conversation(con)
+    repo.set_speaker_map(con, CID, "SPEAKER_00", "self")
+    client = FakeDiscordClient()
+    run_post(con, cfg, client, None, NOW)
+    assert client.contents() == []
+
+
+def test_束ね結果は複数ファイルの会議だけ投稿する(con, cfg):
+    configure(cfg)
+    repo.insert_conversation(con, make_conversation("single"))
+    repo.insert_conversation(con, make_conversation("bundled", source_files=["a.m4a", "b.m4a"]))
+    client = FakeDiscordClient()
+    run_post(con, cfg, client, None, NOW)
+    run_post(con, cfg, client, None, NOW)
+    bundles = [c for c in client.contents() if c.startswith("【束ね結果】")]
+    assert len(bundles) == 1 and "bundled" in bundles[0]
+
+
+def test_チャンネルIDが空なら何もせず_設定が必要だと出す(con, cfg):
+    candidate(con, 1, importance=2)
+    client = FakeDiscordClient()
+    report = run_post(con, cfg, client, None, NOW)
+    assert client.posted == [] and report.skipped_for_config
+    assert "設定が必要" in report.messages[0]
+
+
+def test_review_だけ空なら矛盾だけ_contradictions_だけ空なら候補だけ投稿する(con, cfg):
+    configure(cfg, review="", contra="222")
+    candidate(con, 1, importance=2)
+    client = FakeDiscordClient()
+    report = run_post(con, cfg, client, None, NOW)
+    assert numbers(client) == [] and any("review_channel_id が空" in m for m in report.messages)
+
+    configure(cfg, review="111", contra="")
+    report = run_post(con, cfg, client, None, NOW)
+    assert numbers(client) == ["0001"] and any("contradictions_channel_id が空" in m for m in report.messages)
