@@ -100,9 +100,28 @@
 1. **CTranslate2 が CUDA 12 の DLL を要求する。** faster-whisper の計算エンジンである CTranslate2 4.8.2 は `cublas64_12.dll` を探すが、torch 2.15.0+cu132 が同梱するのは `cublas64_13.dll` である。torch を下げる必要はなく、名前が違う別の DLL なので共存できる。`nvidia-cublas-cu12` と `nvidia-cudnn-cu12` を入れる（2026-11-03 以降は `transcribe` の extra に Windows 限定の依存として入っているので、`uv sync --extra transcribe` で入る）。**DLL の探索対象への登録は、コード側で行う（`src/kijun/transcribe/cuda_dlls.py`）。** PowerShell の `$env:PATH` に足す方法はそのウィンドウの間だけ有効で、タスクスケジューラから起動する夜間バッチでは効かないためである。登録は `faster_whisper` を import する前に行う必要がある（import した時点で `ctranslate2` の拡張モジュールが DLL を解決するため）。
 2. **faster-whisper の内部のデコード関数が PyAV の新しい版で壊れる。** `faster_whisper.audio.decode_audio` が `av.open()` に `metadata_errors` を渡すが、PyAV 18.1.0 はこの引数を削除した。対処として、音声のデコードを `src/kijun/transcribe/audio_decode.py` に自前で持ち、文字起こしと話者分離の両方がそれを使う形にした（faster-whisper の非公開関数に依存しない。両者が同じ波形を見るので時刻もずれない）。
 
-**発話の長さの上限（2026-11-03 追加）**
+**発話の長さの上限（2026-11-03 追加、2026-11-04 訂正）**
 
 2分5秒の読み上げ音声が、`utterances` として **2件**にしかならなかった（うち1件は101.7秒）。`transcribe.min_utterance_sec`（間隔がこの秒数未満なら結合する）に上限が無かったためである。`transcribe.max_utterance_sec`（既定30秒）を足し、結合後の長さがこれを超えないようにした。上限を設けた理由は2つある。抽出結果の `seq_from` / `seq_to` が録音のどの位置を指すかの精度を保つため、および、1つの発話が `extract.chunk_minutes` を超えて抽出が失敗するのを防ぐため。30秒という値は初期値であり、実測に基づくものではない。運用して調整する。
+
+**2026-11-04 の訂正。`max_utterance_sec` だけでは、上の2つの目的を達成できない。** 34.2分の通話を文字起こししたところ、**564.8秒（9.4分）で中身が3文字という発話が出た**。30.5秒を超える発話が8件あった。
+
+原因は、`max_utterance_sec` が**結合を抑えるだけで、分割はしない**ことである。`word_timestamps=False` で動かしているため文字起こし区間の内部の時刻が分からず、分割すると文字と時刻の対応が壊れる。したがって faster-whisper が単独で564.8秒の区間を出すと、そのまま1つの発話になる。
+
+区間そのものの長さを抑えるのは、faster-whisper 側の VAD の設定である。**faster-whisper は Silero VAD の `max_speech_duration_s` を既定で無制限にし、`min_silence_duration_ms`（既定2000）より短い無音では区間を切らない。** PC のスピーカー出力を iPhone で録る方法（4-1）では室内の音が常に入るので、2秒続く無音が現れず、区間が延々とつながる。
+
+対処として、VAD のパラメータを設定値にした（既定値は次のとおり）。VAD は文字起こしの**前**に音声を切るので、文字と時刻の対応は壊れない。
+
+| 設定 | 既定値 | 役割 |
+|---|---|---|
+| `transcribe.vad_max_speech_duration_sec` | 30.0 | Silero が1つの区間として許す長さの上限。0 は上限なし。**区間の長さを抑えるのはこれ** |
+| `transcribe.vad_threshold` | 0.5 | 音声だと判定する確率の下限。上げると小さい音や雑音を音声と見なさない |
+| `transcribe.vad_min_silence_duration_ms` | 2000 | 区間を切る無音の長さ |
+| `transcribe.vad_speech_pad_ms` | 400 | 区間の前後の余白 |
+
+30.0 は `max_utterance_sec` に合わせた値で、実測に基づくものではない。Silero は上限に達する前の最後の無音で切るので、文の途中で切るとは限らない。**この設定で564.8秒の区間が実際に解消されるかは、同じ音声で文字起こしをやり直して確認する必要がある（未確認）。**
+
+faster-whisper の `VadOptions` は版によって項目が増減するので、その版が受け付ける項目名だけを渡す形にしてある（知らない名前を渡すと `TypeError` になる）。
 
 ### 4-4. 指摘・要求の抽出（LLM）
 

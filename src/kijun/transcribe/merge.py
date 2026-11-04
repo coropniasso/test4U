@@ -49,6 +49,12 @@ def merge_segments(
        1つの文字起こし区間そのものが max_utterance_sec より長い場合は、分割せずそのまま1つの発話にする。
        word_timestamps=False で動かしているため区間の内部の時刻が分からず、分割すると文字と時刻の
        対応が壊れるからである。
+       **したがって max_utterance_sec は、発話の長さの上限を保証しない。** 結合を抑えるだけである。
+       区間そのものの長さを抑えるのは faster-whisper 側の VAD の設定
+       （transcribe.vad_max_speech_duration_sec）で、そちらは文字起こしの前に音声を切るので、
+       文字と時刻の対応が壊れない。2026-11-04 に実機で 564.8 秒・3文字の区間が出たのは、
+       VAD の既定が区間の長さを無制限にしていたためである（faster_whisper_impl.py の
+       build_vad_parameters の説明を参照）。
     4. seq を 0 から順に振る。
     """
     ordered = sorted(

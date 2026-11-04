@@ -56,8 +56,29 @@ class TranscribeConfig(_Section):
     device: str = "cuda"
     language: str = "ja"
     vad_filter: bool = True
+    # faster-whisper に渡す Silero VAD のパラメータ。vad_filter が true のときだけ使う。
+    # **これを設定値にしたのは、既定のままでは区間が切れないことが実機で分かったためである**
+    # （2026-11-04。34.2分の通話で 564.8 秒の区間が1つ出て、中身は3文字だった）。
+    # faster-whisper は max_speech_duration_s を既定で無制限にする。そのうえ
+    # min_silence_duration_ms（既定2000）より短い無音では区間を切らない。PC のスピーカー出力を
+    # iPhone で録る方法では室内の音が常に入るので、2秒続く無音が現れず、区間が延々とつながる。
+    #
+    # vad_max_speech_duration_sec は、Silero が1つの発話区間として許す長さの上限。
+    # 0 は「上限なし」（faster-whisper の既定と同じ）。既定の 30.0 は max_utterance_sec に合わせた値で、
+    # 実測に基づくものではない。Silero は上限に達する前の最後の無音で切るので、文の途中で切るとは限らない。
+    # **区間の長さを抑えるのはこの設定であり、max_utterance_sec ではない**（下のコメント参照）。
+    vad_max_speech_duration_sec: float = 30.0
+    # 音声だと判定する確率の下限。上げると、小さい音や雑音を音声と見なさなくなる。
+    vad_threshold: float = 0.5
+    # 区間を切る無音の長さ（ミリ秒）。faster-whisper の既定は 2000。
+    vad_min_silence_duration_ms: int = 2000
+    # 区間の前後に付ける余白（ミリ秒）。faster-whisper の既定は 400。
+    vad_speech_pad_ms: int = 400
     min_utterance_sec: float = 0.4
-    # 結合した発話の長さの上限（秒）。0 は「上限なし」。
+    # 同一話者の連続する区間を**結合する**ときの、結合後の長さの上限（秒）。0 は「上限なし」。
+    # **1つの文字起こし区間そのものがこれより長い場合、分割はしない**（merge.py の説明を参照。
+    # word_timestamps=False で動かしているため区間内部の時刻が分からず、分割すると文字と時刻の
+    # 対応が壊れる）。したがって区間自体の長さを抑えるには vad_max_speech_duration_sec を使う。
     max_utterance_sec: float = 30.0
 
 
