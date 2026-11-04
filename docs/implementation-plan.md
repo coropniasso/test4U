@@ -126,7 +126,7 @@ test4U/
 │   │   ├── base.py                    # DiscordClient / Reaction / Reply / DiscordError、絵文字の定数
 │   │   ├── impl.py                    # discord.py を使う実装（REST のみ。呼び出しごとに接続を開閉）
 │   │   ├── format.py                  # 投稿する文面（純粋な文字列処理）
-│   │   ├── post.py                    # 4種類の投稿
+│   │   ├── post.py                    # 5種類の投稿
 │   │   ├── read.py                    # リアクションと返信の読み取り
 │   │   └── run.py                     # discord read / post の本体、実装の組み立て
 │   ├── review/
@@ -214,12 +214,12 @@ test4U/
 | `schema_version` | 適用済みのスキーマのバージョン | 現在のバージョンは2（`migrate.SCHEMA_VERSION`）。バージョン1の DB には `kijun db init` が `ALTER TABLE` で列を足す（14-9） |
 | `conversations` | 会議単位の管理 | `conversation_id` は束の先頭ファイルの `yyyyMMdd_HHmm_<形式>_<種類>`。`transcribed_at` は音声の削除判定（9節）が見る |
 | `utterances` | 発話単位の文字起こし | 主キーは `(conversation_id, seq)`。`seq` は会議内で0から始まる通し番号。`speaker_label` は話者分離が失敗した場合 NULL |
-| `extracted_requests` | 抽出した指摘・要求1件ごと | `request_id` は `{conversation_id}#{model_name}#{連番}`。同じ会議を2つの設定で抽出しても衝突しない。`stated_reason` と `applies_when` は語られていなければ NULL（6-4参照） |
+| `extracted_requests` | 抽出した指摘・要求1件ごと | `request_id` は `{conversation_id}#{model_name}#{連番}`。同じ会議を2つの設定で抽出しても衝突しない。`stated_reason` と `applies_when` は語られていなければ NULL（6-4参照）。`transcription_unclear` は、文字起こしの聞き取り誤りで要求の中心が決まらなかった場合に TRUE（バージョン3で追加。`CLAUDE.md` 7章の案A） |
 | `knowledge_items` | チェック項目本体 | `status` は `candidate` / `approved` / `rejected` / `held`。`importance` は抽出の段階では NULL。Discord への投稿の直前に LLM が判定し（14-3）、ユーザーのリアクションが上書きする |
 | `item_evidence` | 項目と根拠発言の対応 | 新規候補として作られた場合 `similarity` は NULL |
 | `review_log` | 修正履歴 | `log_id` はシーケンス `review_log_seq` から採番。`action` の値は `db/repo.py` の定数1か所で定義し、定義外の値は書けない（14-9）。`item_id` が NOT NULL なので、項目に属さない出来事（話者の対応付け、束ね結果）は入らない |
 | `speaker_map` | 話者ラベルと人物の対応 | `person_label` は `self` / `kouhai_a` のように英数字で持つ。ユーザーの返信から入る（14-6）。`self` が `direction` の導出の基準 |
-| `discord_posts` | Discord のメッセージと DB レコードの対応 | `post_type` は `new_candidate` / `contradiction` / `speaker_sample` / `bundle_result`。`processed_at` が NULL の行が、次の `read` の対象 |
+| `discord_posts` | Discord のメッセージと DB レコードの対応 | `post_type` は `new_candidate` / `contradiction` / `speaker_sample` / `bundle_result` / `transcription_unclear`。`processed_at` が NULL の行が、次の `read` の対象。`request_id` は `transcription_unclear` の投稿で使う（この種別は `knowledge_items` にならないので `item_id` では記録できない。バージョン3で追加） |
 | `embeddings` | 照合用のベクトル | 主キーは `(owner_type, owner_id, model_name)`。`text_hash` を主キーに入れないのは、テキストを変えたときに行が置き換わり、古い行が溜まらないようにするため |
 
 コサイン類似度の計算は、DuckDB の `array_cosine_similarity` ではなく Python の numpy で行う。`array_cosine_similarity` は固定長の `FLOAT[N]` 型を要求し、N をスキーマに直接書く必要があるためである。埋め込みモデルを差し替えると次元数が変わる（multilingual-e5-large は1024次元、ruri は別）ので、可変長の `FLOAT[]` で保存して計算は Python 側で行う。`knowledge_items` が数百件の規模では numpy で十分に速い。1万件を超えたら、固定長の列を別に持たせるか DuckDB の vss 拡張に切り替える。
@@ -650,7 +650,7 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 
 ### 11-3. テスト
 
-自動テストは34ファイル・646件で、GPU・ネットワーク・Discord のトークンが要る9件は既定で実行しない（`pyproject.toml` の `addopts` に `-m 'not requires_gpu and not requires_network'` を書いてある）。実機では `uv run pytest -m requires_gpu` と `-m requires_network` で実行でき、試験用の音声のパスは環境変数 `KIJUN_TEST_AUDIO` で渡す。
+自動テストは34ファイル・668件で、GPU・ネットワーク・Discord のトークンが要る9件は既定で実行しない（`pyproject.toml` の `addopts` に `-m 'not requires_gpu and not requires_network'` を書いてある）。実機では `uv run pytest -m requires_gpu` と `-m requires_network` で実行でき、試験用の音声のパスは環境変数 `KIJUN_TEST_AUDIO` で渡す。
 
 クラウド環境で検証できるのは、第2弾の文面の生成、投稿の順序と件数の上限、リアクションの判定（判定できない場合を含む）、返信の原文の保存、話者の対応付けの解釈、`direction` の導出、矛盾の検出、スキーマの移行、夜間バッチの手順と失敗時の動き、タスクスケジューラの XML、および設定の読み込み、ファイル名の解析、会議単位への束ね、DuckDB のスキーマと読み書き、チャンク分割と発話番号の復元、重複排除、区間の突き合わせ、壊れた JSON の修復、コサイン類似度と閾値の分岐、音声の削除の対象選定、文字起こしの書き出しと読み戻しの往復、`doctor` の判定ロジックと推奨値の算出である。
 
@@ -691,8 +691,8 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 
 | 事項 | 現状 | 確認する手段 |
 |---|---|---|
-| **抽出の推論量を `medium` にしてよいか** | **測定済み（2026-11-04）。ユーザーの判断待ち。** 改訂プロンプトでは `medium` でも推測の混入は起きない。`medium` が失うのは `applies_when` 1件（文字起こしに実在する「参加者が募りたい場合」）で、速度は約5.9倍。どの設定でも夜間バッチには収まるので、所要時間の問題ではなく品質だけの問題である。実測値は `CLAUDE.md` 7章 | ユーザーが `medium` と `xhigh` のどちらを採るか決める |
-| **`max_tokens` の既定 20000 が `xhigh` に足りない** | **測定済み（2026-11-04）。ユーザーの判断待ち。** `xhigh` はこの入力に約21,200トークンの推論を要するが、20000 の予算は 15,000 なので閉じられる。実測ではその設定（＝現在の既定値）が3設定の中で `stated_reason` と `pass_criterion` が最も少なかった。`medium` にするなら 20000 で足りる。`xhigh` のまま品質を取るなら 32000 以上（1チャンク最悪 2,286秒、2時間の会議で約3.8時間） | 上の判断と一緒に決める |
+| **`medium` が `applies_when` を取りこぼすか** | **未確定。`medium` の採用に伴って残った risk。** 実測では、文字起こしに実在する「参加者が募りたい場合」を `medium` が落とし、`xhigh` は取った。`applies_when` は `CLAUDE.md` 1章が暗黙知の中身として挙げる2点のうちの1つである。ただし実測は1チャンク・6件・`applies_when` が実在するのは2件だけで、割合として扱える数字ではない | 運用して、取りこぼしが目立つなら `xhigh` に戻す（`max_tokens` を 32000 以上にする）。手がかりは、レビューでユーザーが `applies_when` を書き足した頻度 |
+| `transcription_unclear` の投稿への返信を受け付けるか | **未確定。** いまはリアクションだけを読み、返信は読まない。`review_log` が `item_id` NOT NULL で記録する先が無いためである。受け付ける形にするには `review_log` のスキーマ変更が要る | ❌ の頻度と、投稿の文面で「返信は読み取りません」と伝えたうえでユーザーが何を書くかを見る |
 | 1リクエストの入力長の上限 | **未確定。** 約10,000トークン（会議20分相当）までは通った。文脈長は204,800あるが、通る長さと現実的な時間で終わる長さは別問題 | `chunk_minutes` を30以上にして `doctor` を再実行 |
 | トークン数の概算の係数 | 日本語1文字あたり 0.55 トークン、会議1分あたり 180 トークン。**実測1点からの推測**（旧 1.5 / 500 は約2〜3倍の過大だった） | `doctor` が `tokens_per_character` を実測して推奨する |
 | 生成速度の振れの原因 | 同じ profile・モデルで **14.0〜68.9 tokens/s（約4.9倍）**。サーバーのインスタンスが違うだけで 14〜21 と 37〜42 の差が出た。**速いのも遅いのも起動直後に出ており、「温まると速くなる」関係ではない。** ログの `expert cache ... hit`（26〜64%）が手がかりだが因果は未確認 | `timeout_sec` は観測された最も遅い 14.0 tokens/s で決める。原因は未調査 |
@@ -717,6 +717,9 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 | ~~Qwen3.8-Flash-Next の量子化版の入手先とタグ~~ | IQ3_XXS。`/v1/models` が返す名前は `qwen3.8-flash-next-iq3_xxs` |
 | ~~`reasoning_effort` に `"xhigh"` が有効か~~ | **有効。** 検証を行う `frontend.py` の `EFFORT` 表に `"xhigh"` がある。不正な値への 400 のメッセージが「use none, low, medium or high」と列挙するのは、メッセージの文字列が表の内容を反映していないだけである。**`high` と `xhigh` は同一**（どちらも内部の `xhigh` に写る）。また `chat_template.jinja` が `reasoning_effort|default('xhigh')` なので、**送らないことは `xhigh` を送ることと同じ**である。既定を `"xhigh"` と明示したのは、テンプレートの既定が将来変わったときに挙動が黙って変わるのを防ぐため |
 | ~~明示した `reasoning_budget_tokens` が逆算より優先されるか~~ | **優先されるが、そのあと答え用の取り置きで切り下げられる。** 実効の予算 = `min(reasoning_budget_tokens, max_tokens - 取り置き)`。取り置きの額は指定できない。`max_tokens = 48000` で予算 40000 を明示すると 36,000 に切り下がる（ログに `thinking capped at 36000 of max_tokens 48000 ...`）。推論の予算を上げるには `max_tokens` も上げる必要がある |
+| ~~抽出の推論量を `medium` にしてよいか~~ | **2026-11-04 ユーザーが `medium` を採用。** 改訂プロンプトでは `medium` でも推測の混入は起きず、速度が約5.9倍。失うのは `applies_when` 1件。所要時間を取る判断をした。残った risk は上の表に移した |
+| ~~`max_tokens` の既定 20000 が `xhigh` に足りない~~ | **`medium` を採用したので解消。** medium の推論は 2,641 トークンで、20000 の予算 15,000 に収まる。`xhigh` に戻す場合は 32000 以上が必要で、その旨を設定のコメントに書いてある |
+| ~~文字起こしが壊れた発話から作られた項目をユーザーに見せるか~~ | **2026-11-04 ユーザーが案A を採用。実装済み（スキーマ v3）。** `transcription_unclear` 列を足し、Discord の投稿種別 `transcription_unclear` で `#review` に出す。詳細は 14-2 と `CLAUDE.md` 7章 |
 | ~~推論が予算に達したかをどこで確認するか~~ | **サーバープロセスの標準出力の `[strata] thinking:` の行だけ。** API の応答には出ない。Strata の `--log` が指すファイル（`strata-iq3_xxs.log`）にも入らない（そのファイルはエンジンの子プロセスに渡されるもので、`[strata]` の行はサーバープロセスが標準出力に print している）。PowerShell なら `Start-Process -RedirectStandardOutput` で落とす |
 
 第2弾（Discord でのレビューと夜間バッチ）で未解決のまま残ることは次のとおりである。
@@ -740,6 +743,19 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 ---
 
 ## 13. 変更の履歴
+
+### 2026-11-04：推論量の測定と、その結果による2つの決定
+
+**測定の道具を足した。** 11-03 の測定は、比べる実行を人が別々のコマンドとして組み立てていたため、どの2回も条件が揃わなかった。`scripts/measure_extraction.py`（8-2）は1回の実行で複数の設定を順に投げるので、設定以外が必ず揃う。文字起こしに無い語を機械的に検出する機能も入れた。
+
+**ユーザーが2つを決めた。**
+
+1. 抽出の推論量を `medium` にする。改訂プロンプトでは `medium` でも推測の混入が起きず、所要が約5.9倍速い。残る risk（`applies_when` の取りこぼし）は12節に移した。
+2. `CLAUDE.md` 7章の案A を採る。`transcription_unclear` 列を足し、文字起こしが読めなかった抽出結果を Discord に出す。スキーマをバージョン3にした。
+
+**11-03 の見立てを1つ取り消した。** 「改訂プロンプトが `xhigh` の推論量をほぼ倍にした」は誤りだった。`chat_template.jinja` が `reasoning_effort|default('xhigh')` なので、`reasoning_effort` を送るかどうかで推論量は変わらない。14,967 は推論量ではなく予算15,000の天井そのものだった。
+
+**設計者（Claude）が書いた誤りを2つ直した。** `scripts/variants.example.toml` の「`max_tokens` 48000 は予算 40000 に対して答え用に 8000 残す」は成立しない（取り置きの額は指定できず、予算は 36,000 に切り下がる）。`max_tokens = 20000` の根拠として書いていた「実測 13,050 に余裕を持たせた値」も取り消した（13,050 は `max_tokens` を送らずに測った1点で、同じ入力でも 48,764 以上まで振れていた）。
 
 ### 2026-11-03：実機で `kijun extract` を初めて動かして見つかった訂正
 
@@ -799,6 +815,7 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 | `contradiction` | `discord.contradictions_channel_id` | 矛盾の可能性がある組（14-7） |
 | `speaker_sample` | review | 会議ごとに各話者の発言サンプル。文字数の多い発話の上位3件（「はい」のような短い発話では誰か分からないため） |
 | `bundle_result` | review | 複数ファイルを束ねた会議のファイル一覧 |
+| `transcription_unclear` | review | 文字起こしが読めず、要求の中心が決まらなかった抽出結果（`CLAUDE.md` 7章の案A）。チェック項目案は書かない（書けないことがこの投稿の内容である）。引用は直さずそのまま出す。これらは `reusable = false` なので 9-1 の照合の対象から外れ、`knowledge_items` にならない。投稿するのは、発話したのが利用者本人であり、壊れた引用を見れば自分が何と言ったか分かるためである。上限は `discord.max_transcription_unclear_per_run`（既定5） |
 
 `CLAUDE.md` 4-6 は話者の対応付けと束ね結果の投稿先のチャンネルを指定していないので、review に投稿する。
 
@@ -844,7 +861,7 @@ LLM に、チェック項目の文言と、根拠になった発言（`item_evid
 
 2つ以上のときに片方を優先しないのは原則2-4のためである。誤って承認すると、誤ったチェック項目が「承認済み」として残り、それが間違いであることが後から分かりにくい。
 
-`processed_at` を埋める条件：`new_candidate` は status が1つに決まり、かつ返信の振り分けがすべて済んだとき。`contradiction` は返信が1件以上あり、すべて振り分けが済んだとき（リアクションでは何も変えない）。`speaker_sample` は反映後の `speaker_map` に `self` があり、解釈できない返信が無いとき。`bundle_result` は ❌ または ✅ が付いたとき。
+`processed_at` を埋める条件：`new_candidate` は status が1つに決まり、かつ返信の振り分けがすべて済んだとき。`contradiction` は返信が1件以上あり、すべて振り分けが済んだとき（リアクションでは何も変えない）。`speaker_sample` は反映後の `speaker_map` に `self` があり、解釈できない返信が無いとき。`bundle_result` は ❌ または ✅ が付いたとき。`transcription_unclear` も ❌ または ✅ が付いたとき（この種別は返信を読まない。対応する `knowledge_items` が無く、`review_log` は `item_id` が NOT NULL なので記録する先が無いためである。そのことは投稿の文面にも書いてある）。
 
 `bundle_result` に ❌ が付いたら、束ね直しが必要であることを標準出力に出す。**自動で分割し直さない。** 会議の束ね方を機械が勝手に変えると、どの音声がどの会議に属するかが分からなくなる。ユーザーが `bundle.gap_minutes` を調整して `kijun ingest` をやり直す運用にする。
 

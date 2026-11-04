@@ -250,12 +250,12 @@ PC がスリープしていると実行されない。タスクスケジュー�
 |---|---|---|
 | `conversations` | conversation_id, recorded_at, setting（形式・種類）, source_files, transcript_path | 会議単位の管理 |
 | `utterances` | conversation_id, seq, speaker_label, start_sec, end_sec, text | 発話単位の文字起こし |
-| `extracted_requests` | request_id, conversation_id, seq_from, seq_to, direction（自分→相手／相手→自分）, counterpart_role, artifact_type, quote, request_summary, stated_reason, applies_when, reusable, pass_criterion, ★source_type（実会話／口述振り返り）, model_name, extracted_at | 抽出した指摘・要求1件ごと |
+| `extracted_requests` | request_id, conversation_id, seq_from, seq_to, direction（自分→相手／相手→自分）, counterpart_role, artifact_type, quote, request_summary, stated_reason, applies_when, reusable, pass_criterion, ★transcription_unclear（2026-11-04 追加。7章の案A）, ★source_type（実会話／口述振り返り）, model_name, extracted_at | 抽出した指摘・要求1件ごと |
 | `knowledge_items` | item_id, artifact_type, check_text, pass_criterion, reason, applies_when, not_applies_when, importance（1〜3）, status（候補／承認／却下／保留）, version, updated_at | チェック項目本体 |
 | `item_evidence` | item_id, request_id, similarity | 項目と根拠発言の対応 |
 | `review_log` | item_id, action, before, after, reviewed_at | 修正履歴 |
 | ★`speaker_map` | conversation_id, speaker_label, person_label | 話者ラベルと人物の対応 |
-| ★`discord_posts` | message_id, post_type, item_id / conversation_id, posted_at, processed_at | Discord メッセージと DB レコードの対応 |
+| ★`discord_posts` | message_id, post_type, item_id / conversation_id / request_id, posted_at, processed_at | Discord メッセージと DB レコードの対応。`request_id` は `transcription_unclear` の投稿で使う（この種別は `knowledge_items` にならないので `item_id` では記録できない） |
 
 `direction = 相手→自分` の抽出結果は、部下指導用チェックリストとは別に、相手別の要求一覧として扱う。
 
@@ -344,7 +344,7 @@ PC がスリープしていると実行されない。タスクスケジュー�
   **`reasoning_effort` を明示したこと自体には効果が無い。** `chat_template.jinja` が `reasoning_effort|default('xhigh')` としており、テンプレートの既定が `xhigh` だからである（プロファイル JSON と共有設定ファイルのどちらにも上書きが無いことも実機で確認した）。したがって「改訂プロンプトが `xhigh` の推論量をほぼ倍にした（7,628 → 14,967）」という2026-11-03 の見立ては**誤りなので取り消す**。正しくは「`xhigh` はこの入力に約21,200トークンの推論を要し、予算15,000がそれを切っていた」であり、14,967 は推論量ではなく予算の天井そのものだった。
 
   `high` と `xhigh` は同一の値である（どちらも内部の `xhigh` に写る）。
-- **文字起こしが壊れた発話から作られた項目を、ユーザーに見せるか（ユーザーの判断が必要）** → **未決定。**
+- ~~**文字起こしが壊れた発話から作られた項目を、ユーザーに見せるか**~~ → **2026-11-04 ユーザーが案Aを選択。実装済み（スキーマ v3）。**
 
   `reusable = false` の抽出結果は `src/kijun/match/link.py` で照合の対象から外れる。`knowledge_items` の候補にならないので、**Discord の `#review` に出ない。** つまり、文字起こしが壊れた発話に対する正しい振る舞い（`reusable = false`）の結果として、その発話はユーザーの目に一度も触れないまま消える。
 
@@ -352,9 +352,15 @@ PC がスリープしていると実行されない。タスクスケジュー�
 
   | 案 | 内容 | 長所 | 短所 |
   |---|---|---|---|
-  | A（設計者の推奨） | 抽出スキーマに `transcription_unclear`（真偽値）を足し、`extracted_requests` に列を追加（スキーマ v3）。`reusable = false` のままにし、この列が真のものを Discord に別の投稿種別として出す | 状態を文字列の目印ではなく列で持つので後から SQL で数えられる。`knowledge_items` を汚さない | DuckDB のスキーマ変更と移行処理が必要 |
-  | B | `request_summary` の「（意味が取れない）」という目印を文字列で拾って Discord に出す | スキーマ変更が不要 | 目印の文字列に下流が依存する。モデルが書き忘れると静かに漏れる |
-  | C | これらを `reusable = true` にして通常のレビューに流す | 実装変更がほぼ不要 | 壊れた `check_text` が `knowledge_items` に入り、4-5 の類似度照合を汚す。設計者は反対 |
+  | 案 | 内容 | 結果 |
+  |---|---|---|
+  | **A（採用）** | 抽出スキーマに `transcription_unclear`（真偽値）を足し、`extracted_requests` に列を追加。`reusable = false` のままにし、この列が真のものを Discord に別の投稿種別として出す | **採用。** 状態を文字列の目印ではなく列で持つので、後から SQL で数えられる。`knowledge_items` を汚さない |
+  | B | `request_summary` の「（意味が取れない）」という目印を文字列で拾って Discord に出す | 採らなかった。目印の文字列に下流が依存し、モデルが書き忘れると静かに漏れる。実際にこの方式を試したときに、注釈がチェック項目の文言に漏れる不具合が出た |
+  | C | これらを `reusable = true` にして通常のレビューに流す | 採らなかった。壊れた `check_text` が `knowledge_items` に入り、4-5 の類似度照合を汚す |
+
+  **実装したこと。** スキーマをバージョン3にし、`extracted_requests.transcription_unclear` と `discord_posts.request_id` を足した。後者が要るのは、この種別が `knowledge_items` にならないので `item_id` では記録できないためである。抽出プロンプトに判定の指示を足した。Discord の投稿種別 `transcription_unclear` を足し、`#review` に出す。文面にチェック項目案は書かない（書けないことがこの投稿の内容である）。引用は直さずそのまま出す。1回の投稿件数の上限は `discord.max_transcription_unclear_per_run`（既定5）。
+
+  **この投稿への返信は読み取らない。** リアクションだけを読み、✅ で処理済み、❌ は処理済みにしたうえで `request_id` を報告に残す。返信を読まないのは、対応する `knowledge_items` が無く、`review_log` は `item_id` が NOT NULL なので記録する先が無いためである（この制約は `docs/implementation-plan.md` 12節に以前から記録してある）。そのことを投稿の文面にも書いてある。❌ が付いた場合、ユーザーは同じ内容を次の会議で言い直すか、チェック項目を手で足す。
 
 - ~~Strata の OpenAI 互換のパス~~ → **2026-11-03 解決。`/v1/chat/completions`。** `/v1/models`、`/v1/messages`（Anthropic 互換）、`/v1/responses` も同じポートにある。
 - ~~Claude API の最新単価~~ → 2026-10-04 確認済み。Claude Sonnet 5.5（モデルID `claude-sonnet-5-5`）は入力 $2.00 / 100万トークン、出力 $10.00 / 100万トークン。Batch API を使うと半額。2時間の会議1回の抽出は約 $0.27（1ドル150円換算で約40円）の概算。内訳と前提は `docs/implementation-plan.md` の「Claude API の費用（記録）」に記載。**2026-11-03 の決定により抽出は Claude API を使わないため、この数値は記録としてのみ残す。**
@@ -369,7 +375,7 @@ PC がスリープしていると実行されない。タスクスケジュー�
 | 2 | 共有シート用ショートカットの作成と、PC の inbox に届くことの確認 | ユーザー | 未着手 |
 | 3 | 通話の録音テスト（30分） | ユーザー | 未着手 |
 | 4 | 1ファイルで faster-whisper と pyannote を試すスクリプト | Claude Code | **実装済み・実機で確認（2026-11-03。2分5秒の音声を18.5秒で処理）** |
-| 5 | 同じ会議を設定を変えて2回抽出し、結果を比較するスクリプト（`kijun compare`） | Claude Code | 実装済み（2026-11-03 更新。Qwen と Claude の比較から、同じ Strata で設定を変えた2回の実行の比較に変更） |
+| 5 | 同じ会議を設定を変えて2回抽出し、結果を比較するスクリプト | Claude Code | **実装済み・実機で確認（2026-11-04）。** 道具が2つある。`kijun compare` は DB に保存された2回の抽出を比べる（2回分を並べて残すには `extract.run_label` が要る。無いと2回目が1回目を削除する）。`scripts/measure_extraction.py` は設定を変えた複数の実行を1回のコマンドで行い、生の応答から比べる。後者は文字起こしに無い語を機械的に検出する |
 | 6 | DuckDB のスキーマ作成 | Claude Code | **実装済み・実機で確認（2026-11-03。`kijun db init` が10テーブルとビュー1つを作成）** |
 | 7 | Discord bot（投稿と、リアクション・返信の読み取り） | Claude Code | 実装済み（2026-11-03。自動テストで確認。**実際の Discord への接続は未確認**。ユーザーが Developer Portal でのアプリケーション作成・Message Content Intent の有効化・個人サーバーへの招待を行ってから確認する） |
 | 8 | 夜間バッチの統合とタスクスケジューラ登録 | 共同 | 実装済み（2026-11-03。`kijun batch run` と `kijun batch install-task`。自動テストで確認。**実機での実行と、`schtasks /create /xml` での登録は未確認**。登録はユーザーが行う） |
@@ -383,6 +389,22 @@ PC がスリープしていると実行されない。タスクスケジュー�
 ---
 
 ## 10. 決定の記録
+
+### 2026-11-04（ユーザーが決定）
+
+| 対象 | 決定内容 | 根拠 |
+|---|---|---|
+| 抽出の推論量 | `extract.strata.reasoning_effort = "medium"` を既定にする。`max_tokens` は 20000 のまま（medium の推論は実測 2,641 トークンで、予算 15,000 に収まる） | 7章の実測。改訂プロンプトでは `medium` でも推測の混入が起きず、所要が約5.9倍速い。失うのは `applies_when` 1件。所要時間を取る判断をした |
+| 文字起こしが壊れた発話から作られた項目 | 7章の案A を採る。`transcription_unclear` 列を足し、Discord に別の投稿種別として出す | 7章。`reusable = false` のためレビューに出ず、ユーザーの目に触れないまま消えていた。「箇条書き」「感嘆符」は頻出語なので、同じ検査項目が繰り返し失われ続ける |
+
+`medium` を選んだことで残る risk を記録する。**`applies_when` を取りこぼす可能性がある。** 実測では、文字起こしに実在する「参加者が募りたい場合」を `medium` が落とし、`xhigh` は取った。`applies_when` は1章が暗黙知の中身として挙げる2点のうちの1つである。ただし実測は1チャンク・6件・`applies_when` が実在するのは2件だけなので、割合として扱える数字ではない。**運用して、取りこぼしが目立つなら `xhigh` に戻す**（その場合は `max_tokens` を 32000 以上にする。7章参照）。見直しの手段は、6章の「LLM の提案文言を修正せず承認した割合」と、レビューでユーザーが `applies_when` を書き足した頻度である。
+
+次の2つは、この決定に伴って設計者（Claude）が決めたもので、**ユーザーが決めたものではない**。推奨・未確定であり、運用して見直す。
+
+| 対象 | 判断の内容 | 理由 | 見直しの手段 |
+|---|---|---|---|
+| `transcription_unclear` の投稿への返信を読み取らないこと | リアクション（✅ / ❌）だけを読み、返信は読まない。❌ が付いたら `request_id` を報告に残すだけで、DB は変えない | 対応する `knowledge_items` が無く、`review_log` は `item_id` が NOT NULL なので記録する先が無い。返信を受け付ける形にするには `review_log` のスキーマ変更が要る。まず投稿して、ユーザーが実際に何を書きたくなるかを見てから決める方が良いと判断した | ❌ の頻度と、ユーザーが返信に何を書いたか（投稿の文面で「返信は読み取りません」と伝えているので、書かれなければそれで足りている） |
+| 1回の投稿件数の上限を5件にしたこと | `discord.max_transcription_unclear_per_run = 5`。新規候補（20件）より小さい | 新規候補と同じ `#review` に出るので、6章のレビュー所要時間を押し上げる。こちらはチェック項目にならないものなので、レビューの本筋ではない | 6章の「1日のレビュー所要時間」。15分を超え続けるなら下げる |
 
 ### 2026-11-03（ユーザーが決定）
 
