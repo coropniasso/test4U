@@ -5,6 +5,10 @@ inbox      = "./data/inbox"
 processed  = "./data/processed"
 transcripts = "./data/transcripts"
 db         = "./data/kijun.duckdb"
+# kijun discord post / read の実行記録を置く場所。DB には「投稿したこと」と「処理済みになった
+# 時刻」しか残らず、どのリアクションが付いたかは残らない。6章の指標と、7章の「文字起こしが
+# 読めなかった投稿に ✅ と ❌ のどちらが付いたか」を後から数えるために書き出す。
+review_logs = "./data/review_logs"
 
 [settings]
 # ファイル名の <形式>。この2つ以外は解析を失敗させる。

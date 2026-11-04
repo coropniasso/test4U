@@ -11,6 +11,7 @@ from kijun.cli import app
 from kijun.db import migrate, repo
 from kijun.discord import run as discord_run
 from kijun.review.reply import RoutedEntry
+from tests.fakes import FakeDiscordClient
 from tests.fakes import FakeDiscordClient, FakeReplyRouter
 from tests.review_helpers import CID, NOW, add_request, candidate, r, reply, setup_conversation, APPROVE
 
@@ -186,3 +187,75 @@ def test_derive_direction_は引数をどちらか一方に限る(db):
     _con, cfg_path = db
     assert invoke(cfg_path, "derive-direction").exit_code == 1
     assert invoke(cfg_path, "derive-direction", "--all", "--conversation", "x").exit_code == 1
+
+
+# --- 実行の記録（7章の「運用して測る」に必要） ---------------------------------------------
+#
+# DB に残るのは「投稿したこと」と「処理済みになった時刻」だけで、どのリアクションが付いたかは
+# 残らない。✅ と ❌ のどちらが付いたかは、この記録から数える。
+
+
+def _read_logs(cfg):
+    import json
+
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(cfg.paths.review_logs.glob("*.json"))]
+
+
+def test_read_の実行記録に種別ごとの処理件数と却下の一覧が残る(con, cfg):
+    from datetime import datetime
+
+    from kijun.db import repo
+    from kijun.discord.run import read_command
+    from tests.review_helpers import CID, REJECT, r, setup_conversation
+
+    cfg.discord.review_channel_id = "111"
+    setup_conversation(con)
+    repo.insert_discord_post(
+        con,
+        repo.DiscordPostRow(
+            "m9", repo.POST_TRANSCRIPTION_UNCLEAR, None, CID,
+            datetime(2026, 11, 4, 1, 0), None, "111", None, "r1",
+        ),
+    )
+    client = FakeDiscordClient()
+    client.reactions["m9"] = r(REJECT)
+
+    read_command(con, cfg, client=client, llm=None, echo=lambda _: None, now=datetime(2026, 11, 4, 2, 0))
+
+    logs = _read_logs(cfg)
+    assert len(logs) == 1
+    log = logs[0]
+    assert log["kind"] == "read"
+    # ✅ の件数は「種別ごとの処理件数 − ❌ の件数」で求める。両方が残っている必要がある
+    assert log["processed_by_type"]["transcription_unclear"] == 1
+    assert log["unclear_to_fix"] == ["r1"]
+
+
+def test_post_の実行記録に種別ごとの投稿件数が残る(con, cfg):
+    from datetime import datetime
+
+    from kijun.discord.run import post_command
+    from tests.review_helpers import add_request, setup_conversation
+
+    cfg.discord.review_channel_id = "111"
+    cfg.extract.strata.model = "m"
+    setup_conversation(con)
+    add_request(con, "r1", quote="3つ目簡単フォーイスなんか減らして", model="m",
+                reusable=False, transcription_unclear=True)
+
+    post_command(con, cfg, client=FakeDiscordClient(), llm=None, echo=lambda _: None,
+                 now=datetime(2026, 11, 4, 1, 0))
+
+    log = _read_logs(cfg)[0]
+    assert log["kind"] == "post"
+    assert log["posted"]["transcription_unclear"] == 1
+
+
+def test_チャンネルIDが空なら記録を書かない(con, cfg):
+    from kijun.discord.run import post_command, read_command
+
+    cfg.discord.review_channel_id = ""
+    cfg.discord.contradictions_channel_id = ""
+    post_command(con, cfg, echo=lambda _: None)
+    read_command(con, cfg, echo=lambda _: None)
+    assert not cfg.paths.review_logs.exists()

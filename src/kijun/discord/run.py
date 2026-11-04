@@ -9,11 +9,13 @@ DiscordClient と LLM の実装は引数で受け取るので、テストでは�
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 
 import duckdb
 
@@ -79,6 +81,38 @@ def print_read_report(report: ReadReport, echo: Callable[[str], None]) -> None:
     )
 
 
+def write_review_log(path: Path, kind: str, report, at: datetime) -> Path:
+    """post / read の実行の報告を、そのまま JSON に書き出す。
+
+    DB に残るのは「投稿したこと」（discord_posts の行）と「処理済みになった時刻」
+    （processed_at）だけで、**どのリアクションが付いたかは残らない。** 6章の指標と、
+    7章の「文字起こしが読めなかった投稿に ✅ と ❌ のどちらが付いたか」は、この記録から数える。
+
+    「✅ が付いた件数」は、`processed_by_type["transcription_unclear"]` から
+    `len(unclear_to_fix)`（❌ の件数）を引いて求める。
+
+    書き出しに失敗しても処理は止めない。記録は後から数えるためのもので、
+    レビューの反映そのもの（DB への書き込み）は既に終わっているためである。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"kind": kind, "at": at.isoformat(timespec="seconds"), **asdict(report)}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def review_log_path(cfg: Config, kind: str, at: datetime) -> Path:
+    return cfg.paths.review_logs / f"{kind}_{at.strftime('%Y%m%d_%H%M%S')}.json"
+
+
+def _save_review_log(cfg: Config, kind: str, report, at: datetime, echo: Callable[[str], None]) -> None:
+    try:
+        path = write_review_log(review_log_path(cfg, kind, at), kind, report, at)
+    except OSError as e:
+        echo(f"注意: 実行の記録を書けませんでした（レビューの反映は済んでいます）: {e}")
+        return
+    echo(f"実行の記録を保存しました: {path}")
+
+
 def read_command(
     con: duckdb.DuckDBPyConnection,
     cfg: Config,
@@ -88,10 +122,11 @@ def read_command(
     now: datetime | None = None,
 ) -> int:
     """リアクションと返信を読み取る。終了コードを返す(0: 成功。設定が空で何もしなかった場合も 0)。"""
+    at = now or datetime.now()
     if not cfg.discord.review_channel_id and not cfg.discord.contradictions_channel_id:
         report = run_read(con, cfg, _NoClient(), None, None, now)  # 設定が空のときの報告を作らせる
         print_read_report(report, echo)
-        return 0
+        return 0  # 何も読んでいないので記録しない
     client = client or build_client(cfg)
     llm = llm or build_llm(cfg)
     try:
@@ -100,6 +135,7 @@ def read_command(
         echo(f"エラー: {e}")
         return 1
     print_read_report(report, echo)
+    _save_review_log(cfg, "read", report, at, echo)
     return 0
 
 
@@ -123,14 +159,16 @@ def post_command(
     echo: Callable[[str], None] = print,
     now: datetime | None = None,
 ) -> int:
-    """4種類を投稿する。終了コードを返す(投稿に失敗したものがあれば 1)。"""
+    """5種類を投稿する。終了コードを返す(投稿に失敗したものがあれば 1)。"""
+    at = now or datetime.now()
     if not cfg.discord.review_channel_id and not cfg.discord.contradictions_channel_id:
         print_post_report(run_post(con, cfg, _NoClient(), None, now), echo)
-        return 0
+        return 0  # 何も投稿していないので記録しない
     client = client or build_client(cfg)
     llm = llm or build_llm(cfg)
     report = run_post(con, cfg, client, llm.judge, now)
     print_post_report(report, echo)
+    _save_review_log(cfg, "post", report, at, echo)
     return 1 if report.failed else 0
 
 

@@ -54,6 +54,10 @@ STATUS_BY_EMOJI = {
 @dataclass
 class ReadReport:
     processed_posts: int = 0
+    # 投稿の種類ごとの処理済み件数。全体の件数だけでは、種類ごとに反応があったかを数えられない。
+    # 「文字起こしが読めなかった投稿に ✅ が付いた件数」は、この値から unclear_to_fix（❌ の件数）を
+    # 引いて求める（CLAUDE.md 7章の「運用して測る」に必要）。
+    processed_by_type: dict[str, int] = field(default_factory=dict)
     status_changes: int = 0
     importance_overrides: int = 0
     replies_routed: int = 0
@@ -313,6 +317,9 @@ def run_read(
             if done:
                 repo.mark_post_processed(con, post.message_id, now)
                 report.processed_posts += 1
+                report.processed_by_type[post.post_type] = (
+                    report.processed_by_type.get(post.post_type, 0) + 1
+                )
 
     # 話者の対応が変わった会議は、最後に direction を導出し直す
     for conversation_id in dict.fromkeys(report.derived_conversations):

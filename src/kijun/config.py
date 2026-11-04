@@ -31,6 +31,12 @@ class PathsConfig(_Section):
     processed: Path = Path("./data/processed")
     transcripts: Path = Path("./data/transcripts")
     db: Path = Path("./data/kijun.duckdb")
+    # kijun discord post / read の実行記録（<種類>_<日時>.json）を置く場所。
+    # DB には「投稿したこと」と「処理済みになった時刻」しか残らず、どのリアクションが
+    # 付いたかは残らない。6章の指標（レビュー所要時間、修正せず承認した割合）と、
+    # 7章の「文字起こしが読めなかった投稿に ✅ と ❌ のどちらが付いたか」を後から数えるために、
+    # 実行ごとの報告をそのまま書き出す。
+    review_logs: Path = Path("./data/review_logs")
 
 
 class SettingsConfig(_Section):
