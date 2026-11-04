@@ -60,6 +60,9 @@ class ReadReport:
     replies_failed: int = 0
     ambiguous: list[str] = field(default_factory=list)  # 判定できなかったリアクション(会議ID・項目ID付き)
     rebundle_needed: list[str] = field(default_factory=list)  # 束ね直しが必要な会議ID
+    # 文字起こしが読めなかった抽出結果のうち、利用者が ❌ を付けたもの（request_id）。
+    # この仕組みでは直せないので、報告に残すだけである。
+    unclear_to_fix: list[str] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     derived_conversations: list[str] = field(default_factory=list)
     skipped_for_config: bool = False
@@ -233,6 +236,31 @@ def _read_bundle_result(post, reactions, report) -> bool:
     return EMOJI_APPROVE in emojis
 
 
+def _read_transcription_unclear(post, reactions, report) -> bool:
+    """文字起こしが読めなかった抽出結果への反応を読む（CLAUDE.md 7章の案A）。
+
+    DB は変えない。この投稿に対応する knowledge_items が無く、review_log は item_id が
+    NOT NULL なので、記録する先が無いためである（計画書12節に記録済みの制約）。
+    したがって読み取るのはリアクションだけで、返信は読まない。投稿の文面にもそう書いてある。
+
+    - ✅: 利用者が内容を把握した。処理済みにする。
+    - ❌: 直したいが、この仕組みでは直せない。処理済みにしたうえで、何を直したいのかが
+      分かるように request_id を報告に残す。処理済みにするのは、毎晩同じ投稿を読み直しても
+      何も変わらないためである。
+    - どちらも無い: 処理済みにしない（後から付ける可能性があるため。他の種別と同じ扱い）。
+    """
+    emojis = {normalize_emoji(r.emoji) for r in reactions if r.count > 0}
+    if EMOJI_REJECT in emojis:
+        report.unclear_to_fix.append(post.request_id or post.message_id)
+        report.messages.append(
+            f"抽出結果 {post.request_id}: 文字起こしが読めなかった件に ❌ が付きました。"
+            "この仕組みでは直せないので、同じ内容を次の会議で言い直すか、"
+            "チェック項目を手で足してください"
+        )
+        return True
+    return EMOJI_APPROVE in emojis
+
+
 def run_read(
     con: duckdb.DuckDBPyConnection,
     cfg: Config,
@@ -277,6 +305,8 @@ def run_read(
                 done = _read_speaker_sample(con, post, replies, interpreter, report)
             elif post.post_type == repo.POST_BUNDLE_RESULT:
                 done = _read_bundle_result(post, reactions, report)
+            elif post.post_type == repo.POST_TRANSCRIPTION_UNCLEAR:
+                done = _read_transcription_unclear(post, reactions, report)
             else:
                 report.messages.append(f"投稿 {post.message_id} の種類 {post.post_type} は未対応です")
                 done = False

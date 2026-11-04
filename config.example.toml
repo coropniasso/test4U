@@ -98,7 +98,8 @@ max_input_tokens = 0
 # 予算に達すると推論は切られるのではなく、閉じられて答えが書かれる。壊れないが品質は落ちる。
 # 達したかどうかは API の応答には出ない。サーバーの標準出力の [strata] thinking: の行で見る。
 #
-# **20000 は xhigh には足りない。** xhigh はこの入力に推論 21,201 トークンを要したが、
+# 20000 は既定の reasoning_effort（medium、推論 2,641）には十分である。
+# **ただし xhigh には足りない。** xhigh はこの入力に推論 21,201 トークンを要したが、
 # 20000 の予算は 15,000 なので閉じられる。上の表の3行目がその状態で、stated_reason と
 # pass_criterion が3つの設定の中で最も少なかった。reasoning_effort と一緒に決めること。
 #   - medium にする場合: 20000 で足りる（実測の推論 2,641）。1チャンク最悪 20000÷14.0 ≒ 1,429秒
@@ -126,8 +127,8 @@ reasoning_budget_tokens = 0
 #   EFFORT 表には "xhigh" がある。メッセージの文字列だけが古い。
 # - high と xhigh は同一（どちらも内部の "xhigh" に写る）。
 # - 送らないことは xhigh を送ることと同じ（chat_template.jinja の既定が xhigh）。
-# 既定を "xhigh" と明示するのは、挙動は同じだが、テンプレートの既定が将来変わったときに
-# 抽出の挙動が黙って変わるのを防ぐためである。
+# **既定は "medium"（2026-11-04 ユーザーが決定）。** 下の実測を見て、所要時間を取る判断をした。
+# 明示して送るのは、送らないとテンプレートの既定（xhigh）になり、挙動が設定から読めなくなるため。
 #
 # 実測（2026-11-04、2分5秒の音声1チャンク。プロンプトは同一で、この値だけを変えた）:
 #
@@ -142,7 +143,7 @@ reasoning_budget_tokens = 0
 # medium が落とした applies_when は「参加者が募りたい場合」で、文字起こしに実在する。
 # CLAUDE.md 1章が暗黙知の中身として挙げる2点のうちの1つなので、軽い損失ではない。
 # **max_tokens と一緒に決めること**（下の説明を参照）。
-reasoning_effort = "xhigh"
+reasoning_effort = "medium"
 # 文字起こしに VRAM を明け渡すための起動・停止コマンド。夜間バッチ（kijun batch run）が
 # Strata を使う手順（Discord の返信の読み取り、抽出、Discord への投稿）の前後で実行する。
 # Strata に Ollama の keep_alive: 0 に相当する手段があるか未確認のため、
@@ -191,6 +192,10 @@ max_contradictions_per_run = 5
 contradiction_min_similarity = 0.70
 # 話者の対応付けで投稿する発言サンプルの件数（CLAUDE.md 4-6 は3件）。
 speaker_sample_count = 3
+# 1回の post で投稿する「文字起こしが読めなかった抽出結果」の上限。
+# 新規候補と同じ #review に出るので、レビューの所要時間を押し上げないよう上限を置く。
+# 新規候補より小さいのは、こちらはチェック項目にならないもので、レビューの本筋ではないため。
+max_transcription_unclear_per_run = 5
 
 [batch]
 # 各手順の記録（<日時>.json）を置く場所。

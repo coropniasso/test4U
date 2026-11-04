@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS extracted_requests (
     applies_when        VARCHAR,              -- 発言中で語られた適用条件のみ。語られていなければ NULL
     reusable            BOOLEAN NOT NULL,
     pass_criterion      VARCHAR,              -- Yes/No で判定できる基準。作れなければ NULL
+    -- 文字起こしの聞き取り誤りで意味が取れず、それが要求の中心にある場合に TRUE。
+    -- この行は reusable = FALSE になるので照合(match/link.py)の対象から外れ、knowledge_items に
+    -- ならない。だが発話したのは利用者本人なので、壊れた引用を見れば直せる。その機会を渡すために、
+    -- この列が TRUE の行を Discord に別の投稿種別(transcription_unclear)で出す。
+    transcription_unclear BOOLEAN NOT NULL DEFAULT FALSE,
     source_type         VARCHAR NOT NULL,     -- live_conversation / dictated_review
     model_name          VARCHAR NOT NULL,     -- 抽出に使ったモデル。#5 の比較で使う
     extracted_at        TIMESTAMP NOT NULL
@@ -86,13 +91,16 @@ CREATE TABLE IF NOT EXISTS speaker_map (
 
 CREATE TABLE IF NOT EXISTS discord_posts (
     message_id      VARCHAR PRIMARY KEY,
-    post_type       VARCHAR NOT NULL,      -- new_candidate / contradiction / speaker_sample / bundle_result
+    post_type       VARCHAR NOT NULL,      -- new_candidate / contradiction / speaker_sample / bundle_result / transcription_unclear
     item_id         VARCHAR,
     conversation_id VARCHAR,
     posted_at       TIMESTAMP NOT NULL,
     processed_at    TIMESTAMP,             -- 翌晩のバッチで読み取りを終えた時刻。判定できなかったものは NULL のまま
     channel_id      VARCHAR,               -- 投稿先のチャンネルID。設定値は後から変わり得るので投稿時の値を残す（バージョン2で追加）
-    pair_item_id    VARCHAR                -- contradiction のとき、組のもう一方の item_id（バージョン2で追加）
+    pair_item_id    VARCHAR,               -- contradiction のとき、組のもう一方の item_id（バージョン2で追加）
+    -- transcription_unclear のとき、投稿した extracted_requests.request_id（バージョン3で追加）。
+    -- この種別は knowledge_items にならない抽出結果を投稿するので、item_id では記録できない。
+    request_id      VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS embeddings (

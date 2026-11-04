@@ -102,6 +102,49 @@ def format_new_candidate(
     return build(quote_line(shortened))
 
 
+UNCLEAR_GUIDE = (
+    "→ 何と言ったか分かるなら ✅、直したいなら ❌ を付けてください。"
+    "この投稿への返信は読み取りません（返信を記録する先が無いため）"
+)
+
+
+def format_transcription_unclear(
+    request: RequestRow,
+    conversation: Conversation | None,
+    speaker_map: dict[str, str],
+    limit: int = DISCORD_MESSAGE_LIMIT,
+) -> str:
+    """文字起こしが読めなかった抽出結果の文面（CLAUDE.md 7章の案A）。
+
+    チェック項目案は書かない。書けないことがこの投稿の内容である。引用を直さずそのまま出すのが
+    この投稿の目的なので、limit を超えるときは引用を切り詰める（format_new_candidate と同じ扱い）。
+    """
+    head = "【文字起こしが読めませんでした】"
+    scene_line = f"場面：{scene(conversation)}" if conversation else "場面：不明"
+    tail = "\n".join(
+        [
+            f"読み取れた範囲：{request.request_summary}",
+            "文字起こしに聞き取り誤りがあり、何を求めたのかが決まらないため、チェック項目にしていません。",
+            UNCLEAR_GUIDE,
+        ]
+    )
+    who = (
+        f"（{speaker_display(request.speaker_from_label, speaker_map)}"
+        f"→{speaker_display(request.speaker_to_label, speaker_map)}）"
+    )
+
+    def build(quote: str) -> str:
+        return "\n".join([head, scene_line, f"発言：「{quote}」{who}", tail])
+
+    text = build(request.quote)
+    if len(text) <= limit:
+        return text
+    overflow = len(text) - limit
+    keep = len(request.quote) - overflow - len(ELLIPSIS)
+    shortened = (request.quote[:keep] if keep > 0 else "") + ELLIPSIS
+    return build(shortened)
+
+
 def format_contradiction(
     a: KnowledgeItemRow, b: KnowledgeItemRow, similarity: float
 ) -> str:

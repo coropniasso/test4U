@@ -461,13 +461,12 @@ def test_usage_が無ければ_last_usage_は_None():
     assert ex.last_usage is None
 
 
-def test_reasoning_effort_は既定で_xhigh_を明示して送る():
-    # 送らないことは xhigh を送ることと同じ（chat_template.jinja の既定が xhigh）だが、
-    # 明示するのは、テンプレートの既定が将来変わったときに抽出の挙動が黙って変わるのを防ぐため。
-    # "xhigh" が有効な値であることは 2026-11-04 に実機で確認した（200 が返る）。
+def test_reasoning_effort_は既定で_medium_を明示して送る():
+    # 既定が medium なのは 2026-11-04 のユーザーの決定（実測を見て所要時間を取った）。
+    # 明示して送るのは、送らないとテンプレートの既定（xhigh）になり、設定から挙動が読めなくなるため。
     transport = FakeTransport([(200, chat_body(EMPTY))])
     StrataExtractor(Config(), transport).extract(a_chunk())
-    assert transport.posts[0]["payload"]["reasoning_effort"] == "xhigh"
+    assert transport.posts[0]["payload"]["reasoning_effort"] == "medium"
 
 
 def test_reasoning_effort_を空文字にすれば送らない():

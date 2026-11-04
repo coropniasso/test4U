@@ -434,3 +434,68 @@ def test_束ね結果にリアクションが無ければ未処理のまま(con,
     repo.insert_discord_post(con, repo.DiscordPostRow("b1m", "bundle_result", None, "b1", NOW, None, "111", None))
     report = read(con, cfg, FakeDiscordClient())
     assert report.rebundle_needed == [] and post_row(con, "b1m").processed_at is None
+
+
+# --- 文字起こしが読めなかった抽出結果への反応（CLAUDE.md 7章の案A） -------------------------
+#
+# DB は変えない。対応する knowledge_items が無く、review_log は item_id が NOT NULL なので
+# 記録する先が無い（計画書12節に記録済みの制約）。したがってリアクションだけを読み、返信は読まない。
+
+
+@pytest.fixture
+def posted_unclear(con, cfg):
+    """文字起こしが読めなかった抽出結果 r1 を投稿済み(メッセージ m9)にする。"""
+    cfg.discord.review_channel_id = "111"
+    setup_conversation(con)
+    repo.insert_discord_post(
+        con,
+        repo.DiscordPostRow(
+            "m9", repo.POST_TRANSCRIPTION_UNCLEAR, None, CID, NOW, None, "111", None, "r1"
+        ),
+    )
+    return "m9"
+
+
+def test_承認のリアクションで処理済みになり_DBは変わらない(con, cfg, posted_unclear):
+    client = FakeDiscordClient()
+    client.reactions["m9"] = r(APPROVE)
+
+    report = run_read(con, cfg, client, None, None, NOW)
+
+    assert post_row(con, "m9").processed_at == NOW
+    assert report.processed_posts == 1
+    assert report.unclear_to_fix == []
+    # knowledge_items も review_log も増えない
+    assert repo.list_knowledge_items(con) == []
+    assert repo.list_review_log(con) == []
+
+
+def test_却下のリアクションは処理済みにしたうえで_request_id_を報告に残す(con, cfg, posted_unclear):
+    # 直したいが、この仕組みでは直せない。毎晩読み直しても何も変わらないので処理済みにする。
+    client = FakeDiscordClient()
+    client.reactions["m9"] = r(REJECT)
+
+    report = run_read(con, cfg, client, None, None, NOW)
+
+    assert post_row(con, "m9").processed_at == NOW
+    assert report.unclear_to_fix == ["r1"]
+    assert any("r1" in m and "手で足して" in m for m in report.messages)
+
+
+def test_リアクションが無ければ処理済みにしない(con, cfg, posted_unclear):
+    # 後から付ける可能性があるため。他の種別と同じ扱い。
+    client = FakeDiscordClient()  # リアクションを入れない
+
+    report = run_read(con, cfg, client, None, None, NOW)
+
+    assert post_row(con, "m9").processed_at is None
+    assert report.processed_posts == 0
+
+
+def test_未対応の種類として報告されない(con, cfg, posted_unclear):
+    # 読み取りに対応していないと、夜間バッチが毎晩「未対応です」と報告し続ける。
+    client = FakeDiscordClient()  # リアクションを入れない
+
+    report = run_read(con, cfg, client, None, None, NOW)
+
+    assert not any("未対応" in m for m in report.messages)

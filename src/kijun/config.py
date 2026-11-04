@@ -84,7 +84,8 @@ class StrataConfig(_Section):
     #   推論の予算 = max_tokens - 取り置き（≒ max_tokens の 4分の3）
     # 予算に達すると推論は切られるのではなく、閉じられて答えが書かれる。壊れないが品質は落ちる。
     #
-    # **既定値 20000 は、xhigh には足りない。** 2026-11-04 の実測で、xhigh はこの入力に
+    # 既定値 20000 は、既定の reasoning_effort（medium、推論 2,641 トークン）には十分である。
+    # **ただし xhigh には足りない。** 2026-11-04 の実測で、xhigh はこの入力に
     # 推論 21,201 トークンを要した。20000 の予算は 15,000 なので、推論が閉じられる。実測では
     # その設定（= この既定値のまま）が3つの設定の中で stated_reason と pass_criterion が
     # 最も少なかった（3/6 と 3/6。xhigh を予算内で動かせば 4/6 と 4/6）。
@@ -126,8 +127,8 @@ class StrataConfig(_Section):
     # - **送らないことは xhigh を送ることと同じである。** chat_template.jinja が
     #   reasoning_effort|default('xhigh') としており、テンプレートの既定が xhigh だからである。
     #   プロファイル JSON と共有設定ファイルのどちらにも上書きは無いことを実機で確認した。
-    # 既定を "xhigh" と明示するのは、送らない場合と挙動は同じだが、テンプレートの既定が将来
-    # 変わったときに抽出の挙動が黙って変わるのを防ぐためである。
+    # **既定は "medium"（2026-11-04 ユーザーが決定）。** 下の実測を見て、所要時間を取る判断をした。
+    # 明示して送るのは、送らないとテンプレートの既定（xhigh）になり、挙動が設定から読めなくなるため。
     # 実測（2026-11-04、2分5秒の音声1チャンク。プロンプトは同一で、この値だけを変えた）:
     # - "xhigh": 推論 21,201 トークン・出力 22,408 トークン・409 秒。抽出6件。
     #   stated_reason 4/6、applies_when 2/6、pass_criterion 4/6。
@@ -137,7 +138,8 @@ class StrataConfig(_Section):
     # CLAUDE.md 1章が暗黙知の中身として挙げる2点のうちの1つなので、軽い損失ではない。
     # なお、改訂プロンプトでは medium でも推測の混入（発話に無い語の当てはめ）は起きていない。
     # **max_tokens と一緒に決めること。** xhigh はこの入力に約21,200トークンの推論を要するので、
-    # 実効の推論の予算（max_tokens の説明を参照）がそれを下回ると、推論が閉じられて品質が落ちる。
+    # xhigh に戻す場合は max_tokens を 32000 以上にしないと推論が閉じられて品質が落ちる。
+    # medium は推論 2,641 トークンなので、max_tokens = 20000（予算 15,000）で足りる。
     # 実測（2026-11-03、2分5秒の音声1チャンク。プロンプトは同一で、この値だけを変えた）:
     # - "xhigh"（このときのサーバーの既定でもあった）: 6件。文字起こしが壊れた発話（「感嘆符」が
     #   「簡単フォーイス」に化けた箇所）に対し stated_reason / applies_when / pass_criterion を null、
@@ -148,7 +150,7 @@ class StrataConfig(_Section):
     # - 思考なし（chat_template_kwargs の enable_thinking = false）: その項目を出さなかった（5件）。
     # 速さでは "medium" が有利だが、上記のとおり推測が混入したので既定にはしない。
     # プロンプト側で全項目に根拠制約を掛け、文字起こしが壊れた発話の扱いを明記した改訂の後に測り直す。
-    reasoning_effort: str = "xhigh"
+    reasoning_effort: str = "medium"
     # 文字起こしに VRAM を明け渡すための起動・停止コマンド。夜間バッチ（kijun batch run）が
     # Strata を使う手順の前後で実行する。空文字なら何もしない（Strata を手で起動・停止する運用）。
     start_command: str = ""
@@ -217,6 +219,11 @@ class DiscordConfig(_Section):
     contradiction_min_similarity: float = 0.70
     # 話者の対応付けで投稿する発言サンプルの件数（CLAUDE.md 4-6 は3件）。
     speaker_sample_count: int = 3
+    # 1回の post で投稿する「文字起こしが読めなかった抽出結果」の上限（CLAUDE.md 7章の案A）。
+    # 新規候補と同じ #review に出るので、レビューの所要時間（6章）を押し上げないよう上限を置く。
+    # 新規候補より小さくしてあるのは、こちらはチェック項目にならないものであり、
+    # レビューの本筋ではないためである。
+    max_transcription_unclear_per_run: int = 5
 
 
 class BatchConfig(_Section):

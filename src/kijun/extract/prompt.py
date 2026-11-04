@@ -43,6 +43,7 @@ items の各要素には、次の項目をすべて入れてください。値�
 - applies_when（文字列または null）: 発言の中で実際に語られた適用条件だけ。下の「最も重要な規則」を守る。
 - reusable（true または false）: 同じ種類の成果物を別の機会に作るときにも使えるチェック項目になるなら true。この場限りの修正（特定の誤字、特定の数値の訂正など）なら false。
 - pass_criterion（文字列または null）: 下の「pass_criterion の書き方」を守る。
+- transcription_unclear（true または false）: 下の「文字起こしが壊れている発話の扱い」を守る。
 
 # 最も重要な規則: 発言の中に無い内容を、どの項目にも書かない
 次の6項目には、発言の中で実際に語られた内容だけを書いてください。
@@ -77,6 +78,7 @@ pass_criterion も、発言の趣旨から外れた内容を加えないでく�
 - pass_criterion: null。
 - stated_reason: null。applies_when: null。
 - reusable: false。
+- transcription_unclear: true。意味の取れない語句が無い場合は false にする。
 その発言を items から省いてはいけません。壊れたまま出してください。
 この結果を読むのは、その発言をした本人です。壊れた引用を見れば自分が何と言ったか分かるので、本人が直せます。
 あなたが語を当てはめて直すと、本人は誤りに気付けず、間違った基準がそのまま残ります。

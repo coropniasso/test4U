@@ -44,6 +44,9 @@ POST_NEW_CANDIDATE = "new_candidate"
 POST_CONTRADICTION = "contradiction"
 POST_SPEAKER_SAMPLE = "speaker_sample"
 POST_BUNDLE_RESULT = "bundle_result"
+# 文字起こしが壊れていて判定できなかった抽出結果。reusable = FALSE なので照合の対象から外れ、
+# knowledge_items にならない。利用者が壊れた引用を見て直せるように、別の種別で投稿する。
+POST_TRANSCRIPTION_UNCLEAR = "transcription_unclear"
 
 # review_log.action の保存値。値はここ1か所で定義し、他のファイルでは文字列を直接書かない。
 # 後で上書き履歴を回帰の目的変数にする（CLAUDE.md 4-6）ため、値を変えると過去の履歴が読めなくなる。
@@ -88,6 +91,11 @@ class RequestRow:
     source_type: str
     model_name: str
     extracted_at: datetime
+    # 末尾に置いてあるのは、既定値を持たせるためである（データクラスは既定値のある項目を
+    # 既定値の無い項目より後ろに置かなければならない）。この並びは _REQUEST_COLUMNS の並びと
+    # 一致していなければならない。SELECT の結果から RequestRow(*r) で位置で組み立てるためである。
+    # 既定が False なのは「文字起こしは読めた」が通常の場合であり、DB の列の既定値と同じである。
+    transcription_unclear: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,6 +127,10 @@ class DiscordPostRow:
     processed_at: datetime | None
     channel_id: str | None
     pair_item_id: str | None
+    # transcription_unclear のとき、投稿した extracted_requests.request_id。
+    # 既定値を持たせてあるのは、他の種別では使わないためである。並びは _POST_COLUMNS と
+    # 一致していなければならない（SELECT の結果から DiscordPostRow(*r) で組み立てる）。
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,7 +148,8 @@ class ReviewLogRow:
 _REQUEST_COLUMNS = (
     "request_id, conversation_id, seq_from, seq_to, speaker_from_label, speaker_to_label, "
     "direction, counterpart_role, artifact_type, quote, request_summary, stated_reason, "
-    "applies_when, reusable, pass_criterion, source_type, model_name, extracted_at"
+    "applies_when, reusable, pass_criterion, source_type, model_name, extracted_at, "
+    "transcription_unclear"
 )
 
 _ITEM_COLUMNS = (
@@ -320,7 +333,7 @@ def insert_requests(con: duckdb.DuckDBPyConnection, rows: list[RequestRow]) -> N
         return
     con.executemany(
         f"INSERT INTO extracted_requests ({_REQUEST_COLUMNS}) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             [
                 r.request_id,
@@ -341,6 +354,7 @@ def insert_requests(con: duckdb.DuckDBPyConnection, rows: list[RequestRow]) -> N
                 r.source_type,
                 r.model_name,
                 r.extracted_at,
+                r.transcription_unclear,
             ]
             for r in rows
         ],
@@ -357,6 +371,24 @@ def get_requests(
         params.append(model_name)
     sql += " ORDER BY model_name, seq_from, request_id"
     return [RequestRow(*r) for r in con.execute(sql, params).fetchall()]
+
+
+def get_transcription_unclear_requests(
+    con: duckdb.DuckDBPyConnection, model_name: str
+) -> list[RequestRow]:
+    """文字起こしが読めず、要求の中心が決まらなかった抽出結果（会議の古い順）。
+
+    これらは reusable = FALSE なので照合（match/link.py）の対象から外れ、knowledge_items に
+    ならない。だが発話したのは利用者本人なので、壊れた引用を見れば自分が何と言ったか分かる。
+    その機会を渡すために、Discord に別の種別で投稿する（CLAUDE.md 7章の案A）。
+    """
+    sql = (
+        f"SELECT {_REQUEST_COLUMNS} FROM extracted_requests r "
+        "WHERE r.transcription_unclear AND r.model_name = ? "
+        "ORDER BY (SELECT c.recorded_at FROM conversations c "
+        "          WHERE c.conversation_id = r.conversation_id), r.seq_from, r.request_id"
+    )
+    return [RequestRow(*r) for r in con.execute(sql, [model_name]).fetchall()]
 
 
 def list_request_models(con: duckdb.DuckDBPyConnection, conversation_id: str) -> list[str]:
@@ -619,13 +651,13 @@ def list_review_log(
 
 _POST_COLUMNS = (
     "message_id, post_type, item_id, conversation_id, posted_at, processed_at, "
-    "channel_id, pair_item_id"
+    "channel_id, pair_item_id, request_id"
 )
 
 
 def insert_discord_post(con: duckdb.DuckDBPyConnection, row: DiscordPostRow) -> None:
     con.execute(
-        f"INSERT INTO discord_posts ({_POST_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO discord_posts ({_POST_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             row.message_id,
             row.post_type,
@@ -635,6 +667,7 @@ def insert_discord_post(con: duckdb.DuckDBPyConnection, row: DiscordPostRow) -> 
             row.processed_at,
             row.channel_id,
             row.pair_item_id,
+            row.request_id,
         ],
     )
 

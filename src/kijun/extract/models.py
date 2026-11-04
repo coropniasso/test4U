@@ -53,6 +53,14 @@ class ExtractedRequest(BaseModel):
     pass_criterion: str | None = Field(
         description="Yes か No で判定できる形の基準（例: 冒頭2行以内に、読み手にしてほしい行動が書かれているか）。作れなければ null。"
     )
+    transcription_unclear: bool = Field(
+        default=False,
+        description=(
+            "文字起こしの聞き取り誤りで意味の取れない語句があり、それが要求の中心にある場合は true。"
+            "その語句が分からないと何を求めたのかが決まらない場合だけ true にする。"
+            "文字起こしが読める場合は false。"
+        ),
+    )
 
 
 class ExtractionResult(BaseModel):

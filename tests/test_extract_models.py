@@ -24,6 +24,7 @@ VALID = {
     "applies_when": None,
     "reusable": True,
     "pass_criterion": "冒頭2行以内に、読み手にしてほしい行動が書かれているか",
+    "transcription_unclear": False,
 }
 
 

@@ -164,3 +164,46 @@ def test_束ね結果の文面():
 def test_異体字セレクタを外して絵文字を比較できる():
     assert normalize_emoji("⏸️") == "⏸" and normalize_emoji("1️⃣") == "1⃣"
     assert normalize_emoji("✅") == "✅"
+
+
+# --- 文字起こしが読めなかった抽出結果（CLAUDE.md 7章の案A） ---------------------------------
+
+
+def test_引用を直さずそのまま出し_チェック項目案は書かない():
+    from kijun.discord.format import format_transcription_unclear
+
+    text = format_transcription_unclear(
+        request(quote="3つ目簡単フォーイスなんか減らしてください",
+                request_summary="「簡単フォーイス」を減らすことを求めた",
+                reusable=False, transcription_unclear=True),
+        CONV, {"SPEAKER_00": "self", "SPEAKER_01": "kouhai_a"},
+    )
+    # 引用は壊れたまま出す。直すのは利用者で、そのための投稿である
+    assert "「3つ目簡単フォーイスなんか減らしてください」" in text
+    assert "（あなた→kouhai_a）" in text
+    # 書けないことがこの投稿の内容なので、チェック項目案・理由・適用条件の欄は出さない
+    assert "チェック項目案" not in text
+    assert "理由：" not in text and "適用条件：" not in text
+    # 返信が読み取られないことを明示する（書いても記録する先が無いため）
+    assert "返信は読み取りません" in text
+
+
+def test_長い引用は切り詰めるが_説明は残す():
+    from kijun.discord.format import DISCORD_MESSAGE_LIMIT, format_transcription_unclear
+
+    text = format_transcription_unclear(
+        request(quote="あ" * 3000, reusable=False, transcription_unclear=True), CONV, {}
+    )
+    assert len(text) <= DISCORD_MESSAGE_LIMIT
+    assert "…" in text
+    assert "返信は読み取りません" in text
+    assert "チェック項目にしていません" in text
+
+
+def test_会議が分からなければ場面は不明と書く():
+    from kijun.discord.format import format_transcription_unclear
+
+    text = format_transcription_unclear(
+        request(reusable=False, transcription_unclear=True), None, {}
+    )
+    assert "場面：不明" in text

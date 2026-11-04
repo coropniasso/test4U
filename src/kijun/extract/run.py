@@ -117,6 +117,7 @@ def _to_row(
         applies_when=item.applies_when,
         reusable=item.reusable,
         pass_criterion=item.pass_criterion,
+        transcription_unclear=item.transcription_unclear,
         source_type=repo.SOURCE_LIVE_CONVERSATION,
         model_name=model_name,
         extracted_at=at,

@@ -81,6 +81,7 @@ def _send(
     item_id: str | None = None,
     conversation_id: str | None = None,
     pair_item_id: str | None = None,
+    request_id: str | None = None,
 ) -> bool:
     """1件投稿して discord_posts に記録する。投稿できたら True。"""
     if len(text) > fmt.DISCORD_MESSAGE_LIMIT:
@@ -99,7 +100,7 @@ def _send(
         repo.DiscordPostRow(
             message_id=message_id, post_type=post_type, item_id=item_id,
             conversation_id=conversation_id, posted_at=now, processed_at=None,
-            channel_id=channel_id, pair_item_id=pair_item_id,
+            channel_id=channel_id, pair_item_id=pair_item_id, request_id=request_id,
         ),
     )
     report.posted[post_type] = report.posted.get(post_type, 0) + 1
@@ -171,6 +172,41 @@ def post_new_candidates(
     report.not_posted_candidates = len(pending_candidates(con))
 
 
+def pending_transcription_unclear(con: duckdb.DuckDBPyConnection, cfg: Config) -> list[repo.RequestRow]:
+    """文字起こしが読めなかった抽出結果のうち、まだ投稿していないもの。
+
+    投稿済みかどうかは discord_posts.request_id で見る。この種別は knowledge_items に
+    ならないので、item_id では記録できない（バージョン3で request_id を足した）。
+    """
+    posted = {
+        p.request_id for p in repo.list_discord_posts(con, repo.POST_TRANSCRIPTION_UNCLEAR)
+    }
+    rows = repo.get_transcription_unclear_requests(con, cfg.extract.model_name())
+    return [r for r in rows if r.request_id not in posted]
+
+
+def post_transcription_unclear(
+    con, cfg: Config, client: DiscordClient, report: PostReport, now: datetime
+) -> None:
+    """文字起こしが読めなかった抽出結果を、上限の件数まで #review に投稿する（CLAUDE.md 7章の案A）。
+
+    これらは reusable = FALSE なので照合の対象から外れ、knowledge_items にならない。投稿するのは、
+    発話したのが利用者本人であり、壊れた引用を見れば自分が何と言ったか分かるためである。
+    投稿しなければ、同じ発話が繰り返し失われ続ける（「箇条書き」「感嘆符」は頻出語である）。
+    """
+    pending = pending_transcription_unclear(con, cfg)
+    for request in pending[: cfg.discord.max_transcription_unclear_per_run]:
+        conv = repo.get_conversation(con, request.conversation_id)
+        speaker_map = repo.get_speaker_map(con, request.conversation_id)
+        _send(
+            con, client, report, cfg.discord.review_channel_id,
+            fmt.format_transcription_unclear(request, conv, speaker_map),
+            repo.POST_TRANSCRIPTION_UNCLEAR, now,
+            label=f"文字起こしが読めなかった抽出結果 {request.request_id}",
+            conversation_id=request.conversation_id, request_id=request.request_id,
+        )
+
+
 def post_contradictions(con, cfg: Config, client: DiscordClient, report: PostReport, now: datetime) -> None:
     for pair in find_contradictions(con, cfg)[: cfg.discord.max_contradictions_per_run]:
         _send(
@@ -188,7 +224,7 @@ def run_post(
     judge: ImportanceJudge | None,
     now: datetime | None = None,
 ) -> PostReport:
-    """4種類を投稿する。チャンネルIDが空の種類は、設定が必要であることを報告して飛ばす。"""
+    """5種類を投稿する。チャンネルIDが空の種類は、設定が必要であることを報告して飛ばす。"""
     now = now or datetime.now()
     report = PostReport()
     review, contra = cfg.discord.review_channel_id, cfg.discord.contradictions_channel_id
@@ -202,8 +238,12 @@ def run_post(
         post_bundle_results(con, cfg, client, report, now)
         post_speaker_samples(con, cfg, client, report, now)
         post_new_candidates(con, cfg, client, judge, report, now)
+        post_transcription_unclear(con, cfg, client, report, now)
     else:
-        report.messages.append("review_channel_id が空のため、新規候補・話者の対応付け・束ね結果は投稿しません。")
+        report.messages.append(
+            "review_channel_id が空のため、新規候補・話者の対応付け・束ね結果・"
+            "文字起こしが読めなかった抽出結果は投稿しません。"
+        )
     if contra:
         post_contradictions(con, cfg, client, report, now)
     else:

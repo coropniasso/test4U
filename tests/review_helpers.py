@@ -32,8 +32,9 @@ def add_request(
         speaker_from_label=from_label, speaker_to_label=to_label, direction=direction,
         counterpart_role=None, artifact_type=kw.get("artifact_type", "announcement"), quote=quote,
         request_summary=summary, stated_reason=kw.get("stated_reason"), applies_when=kw.get("applies_when"),
-        reusable=True, pass_criterion=kw.get("pass_criterion"), source_type="live_conversation",
-        model_name=model, extracted_at=datetime(2026, 11, 3),
+        reusable=kw.get("reusable", True), pass_criterion=kw.get("pass_criterion"),
+        source_type="live_conversation", model_name=model, extracted_at=datetime(2026, 11, 3),
+        transcription_unclear=kw.get("transcription_unclear", False),
     )
     repo.insert_requests(con, [row])
     return row

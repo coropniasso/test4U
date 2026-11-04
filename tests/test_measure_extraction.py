@@ -85,7 +85,7 @@ def test_variant_は指定した値だけを差し替え_元の設定を変え�
     # timeout_sec は 0 なら設定ファイルの値をそのまま使う
     assert applied.extract.strata.timeout_sec == cfg.extract.strata.timeout_sec
     # 元の Config は書き換えない（次の variant に漏れると比較が崩れる）
-    assert cfg.extract.strata.reasoning_effort == "xhigh"
+    assert cfg.extract.strata.reasoning_effort == "medium"
     assert cfg.extract.strata.max_tokens == 20000
 
 

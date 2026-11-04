@@ -199,3 +199,99 @@ def test_review_だけ空なら矛盾だけ_contradictions_だけ空なら候補
     configure(cfg, review="111", contra="")
     report = run_post(con, cfg, client, None, NOW)
     assert numbers(client) == ["0001"] and any("contradictions_channel_id が空" in m for m in report.messages)
+
+
+# --- 文字起こしが読めなかった抽出結果（CLAUDE.md 7章の案A） ---------------------------------
+#
+# これらは reusable = False なので照合の対象から外れ、knowledge_items にならない。投稿するのは、
+# 発話したのが利用者本人であり、壊れた引用を見れば自分が何と言ったか分かるためである。
+# 投稿しなければ、同じ発話が繰り返し失われ続ける（「箇条書き」「感嘆符」は頻出語である）。
+
+UNCLEAR_HEAD = "【文字起こしが読めませんでした】"
+
+
+def unclear_messages(client: FakeDiscordClient) -> list[str]:
+    return [c for c in client.contents() if c.startswith(UNCLEAR_HEAD)]
+
+
+def add_unclear(con, request_id: str, quote: str, model: str, **kw):
+    return add_request(
+        con, request_id, quote=quote, model=model, reusable=False,
+        transcription_unclear=True, **kw,
+    )
+
+
+def test_文字起こしが読めなかった抽出結果を_review_に投稿する(con, cfg):
+    configure(cfg)
+    cfg.extract.strata.model = "m"
+    setup_conversation(con)
+    add_unclear(con, "r1", "3つ目簡単フォーイスなんか減らしてください", "m",
+                summary="「簡単フォーイス」を減らすことを求めた")
+    client = FakeDiscordClient()
+
+    run_post(con, cfg, client, None, NOW)
+
+    posted = unclear_messages(client)
+    assert len(posted) == 1
+    # 引用は直さずそのまま出す。直すのは利用者で、そのための投稿である
+    assert "簡単フォーイス" in posted[0]
+    # チェック項目案は書かない。書けないことがこの投稿の内容である
+    assert "チェック項目案" not in posted[0]
+
+
+def test_投稿は_request_id_で記録され_次回は投稿しない(con, cfg):
+    # discord_posts に item_id では記録できない（knowledge_items にならないため）。
+    configure(cfg)
+    cfg.extract.strata.model = "m"
+    setup_conversation(con)
+    add_unclear(con, "r1", "過剰書きにして", "m")
+    client = FakeDiscordClient()
+
+    run_post(con, cfg, client, None, NOW)
+    rows = repo.list_discord_posts(con, repo.POST_TRANSCRIPTION_UNCLEAR)
+    assert [p.request_id for p in rows] == ["r1"]
+    assert rows[0].item_id is None and rows[0].conversation_id == CID
+
+    run_post(con, cfg, client, None, NOW)  # 2回目
+    assert len(unclear_messages(client)) == 1  # 増えない
+
+
+def test_上限の件数までしか投稿しない(con, cfg):
+    configure(cfg)
+    cfg.extract.strata.model = "m"
+    cfg.discord.max_transcription_unclear_per_run = 2
+    setup_conversation(con)
+    for i in range(5):
+        add_unclear(con, f"r{i}", f"壊れた引用{i}", "m")
+    client = FakeDiscordClient()
+
+    run_post(con, cfg, client, None, NOW)
+
+    assert len(unclear_messages(client)) == 2
+
+
+def test_別のモデルで抽出した分は投稿しない(con, cfg):
+    # 設定を変えて2回抽出した場合、いまの設定が指すモデルの分だけを投稿する。
+    configure(cfg)
+    cfg.extract.strata.model = "m"
+    setup_conversation(con)
+    add_unclear(con, "r1", "いまの設定のモデル", "m")
+    add_unclear(con, "r2", "別の設定のモデル", "other")
+    client = FakeDiscordClient()
+
+    run_post(con, cfg, client, None, NOW)
+
+    posted = unclear_messages(client)
+    assert len(posted) == 1 and "いまの設定のモデル" in posted[0]
+
+
+def test_文字起こしが読めた抽出結果は投稿しない(con, cfg):
+    configure(cfg)
+    cfg.extract.strata.model = "m"
+    setup_conversation(con)
+    add_request(con, "r1", quote="結論を先に書いて", model="m")  # transcription_unclear は False
+    client = FakeDiscordClient()
+
+    run_post(con, cfg, client, None, NOW)
+
+    assert unclear_messages(client) == []
