@@ -56,9 +56,9 @@ class ExtractedRequest(BaseModel):
     transcription_unclear: bool = Field(
         default=False,
         description=(
-            "文字起こしの聞き取り誤りで意味の取れない語句があり、それが要求の中心にある場合は true。"
-            "その語句が分からないと何を求めたのかが決まらない場合だけ true にする。"
-            "文字起こしが読める場合は false。"
+            "引用の中に、文字起こしの聞き取り誤りで読み取れない語句が1つでもあれば true。"
+            "求めた内容が分かるかどうかとは関係ない（reusable とは別の判定）。"
+            "読み取れない語句が無ければ false。"
         ),
     )
 

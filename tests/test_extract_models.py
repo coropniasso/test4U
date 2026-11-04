@@ -175,3 +175,24 @@ def test_プロンプトは_request_summary_に注釈を付けさせない():
     s = SYSTEM_PROMPT
     assert "のような注釈は付けない" in s
     assert "チェック項目として読めなくなる" in s
+
+
+def test_プロンプトは_壊れていることと使えることを別の判定として扱う():
+    # 2026-11-04 実機。モデルは transcription_unclear = true かつ reusable = true を出した。
+    # その判断は誤っていない（語は読めないが、文脈から求めた内容は決まる）。2つを混ぜて指示すると、
+    # 使えるチェック項目を捨てるか、二重投稿のどちらかになる。
+    s = SYSTEM_PROMPT
+    assert "判定は2つに分かれます" in s
+    assert "求めた内容が分かるかどうかとは" in s
+    # true/true が正しい出力であることを明記している
+    assert "transcription_unclear が true で reusable も true" in s
+
+
+def test_プロンプトは_読める語に化けた聞き取り誤りにも触れている():
+    # 2026-11-04 実機。「新しい」が「明日らしい」に化けた箇所を、モデルは誤りと判定せず、
+    # 「明日のリンク」という発言に無い内容に解釈した。意味の通らない語だけが誤りではない。
+    s = SYSTEM_PROMPT
+    assert "日本語として読める別の語に化けることもあります" in s
+    assert "文全体として求めている内容が成り立たない" in s
+    # 試験に使える語（「明日らしい」「腕お願いします」）を答えとして書いていない
+    assert "明日らしい" not in s and "腕お願い" not in s
