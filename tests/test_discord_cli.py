@@ -25,6 +25,13 @@ def write_config(tmp_path: Path, channels: bool = True) -> Path:
         f"""
 [paths]
 db = "{(tmp_path / 'data' / 'kijun.duckdb').as_posix()}"
+inbox = "{(tmp_path / 'inbox').as_posix()}"
+processed = "{(tmp_path / 'processed').as_posix()}"
+transcripts = "{(tmp_path / 'transcripts').as_posix()}"
+review_logs = "{(tmp_path / 'review_logs').as_posix()}"
+
+[batch]
+log_dir = "{(tmp_path / 'batch_logs').as_posix()}"
 {discord}
 """,
         encoding="utf-8",
@@ -259,3 +266,22 @@ def test_チャンネルIDが空なら記録を書かない(con, cfg):
     post_command(con, cfg, echo=lambda _: None)
     read_command(con, cfg, echo=lambda _: None)
     assert not cfg.paths.review_logs.exists()
+
+
+def test_write_config_の_Path_設定はすべて_tmp_path_の下(tmp_path):
+    """CLI 経由のテストが、実際の ./data に書かないことを確かめる。
+
+    conftest の cfg フィクスチャには同じ検査があるが、この write_config は別の経路なので
+    そちらの検査では守られない。設定に Path の項目を足したときは、両方に足す必要がある。
+    実際に paths.review_logs を足したとき、ここが漏れて ./data/review_logs に書いていた。
+    """
+    from kijun.config import load_config
+    from tests.test_config import _path_settings
+
+    found = dict(_path_settings(load_config(write_config(tmp_path))))
+    # 列挙が空だと検査が素通りするので、既知の設定が見えていることを確かめる
+    assert {"paths.db", "paths.review_logs", "batch.log_dir"} <= set(found)
+    outside = {
+        k: str(v) for k, v in found.items() if not v.resolve().is_relative_to(tmp_path.resolve())
+    }
+    assert not outside, f"tmp_path の外を指している設定がある: {outside}"
