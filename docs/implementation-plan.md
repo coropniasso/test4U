@@ -474,7 +474,9 @@ timeout_sec = プロンプト処理の推定秒数 + (推奨する max_tokens ÷
 
 ---
 
-## 8. 同じ会議の2回の抽出の比較（`compare/report.py`）
+## 8. 設定を変えた抽出の比較
+
+### 8-1. DB に保存された2回の抽出の比較（`compare/report.py`）
 
 ```
 uv run kijun compare --conversation <ID> [--model <名前> --model <名前>] [--out <パス>]
@@ -489,6 +491,49 @@ uv run kijun compare --conversation <ID> [--model <名前> --model <名前>] [--
 `stated_reason` と `applies_when` が非 NULL の件数は、**推測で補っていないかの手がかり**として見る。この値が大きすぎる場合、モデルが語られていない理由を推測で埋めている疑いがある（6-4の要件違反）。
 
 レビュー用の対照表：`seq_from` で並べ、同じ発話に対する2つの出力を左右に並べた Markdown の表。
+
+**2回の実行を DB に並べて残すには `extract.run_label` が必要である。** `kijun extract` は同じ
+`(会議ID, model_name)` の行を削除してから書く（`extract/run.py` の `delete_requests`）ので、
+`run_label` が空のまま設定だけ変えて2回目を流すと、1回目が消えて比較できない。`run_label` を
+入れると `model_name` が `<モデルID>+<label>` になり、2回分が並ぶ。API に送るモデルIDには付かない。
+
+### 8-2. 設定ごとの測定（`scripts/measure_extraction.py`）
+
+```
+uv run python scripts/measure_extraction.py --conversation <ID> \
+  [--config <パス>] [--variants <TOML>] [--out <ディレクトリ>]
+```
+
+8-1 は「DB に保存された結果」を比べる。それとは別に、**設定を変えた複数の実行を1回のコマンドで
+行い、生の応答から比べる**道具が要ることが実機で分かった。2026-11-03 に実機で4回の測定を行ったが、
+どの2回も条件が揃わなかった。改訂前のプロンプトでは `medium` が推測を混入させ、改訂後は対照の
+`xhigh` が推論の予算切れで打ち切られていた。さらに、推論量が変わった原因が「プロンプトの改訂」か
+「`reasoning_effort` を明示したこと」かも切り分けられなかった。
+
+原因は、比べる実行を人が別々のコマンドとして組み立てていたことである。そのたびに、設定以外のものが
+変わる余地が残る。このスクリプトは1回の実行で複数の設定を順に投げるので、**設定以外（プロンプト、
+`chunk_minutes`、入力の発話）が必ず揃い、結果の違いを設定の違いだけに帰せられる。**
+
+`kijun extract` との違いは3点である。
+
+1. **DB に書かない。** `repo.connect(..., read_only=True)` で開くので、`extracted_requests` を
+   書き換えない。`run_label` の付け替えや `delete_requests` による取り違えが起きない。読むのは
+   `utterances` だけである。
+2. **1回の実行で複数の設定を試す。** 変えるのは `reasoning_effort` /
+   `reasoning_budget_tokens` / `max_tokens` の3つで、`[[variant]]` の TOML で指定する
+   （`scripts/variants.example.toml` が例）。`Variant.applied_to` は `Config` を deep copy
+   するので、ある設定の値が次の設定に漏れない。
+3. **文字起こしに無い語を機械的に検出する。** カタカナ3文字以上と漢字2文字以上の連なりを内容語の
+   候補として拾い、会議の文字起こし全文に出てこないものを一覧にする。形態素解析を入れないのは、
+   用途が「人が読む候補の一覧を出す」ことであり、取りこぼしより見落としを防ぐ方が重要だからである。
+   1文字の漢字を拾わないのは、要約の言い回し（求めた、書く）で必ず出て一覧が読めなくなるためである。
+   **検出された語のすべてが誤りではない。** 要約の言い換えで新しい語はできる。モデルが聞き取れない
+   語に別の語を当てはめたものか正当な言い換えかは人が判断する。出力にその旨を明記している。
+
+リクエストの本文は `kijun extract` と同じ `build_payload` で作る。測定したものと本番が送るものを
+食い違わせないためで、テストでも両者が一致することを確認している。
+
+出力は `<out>/<会議ID>_<日時>.json`（全設定の生の結果と要約）と同名の `.md`（人が読む対照表）である。
 
 ---
 
@@ -605,7 +650,7 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 
 ### 11-3. テスト
 
-自動テストは31ファイル・564件で、GPU・ネットワーク・Discord のトークンが要る9件は既定で実行しない（`pyproject.toml` の `addopts` に `-m 'not requires_gpu and not requires_network'` を書いてある）。実機では `uv run pytest -m requires_gpu` と `-m requires_network` で実行でき、試験用の音声のパスは環境変数 `KIJUN_TEST_AUDIO` で渡す。
+自動テストは34ファイル・646件で、GPU・ネットワーク・Discord のトークンが要る9件は既定で実行しない（`pyproject.toml` の `addopts` に `-m 'not requires_gpu and not requires_network'` を書いてある）。実機では `uv run pytest -m requires_gpu` と `-m requires_network` で実行でき、試験用の音声のパスは環境変数 `KIJUN_TEST_AUDIO` で渡す。
 
 クラウド環境で検証できるのは、第2弾の文面の生成、投稿の順序と件数の上限、リアクションの判定（判定できない場合を含む）、返信の原文の保存、話者の対応付けの解釈、`direction` の導出、矛盾の検出、スキーマの移行、夜間バッチの手順と失敗時の動き、タスクスケジューラの XML、および設定の読み込み、ファイル名の解析、会議単位への束ね、DuckDB のスキーマと読み書き、チャンク分割と発話番号の復元、重複排除、区間の突き合わせ、壊れた JSON の修復、コサイン類似度と閾値の分岐、音声の削除の対象選定、文字起こしの書き出しと読み戻しの往復、`doctor` の判定ロジックと推奨値の算出である。
 
@@ -639,23 +684,38 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 
 ## 12. 未確認事項と、確認する手段
 
+2026-11-03 から 11-04 の実機での確認で、この表の多くが解決した。解決したものは取り消し線にして、
+実測値を残してある。`CLAUDE.md` 7章にも同じ結論が書いてあり、そちらが正本である。
+
+**まだ確認できていないこと**
+
 | 事項 | 現状 | 確認する手段 |
 |---|---|---|
-| Qwen3.8-Flash-Next が 12GB VRAM + 64GB メモリで動くか | **未確認。Unsloth は1bit量子化で最低75GB のメモリとしており、実機の64GB とは11GB の差がある** | `uv run kijun doctor` |
-| 動く場合の tokens/s と最大入力長 | 未確認。第三者の報告は RTX 4070 で約21トークン/秒（公式の数字ではない） | 同上（手順4・5） |
-| Strata が `response_format` による JSON スキーマの強制に対応するか | 未確認。既定は `false`（対応しない前提） | 同上（手順3） |
-| Strata の OpenAI 互換のパス | 未確認。既定は `/v1/chat/completions` | 同上（手順1） |
-| Strata の応答に `usage` が含まれるか | 未確認。3つの応答形式に対応済み | 同上（手順4） |
-| Strata にモデルを VRAM から降ろす手段があるか | 未確認。無い場合は `stop_command` でプロセスごと止める | Strata のドキュメント（開発環境から到達できない） |
+| **抽出の推論量を `medium` にしてよいか** | **未確定。実機で測っている。** `medium` は `xhigh` の約1/8の時間で終わる。改訂前のプロンプトでは `medium` が発話に無い語を当てはめた（6-4 の要件違反）。プロンプトを改訂したら消えたが、対照の `xhigh` が推論の予算切れで打ち切られたため、**一度も公正な比較ができていない** | `scripts/measure_extraction.py`（8-2）で3つの設定を1回のコマンドで測る |
+| `reasoning_effort` に `"xhigh"` が有効か | **未確定。** `"xhigh"` を送ると 200 が返るが、不正な値に対する 400 のメッセージは有効値を「none, low, medium or high」と列挙しており `xhigh` が入っていない。検証の表とメッセージの文字列のどちらが古いのか未確認 | Strata の `frontend.py` の `EFFORT` 表と、400 を生成している箇所を読む |
+| 1リクエストの入力長の上限 | **未確定。** 約10,000トークン（会議20分相当）までは通った。文脈長は204,800あるが、通る長さと現実的な時間で終わる長さは別問題 | `chunk_minutes` を30以上にして `doctor` を再実行 |
+| `max_tokens` の適正値 | 既定 20000。働きは解明した（下記）が、改訂プロンプトでは `xhigh` が 16,252 トークン使い、上限まで 3,748 しか余裕が無かった。**`xhigh` を使い続けるなら 20000 では小さすぎる** | 上記の測定で、推論が自然に終わる点を見つけてから決める |
 | トークン数の概算の係数 | 日本語1文字あたり 0.55 トークン、会議1分あたり 180 トークン。**実測1点からの推測**（旧 1.5 / 500 は約2〜3倍の過大だった） | `doctor` が `tokens_per_character` を実測して推奨する |
-| `max_tokens` の適正値 | 既定 20000。実測は出力 6,952 と 13,050 トークンの2回だけ | 実機で `completion_tokens` の実測を増やし、`doctor` の推奨値と見比べる |
-| 生成速度の振れ | 同じ profile・モデルで 61〜69 と 14 tokens/s（4.4倍）。原因は未特定（生成が長いほど遅い、メモリの状態、専門家キャッシュの学習状況などが候補） | `timeout_sec` は最も遅い速度で決める。振れの原因は未調査 |
+| 生成速度の振れの原因 | 同じ profile・モデルで **14.0〜68.9 tokens/s（約4.9倍）**。サーバーのインスタンスが違うだけで 14〜21 と 37〜42 の差が出た。**速いのも遅いのも起動直後に出ており、「温まると速くなる」関係ではない。** ログの `expert cache ... hit`（26〜64%）が手がかりだが因果は未確認 | `timeout_sec` は観測された最も遅い 14.0 tokens/s で決める。原因は未調査 |
+| 文字起こしが壊れた発話から作られた項目をユーザーに見せるか | **未決定。ユーザーの判断待ち。** `reusable = false` は 9-1 で照合の対象から外れるので Discord に出ず、ユーザーの目に触れないまま消える。対処案3つは `CLAUDE.md` 7章 | ユーザーが案を選ぶ |
+| Strata にモデルを VRAM から降ろす手段があるか | 未確認。無い場合は `stop_command` でプロセスごと止める | Strata のドキュメント |
 | プロンプトキャッシュ | `usage.prompt_tokens_details.cached_tokens` が 0。同じ system プロンプトの連続リクエストでキャッシュが効いていない | 未対応。気づきとして記録 |
-| pyannote.audio が Windows + CUDA で動くか | 未確認 | 実機手順8 |
-| Qwen3.8-Flash-Next の量子化版の入手先とタグ | 未確認 | ユーザーが Strata のモデル一覧で確認 |
-| ~~torch の CUDA のタグ~~ | **2026-11-03 確認済み。`cu132`（CUDA 13.2、torch 2.15.0、Windows）** | — |
 | 通話を PC スピーカー出力で録音したときに相手の声が十分に入るか | 未確認（`CLAUDE.md` 7章） | 30分の実通話テスト |
 | `artifact_type` と `counterpart_role` の値の一覧 | LLM が自由な文字列を入れる。候補を固定していない | 3回分の抽出結果を見て、よく出る値を `config.toml` に列挙する |
+
+**解決したこと（2026-11-03〜04 の実機での確認）**
+
+| 事項 | 結論 |
+|---|---|
+| ~~Qwen3.8-Flash-Next が 12GB VRAM + 64GB メモリで動くか~~ | **動く。** 量子化は IQ3_XXS、モデルID は `qwen3.8-flash-next-iq3_xxs`。`strata` プロセスが約56GB（実メモリ約42GB）を保持して動作した。Unsloth の「1bit量子化で最低75GB」は Strata の動的オフロードには当てはまらなかった |
+| ~~Strata が `response_format` による JSON スキーマの強制に対応するか~~ | **対応する。** `doctor` の検査3が「200 でスキーマに適合」。`config.toml` は `enforces_json_schema = true`。`repair.py` は保険として残す |
+| ~~Strata の OpenAI 互換のパス~~ | `/v1/chat/completions`。`/v1/models`、`/v1/messages`（Anthropic 互換）、`/v1/responses` も同じポートにある |
+| ~~Strata の応答に `usage` が含まれるか~~ | 含まれる（`prompt_tokens` と `completion_tokens`）。推論のトークンは `completion_tokens` に合算され、`reasoning_tokens` という項目は返らない |
+| ~~`max_tokens` の働き~~ | **推論を途中で切らない。** Strata は `max_tokens` から推論の予算を逆算し、残りを答え用に取り置く（取り置き = `min(max(512, max_tokens // 4), max_tokens // 2)`）。予算に達したら推論を閉じて答えを書かせる。**1024 未満では逆算が働かず、推論が本当に切られる**ので設定の読み込みで拒否している。送らないと予算が文脈長から逆算されて 151,851 になり、2分5秒の音声1チャンクで最悪 2.24 時間かかる。抽出が遅かった原因はこれだった |
+| ~~2時間の会議が夜間バッチに収まるか~~ | **収まる。** `max_tokens = 20000` が1チャンクの最悪値を 20000 ÷ 14.0 ≒ 1,429 秒に確定させる。2時間の会議は約6チャンクなので最悪 2.38 時間。23:30 開始なら 01:53 頃 |
+| ~~pyannote.audio が Windows + CUDA で動くか~~ | **動く。** 2分5秒の音声を、モデルの読み込みを含めて 18.5 秒で処理。pyannote.audio 4.0.7、torch 2.15.0+cu132。利用条件への同意はモデルページ3つに必要（`CLAUDE.md` 4-3） |
+| ~~torch の CUDA のタグ~~ | `cu132`（CUDA 13.2、torch 2.15.0、Windows） |
+| ~~Qwen3.8-Flash-Next の量子化版の入手先とタグ~~ | IQ3_XXS。`/v1/models` が返す名前は `qwen3.8-flash-next-iq3_xxs` |
 
 第2弾（Discord でのレビューと夜間バッチ）で未解決のまま残ることは次のとおりである。
 
