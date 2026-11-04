@@ -72,7 +72,7 @@ def test_内容語の取り出しは出た順で重複を除く():
 # --- variant の適用 -------------------------------------------------------------
 
 
-def test_variant_は3つの値だけを差し替え_元の設定を変えない():
+def test_variant_は指定した値だけを差し替え_元の設定を変えない():
     cfg = Config()
     cfg.extract.chunk_minutes = 7
     v = m.Variant("x", reasoning_effort="medium", reasoning_budget_tokens=8000, max_tokens=30000)
@@ -82,9 +82,35 @@ def test_variant_は3つの値だけを差し替え_元の設定を変えない(
     assert applied.extract.strata.max_tokens == 30000
     # 設定の違い以外が揃っていることが測定の前提
     assert applied.extract.chunk_minutes == 7
+    # timeout_sec は 0 なら設定ファイルの値をそのまま使う
+    assert applied.extract.strata.timeout_sec == cfg.extract.strata.timeout_sec
     # 元の Config は書き換えない（次の variant に漏れると比較が崩れる）
-    assert cfg.extract.strata.reasoning_effort == ""
+    assert cfg.extract.strata.reasoning_effort == "xhigh"
     assert cfg.extract.strata.max_tokens == 20000
+
+
+def test_timeout_sec_は正の値のときだけ上書きする():
+    # 推論の予算を大きくした設定は、設定ファイルの打ち切り時間に掛かることがある。
+    cfg = Config()
+    cfg.extract.strata.timeout_sec = 2400
+    assert m.Variant("x", timeout_sec=3600).applied_to(cfg).extract.strata.timeout_sec == 3600
+    assert m.Variant("x").applied_to(cfg).extract.strata.timeout_sec == 2400
+
+
+@pytest.mark.parametrize(
+    "max_tokens,budget,expected",
+    [
+        # 取り置き = min(max(512, max_tokens // 4), max_tokens // 2)
+        (20000, 0, 15000),      # 逆算に任せる: 取り置き 5,000
+        (48000, 40000, 36000),  # 明示しても取り置き 12,000 で切り下げられる（実機で確認）
+        (48000, 10000, 10000),  # 明示が取り置き後の天井を下回れば、明示が効く
+        (2048, 0, 1536),        # 取り置きの下限 512 が効く範囲
+        (0, 30000, 30000),      # max_tokens が上限なしなら切り下げは無い
+    ],
+)
+def test_実効の推論の予算は取り置きで切り下げられる(max_tokens, budget, expected):
+    v = m.Variant("x", reasoning_budget_tokens=budget, max_tokens=max_tokens)
+    assert v.effective_reasoning_budget() == expected
 
 
 def test_label_が重複する一覧は拒否する(tmp_path):

@@ -78,11 +78,32 @@ class StrataConfig(_Section):
     # 未確認のときは chunk_minutes の妥当性を検査しない。
     max_input_tokens: int = 0
     # 1リクエストの出力トークン数の上限（推論トークンを含む）。0 は上限なし（payload に入れない）。
-    # 既定値 20000 は、実測（2分5秒の音声1チャンクで出力 13,050 トークン、finish_reason = stop）に
-    # 余裕を持たせた値。推論トークンを含むので、本文（JSON）に必要な長さでは決めない。
+    # この値は2つのことを同時に決める。1つは1チャンクの所要時間の上限、もう1つは推論に使える
+    # 予算である。Strata は max_tokens から答え用の分を取り置き、残りを推論の予算にする。
+    #   取り置き = min(max(512, max_tokens // 4), max_tokens // 2)
+    #   推論の予算 = max_tokens - 取り置き（≒ max_tokens の 4分の3）
+    # 予算に達すると推論は切られるのではなく、閉じられて答えが書かれる。壊れないが品質は落ちる。
+    #
+    # **既定値 20000 は、xhigh には足りない。** 2026-11-04 の実測で、xhigh はこの入力に
+    # 推論 21,201 トークンを要した。20000 の予算は 15,000 なので、推論が閉じられる。実測では
+    # その設定（= この既定値のまま）が3つの設定の中で stated_reason と pass_criterion が
+    # 最も少なかった（3/6 と 3/6。xhigh を予算内で動かせば 4/6 と 4/6）。
+    # したがって reasoning_effort と一緒に決める必要がある。目安は次のとおり。
+    #   - reasoning_effort = "medium" にする場合: 20000 で足りる（実測の推論は 2,641）。
+    #     1チャンクの最悪値は 20000 ÷ 14.0（観測された最も遅い速度）≒ 1,429 秒。
+    #   - reasoning_effort = "xhigh" のまま品質を取る場合: 32000 以上にする（予算 24,000）。
+    #     1チャンクの最悪値は 32000 ÷ 14.0 ≒ 2,286 秒。2時間の会議（約6チャンク）で約3.8時間。
+    # 以前ここに書いていた「実測 13,050 トークンに余裕を持たせた値」という根拠は取り消す。
+    # 13,050 は max_tokens を送らずに測った1点で、同じ入力でも 48,764 以上まで振れていた。
     max_tokens: int = Field(default=20000, ge=0)
     # 1リクエストで推論に使ってよいトークン数の上限。OpenAI 互換 API の reasoning_budget_tokens に
     # 渡す。0 なら送らず、Strata が max_tokens から逆算した予算（下記）に任せる。
+    # **明示しても、max_tokens からの取り置きで切り下げられる**（2026-11-04 実機で確認）。
+    # 実効の予算 = min(reasoning_budget_tokens, max_tokens - 取り置き)。
+    # 取り置き = min(max(512, max_tokens // 4), max_tokens // 2) で、額は指定できない。
+    # 例: max_tokens = 48000・reasoning_budget_tokens = 40000 なら、取り置き 12,000 で予算は
+    # 36,000 に切り下がる。ログに「thinking capped at 36000 of max_tokens 48000 ...」と出る。
+    # したがって推論の予算を上げたいときは、max_tokens も一緒に上げる必要がある。
     # max_tokens との関係（2026-11-03、実機で Strata の control/serve/server.py と
     # サーバーのログで確認）:
     # - Strata は max_tokens から推論の予算を逆算し、残りを答え用に取り置く。
@@ -97,13 +118,26 @@ class StrataConfig(_Section):
     # 抽出にかかる時間はほぼ推論の長さで決まる（実測では出力 13,050 トークンのうち約 12,000 が推論）
     # ので、時間を詰めるならここが直接の手段になる。
     reasoning_budget_tokens: int = Field(default=0, ge=0)
-    # 推論の量。OpenAI 互換 API の reasoning_effort に渡す。空文字なら送らず、サーバーの既定に任せる。
-    # 既定を空文字にしてあるのは、"xhigh" が「このときのサーバーの既定がそれだった」という観測であり、
-    # 入力として送って 200 が返るかを確認していないためである。受け付けない値を送ると全チャンクが
-    # 400 で失敗するので、動くと分かっている挙動（送らない）を既定にしてある。
-    # ただし送らない限りサーバーの既定に依存し、Strata の版が変わると抽出の挙動が黙って変わる。
-    # そのため、`uv run kijun doctor` で "xhigh" を送って 200 が返ることを確認したら、
-    # config.toml に reasoning_effort = "xhigh" と書き、この既定も "xhigh" に変える。
+    # 推論の量。OpenAI 互換 API の reasoning_effort に渡す。空文字なら送らない。
+    # 有効な値は none / low / medium / high / xhigh（2026-11-04 実機で Strata のソースを確認）。
+    # - 不正な値に対する 400 のメッセージは「use none, low, medium or high」と列挙するが、
+    #   検証を行う frontend.py の EFFORT 表には "xhigh" がある。メッセージの文字列だけが古い。
+    # - **high と xhigh は同一である**（どちらも内部の "xhigh" に写る）。
+    # - **送らないことは xhigh を送ることと同じである。** chat_template.jinja が
+    #   reasoning_effort|default('xhigh') としており、テンプレートの既定が xhigh だからである。
+    #   プロファイル JSON と共有設定ファイルのどちらにも上書きは無いことを実機で確認した。
+    # 既定を "xhigh" と明示するのは、送らない場合と挙動は同じだが、テンプレートの既定が将来
+    # 変わったときに抽出の挙動が黙って変わるのを防ぐためである。
+    # 実測（2026-11-04、2分5秒の音声1チャンク。プロンプトは同一で、この値だけを変えた）:
+    # - "xhigh": 推論 21,201 トークン・出力 22,408 トークン・409 秒。抽出6件。
+    #   stated_reason 4/6、applies_when 2/6、pass_criterion 4/6。
+    # - "medium": 推論 2,641 トークン・出力 3,622 トークン・70 秒。抽出6件。
+    #   stated_reason 4/6、applies_when **1/6**、pass_criterion 4/6。約5.9倍速い。
+    # medium が落とした applies_when は「参加者が募りたい場合」で、文字起こしに実在する。
+    # CLAUDE.md 1章が暗黙知の中身として挙げる2点のうちの1つなので、軽い損失ではない。
+    # なお、改訂プロンプトでは medium でも推測の混入（発話に無い語の当てはめ）は起きていない。
+    # **max_tokens と一緒に決めること。** xhigh はこの入力に約21,200トークンの推論を要するので、
+    # 実効の推論の予算（max_tokens の説明を参照）がそれを下回ると、推論が閉じられて品質が落ちる。
     # 実測（2026-11-03、2分5秒の音声1チャンク。プロンプトは同一で、この値だけを変えた）:
     # - "xhigh"（このときのサーバーの既定でもあった）: 6件。文字起こしが壊れた発話（「感嘆符」が
     #   「簡単フォーイス」に化けた箇所）に対し stated_reason / applies_when / pass_criterion を null、
@@ -114,7 +148,7 @@ class StrataConfig(_Section):
     # - 思考なし（chat_template_kwargs の enable_thinking = false）: その項目を出さなかった（5件）。
     # 速さでは "medium" が有利だが、上記のとおり推測が混入したので既定にはしない。
     # プロンプト側で全項目に根拠制約を掛け、文字起こしが壊れた発話の扱いを明記した改訂の後に測り直す。
-    reasoning_effort: str = ""
+    reasoning_effort: str = "xhigh"
     # 文字起こしに VRAM を明け渡すための起動・停止コマンド。夜間バッチ（kijun batch run）が
     # Strata を使う手順の前後で実行する。空文字なら何もしない（Strata を手で起動・停止する運用）。
     start_command: str = ""

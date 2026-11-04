@@ -76,12 +76,33 @@ class Variant:
     reasoning_effort: str = ""
     reasoning_budget_tokens: int = 0
     max_tokens: int = 20000
+    # 0 なら config.toml の timeout_sec を使う。正の値のときだけ上書きする。
+    # 推論の予算を大きくした設定は、設定ファイルの打ち切り時間に掛かることがある。
+    # 実効の予算（下記）を観測された最も遅い生成速度で割った秒数より大きくしておく。
+    timeout_sec: int = 0
+
+    def effective_reasoning_budget(self) -> int:
+        """この設定で実際に推論に使える上限。0 は「Strata の逆算に任せる」。
+
+        明示した reasoning_budget_tokens は max_tokens からの逆算より優先されるが、そのあとに
+        答え用の取り置きで切り下げられる（2026-11-04 実機で Strata のソースとログで確認）。
+        取り置き = min(max(512, max_tokens // 4), max_tokens // 2)。額は指定できない。
+        """
+        if self.max_tokens <= 0:
+            return self.reasoning_budget_tokens
+        reserve = min(max(512, self.max_tokens // 4), self.max_tokens // 2)
+        ceiling = self.max_tokens - reserve
+        if self.reasoning_budget_tokens <= 0:
+            return ceiling
+        return min(self.reasoning_budget_tokens, ceiling)
 
     def applied_to(self, cfg: Config) -> Config:
         out = cfg.model_copy(deep=True)
         out.extract.strata.reasoning_effort = self.reasoning_effort
         out.extract.strata.reasoning_budget_tokens = self.reasoning_budget_tokens
         out.extract.strata.max_tokens = self.max_tokens
+        if self.timeout_sec > 0:
+            out.extract.strata.timeout_sec = self.timeout_sec
         return out
 
 
@@ -110,6 +131,7 @@ def load_variants(path: Path | None) -> list[Variant]:
                 reasoning_effort="xhigh",
                 reasoning_budget_tokens=40000,
                 max_tokens=48000,
+                timeout_sec=3600,
             ),
         ]
     data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -206,13 +228,22 @@ def build_markdown(conversation_id: str, variants: list[Variant], results: dict)
         "",
         "## 設定",
         "",
-        "| label | reasoning_effort | reasoning_budget_tokens | max_tokens |",
-        "|---|---|---|---|",
+        "| label | reasoning_effort | reasoning_budget_tokens | max_tokens | 実効の推論の予算 |",
+        "|---|---|---|---|---|",
     ]
     for v in variants:
-        effort = v.reasoning_effort or "（送らない）"
+        effort = v.reasoning_effort or "（送らない＝テンプレートの既定 xhigh）"
         budget = v.reasoning_budget_tokens or "（送らない）"
-        lines.append(f"| {v.label} | {effort} | {budget} | {v.max_tokens} |")
+        lines.append(
+            f"| {v.label} | {effort} | {budget} | {v.max_tokens} | {v.effective_reasoning_budget()} |"
+        )
+    lines += [
+        "",
+        "実効の推論の予算 = min(reasoning_budget_tokens, max_tokens - 答え用の取り置き)。",
+        "取り置き = min(max(512, max_tokens // 4), max_tokens // 2) で、額は指定できない。",
+        "推論がこの値に達すると、Strata は推論を閉じて答えを書かせる。達したかどうかは API の応答には",
+        "出ないので、サーバープロセスの標準出力の `[strata] thinking:` の行で確認する。",
+    ]
     lines += ["", "## 結果", "", "| 項目 | " + " | ".join(labels) + " |"]
     lines.append("|---|" + "---|" * len(labels))
 

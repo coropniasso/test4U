@@ -5,6 +5,7 @@
 # reasoning_effort: 空文字なら payload に入れない（サーバーの既定に任せる）
 # reasoning_budget_tokens: 0 なら payload に入れない（Strata が max_tokens から逆算した予算になる）
 # max_tokens: 0 は上限なし。1024 未満は設定の読み込みで拒否される
+# timeout_sec: 0 なら config.toml の値を使う。正の値のときだけ上書きする
 
 [[variant]]
 label = "medium-mt20k"
@@ -13,12 +14,20 @@ reasoning_budget_tokens = 0
 max_tokens = 20000
 
 # 推論の予算を明示して、推論が自然に終わる点を見つける。
-# max_tokens は、明示した予算 40000 に対して答え用に 8000 残す値にしてある。
+# 明示した reasoning_budget_tokens は max_tokens からの逆算より優先されるが、そのあとに
+# 「答え用の取り置き」で切り下げられる（2026-11-04 実機で Strata のソースとログで確認）。
+# 取り置き = min(max(512, max_tokens // 4), max_tokens // 2) で、額は指定できない。
+# max_tokens = 48000 なら取り置き 12,000 なので、予算 40000 は 36,000 に切り下げられる。
+# ログに「thinking capped at 36000 of max_tokens 48000 to leave room for the answer (budget 40000)」
+# と出る。つまり実効の予算は min(reasoning_budget_tokens, max_tokens - 取り置き) である。
+# timeout_sec を足してあるのは、切り下げ後の予算 36,000 を観測された最も遅い 14.0 tokens/s で
+# 割ると 2,571 秒になり、config.toml の timeout_sec（2400）に掛かる見込みだったためである。
 [[variant]]
 label = "xhigh-rb40k"
 reasoning_effort = "xhigh"
 reasoning_budget_tokens = 40000
 max_tokens = 48000
+timeout_sec = 3600
 
 # サーバーの既定（reasoning_effort を送らない）との差を見るための対照。
 # 「xhigh を明示したこと」と「プロンプトを改訂したこと」のどちらが推論量を変えたかの切り分けに使う。
