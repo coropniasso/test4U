@@ -1,0 +1,29 @@
+# scripts/measure_extraction.py に渡す「変える設定」の一覧。
+# label 以外の3つが payload に入る値で、それ以外（プロンプト、chunk_minutes、入力の発話）は
+# すべての variant で共通になる。だから、結果の違いはここに書いた値の違いだけに帰せられる。
+#
+# reasoning_effort: 空文字なら payload に入れない（サーバーの既定に任せる）
+# reasoning_budget_tokens: 0 なら payload に入れない（Strata が max_tokens から逆算した予算になる）
+# max_tokens: 0 は上限なし。1024 未満は設定の読み込みで拒否される
+
+[[variant]]
+label = "medium-mt20k"
+reasoning_effort = "medium"
+reasoning_budget_tokens = 0
+max_tokens = 20000
+
+# 推論の予算を明示して、推論が自然に終わる点を見つける。
+# max_tokens は、明示した予算 40000 に対して答え用に 8000 残す値にしてある。
+[[variant]]
+label = "xhigh-rb40k"
+reasoning_effort = "xhigh"
+reasoning_budget_tokens = 40000
+max_tokens = 48000
+
+# サーバーの既定（reasoning_effort を送らない）との差を見るための対照。
+# 「xhigh を明示したこと」と「プロンプトを改訂したこと」のどちらが推論量を変えたかの切り分けに使う。
+[[variant]]
+label = "default-mt20k"
+reasoning_effort = ""
+reasoning_budget_tokens = 0
+max_tokens = 20000
