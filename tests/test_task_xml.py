@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import xml.etree.ElementTree as ET
 from datetime import date
 
@@ -80,7 +82,8 @@ def test_登録コマンドは_schtasks_create_xml():
 # --- コマンド ---------------------------------------------------------------------------------------
 
 
-def test_install_task_は_XML_を保存し_登録コマンドを案内する(tmp_path):
+def test_install_task_は_XML_を保存し_登録コマンドを案内する(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # 利用者の ./config.toml を読まない
     out = tmp_path / "task.xml"
     result = CliRunner().invoke(app, ["batch", "install-task", "--time", "22:15", "--out", str(out)])
     assert result.exit_code == 0, result.output
@@ -101,7 +104,35 @@ def test_install_task_は_config_を引き継ぐ(tmp_path):
     assert f'--config "{cfg.resolve()}"' in text(parse(out.read_bytes()), ".//t:Exec/t:Arguments")
 
 
-def test_install_task_は不正な時刻なら終了コード_1(tmp_path):
+def test_install_task_は不正な時刻なら終了コード_1(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # 利用者の ./config.toml を読まない
     result = CliRunner().invoke(app, ["batch", "install-task", "--time", "25:00", "--out", str(tmp_path / "x.xml")])
     assert result.exit_code == 1 and "HH:MM" in result.output
     assert not (tmp_path / "x.xml").exists()
+
+
+def test_install_task_は_time_を省略すると設定の_task_time_を使う(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[batch]\ntask_time = "21:45"\n', encoding="utf-8")
+    out = tmp_path / "task.xml"
+    result = CliRunner().invoke(app, ["--config", str(cfg), "batch", "install-task", "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    assert text(parse(out.read_bytes()), ".//t:CalendarTrigger/t:StartBoundary").endswith("T21:45:00")
+    assert "21:45" in result.output
+
+
+def test_install_task_は_time_を書けば設定より優先する(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[batch]\ntask_time = "21:45"\n', encoding="utf-8")
+    out = tmp_path / "task.xml"
+    result = CliRunner().invoke(
+        app, ["--config", str(cfg), "batch", "install-task", "--time", "03:10", "--out", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    assert text(parse(out.read_bytes()), ".//t:CalendarTrigger/t:StartBoundary").endswith("T03:10:00")
+
+
+def test_ExecutionTimeLimit_を無制限にする理由はゲームによる延期を含めるため():
+    # 理由を「125B の MoE」としていた記述を直した(2026-11-05)。値は変えない。
+    src = (Path(__file__).parent.parent / "src/kijun/batch/task_xml.py").read_text(encoding="utf-8")
+    assert "ゲームによる延期" in src and "125B" not in src

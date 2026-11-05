@@ -1,7 +1,7 @@
 """外部コマンドの実行の境界(原則2-1)。
 
 夜間バッチは、既存の CLI(kijun ingest など)を別プロセスとして起動する。原則2-2(プロセスの境界を VRAM の境界にする)
-を守るためで、1つの Python プロセスの中で全部を呼ぶと、faster-whisper と Strata が同時に VRAM を使う危険が出る。
+を守るためで、1つの Python プロセスの中で全部を呼ぶと、faster-whisper と LLM が同時に VRAM を使う危険が出る。
 テストでは tests/fakes.py の FakeCommandRunner を差し込み、実際のプロセスを起動しない。
 """
 

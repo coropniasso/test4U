@@ -9,8 +9,8 @@ XML に必ず入れる設定は次の2つ。
 - StartWhenAvailable = true: PC が電源オフだった場合に、次に起動したときに実行する。
 
 ほかの設定の理由:
-- ExecutionTimeLimit = PT0S(無制限): 125B の MoE の抽出に時間がかかる。既定の72時間で打ち切るより、
-  batch の記録で遅さを見て判断する。
+- ExecutionTimeLimit = PT0S(無制限): ゲームによる延期の待ち時間(最大 batch.defer_max_hours)を含めると
+  所要時間が読めないため。既定の72時間で打ち切るより、batch の記録で遅さを見て判断する。
 - MultipleInstancesPolicy = IgnoreNew: 前夜のバッチがまだ動いているときに、重ねて起動しない
   (DuckDB は同時に複数のプロセスから書き込めない)。
 - DisallowStartIfOnBatteries / StopIfGoingOnBatteries = false: ノート PC でなくデスクトップだが、
