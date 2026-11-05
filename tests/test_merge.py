@@ -186,7 +186,7 @@ def test_重なりも確信度も閾値未満なら除き_理由と数値を記�
     assert kept == []
     d = dropped[0]
     assert (d.start_sec, d.end_sec, d.text, d.avg_logprob, d.speaker_overlap) == (10, 12, "早送り", -0.58, 0.0)
-    assert d.reason == "話者区間との重なり 0.00 < 0.3 かつ avg_logprob -0.58 < -0.5"
+    assert d.reason == "話者区間との重なり 0.000 < 0.3 かつ avg_logprob -0.580 < -0.5"
 
 
 def test_閾値ちょうどは残す():

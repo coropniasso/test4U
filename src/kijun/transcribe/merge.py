@@ -149,8 +149,9 @@ def filter_hallucinated_segments(
                     avg_logprob=seg.avg_logprob,
                     speaker_overlap=ratio,
                     reason=(
-                        f"話者区間との重なり {ratio:.2f} < {max_speaker_overlap:g} "
-                        f"かつ avg_logprob {seg.avg_logprob:.2f} < {max_avg_logprob:g}"
+                        # 小数3桁で書く。2桁に丸めると 0.297 が「0.30 < 0.3」と表示され、条件と矛盾して見える。
+                        f"話者区間との重なり {ratio:.3f} < {max_speaker_overlap:g} "
+                        f"かつ avg_logprob {seg.avg_logprob:.3f} < {max_avg_logprob:g}"
                     ),
                 )
             )
