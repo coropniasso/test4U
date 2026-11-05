@@ -72,7 +72,12 @@ class TranscribeConfig(_Section):
     # no_speech_prob は実発話でも 0.5〜0.8 になり使えなかったので使わない。
     drop_max_speaker_overlap: float = Field(default=0.3, ge=0, le=1)
     drop_max_avg_logprob: float = -0.5
-    min_utterance_sec: float = 0.4
+    # 同一話者の連続する区間を1つの発話に結合する間隔の上限（秒）。
+    # 2.0 は設計者が 2 本の録音で測った値で、ユーザーが 2026-11-05 に承認した。word_timestamps=True
+    # （hallucination_silence_threshold > 0 で有効になる）にすると、Whisper の各区間が最後の単語で
+    # 終わるので、1人の話の中の間（ま）が 0.4〜2.6 秒の間隔として現れ、0.4 では細かく割れる。
+    # 実測: 2分の独話が 0.4 で 23 発話、2.0 で 7 発話。36分の通話は 255 発話から 136 発話。
+    min_utterance_sec: float = 2.0
     # 結合した発話の長さの上限（秒）。0 は「上限なし」。
     max_utterance_sec: float = 30.0
     # faster-whisper の hotwords に渡す語。空でなければ、空白でつないだ1つの文字列にして
