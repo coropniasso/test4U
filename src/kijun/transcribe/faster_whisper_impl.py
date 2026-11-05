@@ -44,7 +44,7 @@ class FasterWhisperTranscriber:
     def transcribe(self, audio_paths: list[Path]) -> list[TranscribedSegment]:
         result: list[TranscribedSegment] = []
         halluc = self._cfg.hallucination_silence_threshold
-        offset = 0.0  #これまでに処理したファイルの長さの合計（秒）
+        offset = 0.0  # これまでに処理したファイルの長さの合計（秒）
         for path in audio_paths:
             # 自前でデコードした配列を渡す。np.ndarray なら faster-whisper は内部の decode_audio を呼ばない
             # （その関数は非公開で、PyAV の版との組み合わせで壊れたことがある）。
