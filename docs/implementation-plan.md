@@ -330,15 +330,32 @@ pyannote に PyAV で読んだ波形を渡す理由は、torchaudio が Windows 
 
 *効果の確認の手順（実機。音声が要る）。* `conversations.source_files` で `20261103_1930_f2f_teirei` の音声の場所を調べる（30日の削除期限内なら残っている。見つからなければ確認は飛ばす）。`hotwords` を書いた設定と書かない設定の2つで、`uv run kijun --config <設定> transcribe --audio <音声> --out <出力先>.json` を実行する。`--audio` は DB に書かないので、`utterances` を上書きしない。出力の JSON を比べて、(1) 2語が正しく取れたか、(2) 他の箇所が悪化していないか、(3) 誤挿入が起きていないか、を見る。
 
+**VAD を切り、幻聴を除去する（2026-11-05、実機の測定に基づく）。** iPhone で録音した Discord の通話（36分）で、faster-whisper の Silero VAD（`vad_filter=True`）が発話の約 2/3 を非音声と判定して捨てた。同じ音声・同じモデルで測った結果は次のとおり。
+
+| 設定 | 文字数 | 文字/分 | 所要 |
+|---|---|---|---|
+| `vad_filter=True`（変更前の既定） | 2,967 | 82 | 47 秒 |
+| `vad_filter=False`、`condition_on_previous_text=False` | 9,348 | 260 | 119 秒 |
+| 上に `word_timestamps=True`、`hallucination_silence_threshold=2.0` を足す（変更後の既定） | 9,081 | 252 | 148 秒 |
+
+VAD を切ると、Whisper が無音部分に文を作る（「ご視聴ありがとうございました」「早送り」、1353〜1408 秒付近の鎧・猫・スイカについての約12区間の無意味な文など）。対処は2段である。
+
+1. **faster-whisper の組み込みの対処。** `condition_on_previous_text=False`（幻聴が次の区間へ連鎖するのを止める）と、`hallucination_silence_threshold=2.0`（単語の時刻から、2秒以上の無音を挟む区間を飛ばす。`word_timestamps=True` が必要なので、設定が 0 より大きいときは自動で有効にし、0 のときは `word_timestamps=False`・`None` を渡す）。これで上の無意味な区間は消えたが、録音末尾の無音にある3区間（2122 秒「早送り」、2151 秒「早送り」、2158 秒「ご視聴ありがとうございました」）が残った。
+2. **除去規則（`transcribe/merge.py` の `filter_hallucinated_segments`）。** 話者分離の後、話者の割り当て・結合（6-2）の前に、区間の「話者区間との重なりの割合」が `drop_max_speaker_overlap`（既定 0.3）未満、かつ `avg_logprob` が `drop_max_avg_logprob`（既定 -0.5）未満の区間を除く。重なりの割合は、区間のうち話者区間の**和集合**に覆われた秒数 ÷ 区間の長さである（話者区間どうしが重なることがあり、重なりの秒数を足すと 1 を超えたため）。この36分の通話では、残った3区間（いずれも重なり 0.00、`avg_logprob` は -0.5 未満）と、意味の無い断片 2 件（「心」「はい」）だけを除き、pyannote が拾えなかったが Whisper が確信していた実発話（「ちょっとこれ富田さんに」重なり 0.00・`avg_logprob` -0.32、「この初日さんのおかげでどうなったとか」重なり 0.00・`avg_logprob` -0.08）は残した。`no_speech_prob` は実発話でも 0.5〜0.8 になり、使えなかった。判断できない場合は除かない（話者区間が空、`avg_logprob` が `None`、`drop_max_speaker_overlap` が 0）。
+
+**除いた区間は黙って消さない。** `transcribe_to_utterances` は `TranscribeResult(utterances, dropped)` を返し、`dropped` の各要素（`DroppedSegment`）は開始・終了秒、本文、`avg_logprob`、話者区間との重なりの割合、理由の文字列を持つ。文字起こしの JSON はこれを最上位のキー `dropped_segments` に書く（除去が無ければ空のリスト）。`kijun transcribe` は実行後に件数と各区間（開始時刻・本文・理由）を表示する。`restore-transcript`（6-3）は `dropped_segments` を読まないので、このキーが無い古い JSON も、あっても復元できる。夜間バッチ（15節）は `kijun transcribe --conversation` を別プロセスで呼ぶので、除いた区間の表示は各手順の標準出力に残る（バッチ側のコードは変えていない）。
+
+**この閾値は1本の通話から決めた設計者の初期値である。** 対面の録音で VAD なし＋この設定が良いかは再測定していない。幻聴は非決定的で、同じ音声を2回処理すると同じ位置に別の作り話が出た。再文字起こしして `dropped_segments` を見て調整する。
+
 faster-whisper の `segments` は generator なので、使う前に list にする。generator のまま次の処理に渡すと、モデルを解放した後に評価されて落ちる。
 
 ### 6-2. 区間の突き合わせ（`transcribe/merge.py`）
 
-文字起こしの区間と話者の区間から `utterances` の行を作る。
+文字起こしの区間と話者の区間から `utterances` の行を作る。この前に、6-1 の除去規則（`filter_hallucinated_segments`）が幻聴の疑いがある区間を除く。`merge_segments` 自体は除去を知らず、残った区間だけを受け取る。
 
 1. 各文字起こし区間について、時間の重なりが最も長い話者区間のラベルを割り当てる。重なりが全く無ければ `None`。
 2. 同じ話者ラベルが連続し、かつ前の区間の終了から次の区間の開始までの間隔が `transcribe.min_utterance_sec` 未満なら、1つの発話に結合する。話者が不明（`None`）の区間どうしは、同じ話者と判断できないので結合しない。
-3. 結合後の長さ（新しい発話の終了時刻 − 開始時刻）が `transcribe.max_utterance_sec`（既定30秒）を超えるなら結合せず、その区間から新しい発話を始める。順序は「間隔が近い**かつ**上限を超えない」なら結合である。`0` は上限なし（従来の挙動）。1つの文字起こし区間そのものが上限より長い場合は分割しない。`word_timestamps=False` で動かしているため区間の内部の時刻が分からず、分割すると文字と時刻の対応が壊れるからである。
+3. 結合後の長さ（新しい発話の終了時刻 − 開始時刻）が `transcribe.max_utterance_sec`（既定30秒）を超えるなら結合せず、その区間から新しい発話を始める。順序は「間隔が近い**かつ**上限を超えない」なら結合である。`0` は上限なし（従来の挙動）。1つの文字起こし区間そのものが上限より長い場合は分割しない。区間の内部の時刻を使っておらず（`word_timestamps=True` にしているのは幻聴の対処のため。単語の時刻は保存しない）、分割すると文字と時刻の対応が壊れるからである。
 4. `seq` を0から順に振る。
 
 **上限を設けた根拠（2026-11-03、実機で初めて `kijun transcribe --audio` が最後まで通って判明）**：125秒の読み上げ音声を処理したところ、発話が2件しかできず（0.5〜22.0秒の21.5秒と、23.1〜124.8秒の101.7秒）、101.7秒の発話ができた。読み上げのように間が短い音声では、手順2の結合が際限なく続くためである。上限が無いことには実害が2つある。
@@ -675,6 +692,10 @@ uv run python scripts/measure_extraction.py --conversation <ID> \
 | `batch.defer_if_running` | `[]` | 動いている間は GPU を使う手順を始めないプロセスの実行ファイル名。空なら検出しない。**ユーザーが自分の環境で確認して書く（推奨・未確定）**（15-2） |
 | `batch.defer_check_interval_min` | `30` | 延期中に再確認する間隔（分）。**推奨・未確定** |
 | `batch.defer_max_hours` | `4` | 延期する時間の上限（バッチ全体の合計）。超えたらその夜の GPU を使う手順を飛ばす。**推奨・未確定** |
+| `transcribe.vad_filter` | `false` | 2026-11-05 に `true` から変更。通話の録音で発話の約 2/3 を捨てた（6-1）。対面の録音では再測定していない。設計者の初期値 |
+| `transcribe.condition_on_previous_text` | `false` | VAD を切ったときの幻聴の連鎖を止める（6-1）。設計者の初期値 |
+| `transcribe.hallucination_silence_threshold` | `2.0` | 秒。0 なら使わない。0 より大きいと `word_timestamps` が自動で有効になり、所要時間が約 1.2 倍（119 → 148 秒、36分の音声）。1本の通話に基づく設計者の初期値（6-1） |
+| `transcribe.drop_max_speaker_overlap` / `drop_max_avg_logprob` | `0.3` / `-0.5` | 話者区間との重なりの割合が前者未満、かつ `avg_logprob` が後者未満の区間を除き、JSON の `dropped_segments` に残す。前者が 0 なら除去しない。1本の通話に基づく設計者の初期値（6-1） |
 | `transcribe.hotwords` | `[]` | faster-whisper の `hotwords`。空なら渡さない。効果は未検証で、その語を言っていない箇所に当てはめる副作用がある（6-1） |
 | `match.query_prefix` / `passage_prefix` | `"query: "` / `"passage: "` | e5 系が要求する接頭辞。ruri に差し替えるなら書き換える（9-1） |
 | `match.similarity_threshold` | `0.85` | `CLAUDE.md` 4-5 の初期値 |

@@ -104,6 +104,18 @@
 
 2分5秒の読み上げ音声が、`utterances` として **2件**にしかならなかった（うち1件は101.7秒）。`transcribe.min_utterance_sec`（間隔がこの秒数未満なら結合する）に上限が無かったためである。`transcribe.max_utterance_sec`（既定30秒）を足し、結合後の長さがこれを超えないようにした。上限を設けた理由は2つある。抽出結果の `seq_from` / `seq_to` が録音のどの位置を指すかの精度を保つため、および、1つの発話が `extract.chunk_minutes` を超えて抽出が失敗するのを防ぐため。30秒という値は初期値であり、実測に基づくものではない。運用して調整する。
 
+**通話の音声を VAD が捨てていた問題と対処（2026-11-05）**
+
+iPhone で録音した Discord の通話（36分）で、faster-whisper の Silero VAD（`vad_filter=True`）が発話の約 2/3 を非音声と判定して捨てた。同じ音声・同じモデルで測った。
+
+| 設定 | 文字数 | 文字/分 | 所要 |
+|---|---|---|---|
+| `vad_filter=True`（変更前の既定） | 2,967 | 82 | 47 秒 |
+| `vad_filter=False`、`condition_on_previous_text=False` | 9,348 | 260 | 119 秒 |
+| 上に `word_timestamps=True`、`hallucination_silence_threshold=2.0` を足す（変更後の既定） | 9,081 | 252 | 148 秒 |
+
+VAD を切ると、Whisper が無音部分に文を作る（「ご視聴ありがとうございました」「早送り」、鎧・猫・スイカについての約12区間など）。`hallucination_silence_threshold=2.0` で大半が消え、録音末尾の無音にある3区間だけが残った。その3区間は、話者区間との重なりの割合が 0.00、`avg_logprob` が -0.5 未満だった。そこで「重なりの割合 < 0.3 かつ `avg_logprob` < -0.5 の区間を除く」規則を足した（重なりの割合は話者区間の和集合で数える）。この規則は、残った3区間と意味の無い断片 2 件（「心」「はい」）だけを除き、pyannote が拾えなかったが Whisper が確信していた実発話は残した。`no_speech_prob` は実発話でも 0.5〜0.8 で、使えなかった。**除いた区間は黙って消さず、文字起こしの JSON の `dropped_segments` に残し、`kijun transcribe` が件数と内容を表示する。** 設定は `transcribe.vad_filter`・`condition_on_previous_text`・`hallucination_silence_threshold`・`drop_max_speaker_overlap`・`drop_max_avg_logprob`。
+
 ### 4-4. 指摘・要求の抽出（LLM）
 
 **決定（2026-11-05 更新）**
@@ -273,6 +285,9 @@ PC がスリープしていると実行されない。タスクスケジュー�
 - `format` にスキーマを渡したとき、出力が適合するか。`think` と同時に送ってよいか（`doctor` の検査2と、`think` を変えた測定）。
 - `hotwords`（`transcribe.hotwords`）が、「箇条書き」→「過剰書き」、「感嘆符」→「簡単フォーイス」の誤認識を直すか。その語を言っていない箇所への誤挿入が起きないか。同じ音声を `hotwords` あり・なしで文字起こしし直して比べる。
 - `batch.defer_if_running` に書く実行ファイル名が、実際のプロセス名と一致するか（ユーザーが「詳細」タブで確認して書く）。
+- **幻聴の除去の閾値（重なりの割合 0.3、`avg_logprob` -0.5、`hallucination_silence_threshold` 2.0）は、1本の36分の通話だけから決めた。** 広い測定ではない。別の通話で、実発話を誤って除く・幻聴が残る、のどちらも起き得る。文字起こしし直して JSON の `dropped_segments` を見て確かめる。
+- **VAD なし＋この設定が、対面の録音でも良いかは再測定していない。** 上の測定は通話の録音（iPhone で Discord の音声をスピーカー経由で録音）だけである。対面の録音は、VAD を入れた場合と入れない場合を同じ音声で比べる。
+- **幻聴は非決定的である。** 同じ音声を2回処理して、同じ位置に別の作り話が出た。1回の結果で「幻聴が消えた」とは言えない。
 
 - 通話を PC スピーカー出力で録音した場合、Discord や PC のエコーキャンセルで相手の声が小さくならないか（30分の実通話テストで確認）
 - ショートカットの「オーディオを録音」が、画面ロック中に2時間録音できるか（案Aを使う場合のみ）
@@ -377,6 +392,7 @@ PC がスリープしていると実行されない。タスクスケジュー�
 | 13 | ゲームの実行ファイル名の確認（F1 25、League of Legends を起動した状態で、タスクマネージャーの「詳細」タブを見て、`batch.defer_if_running` に書く） | ユーザー | 未着手 |
 | 14 | Strata のデスクトップアプリが常駐していれば終了し、必要ならアンインストールする（ユーザーの判断） | ユーザー | 未着手 |
 | 15 | `config.toml` の `[extract.strata]`・`provider = "strata"`・`[batch] strata_ready_timeout_sec` を削除し、`[extract.ollama]` を書く（古い節が残ると設定の読み込みが失敗する） | ユーザー | 未着手 |
+| 16 | 通話の音声を VAD が捨てる問題の対処（`vad_filter` の既定を false、`condition_on_previous_text`・`hallucination_silence_threshold`、幻聴の除去規則、JSON の `dropped_segments`、`kijun transcribe` の表示） | Claude Code | **実装済み（2026-11-05。自動テストで確認。この変更後の実機での再文字起こしは未確認）** |
 
 作業が進んだら、この表の「状況」と、上の各章の「推奨・未確定」を更新すること。
 
@@ -408,6 +424,10 @@ PC がスリープしていると実行されない。タスクスケジュー�
 | `hotwords` の既定 | 空のリスト（例は `["箇条書き", "感嘆符"]`） | 効果が未検証で、その語を言っていない箇所に当てはめる副作用があるため | 同じ音声を `hotwords` あり・なしで文字起こしし直して比べる（7章） |
 | モデル名の `:` | `extracted_requests.model_name` には `:` ごと入れ、`request_id` では `-` に置き換える | `run_label` が `request_id` に使える文字を英数字と `. _ -` に限っているため | — |
 | ゲームの検出に失敗したとき | 警告を出して「動いていない」とみなして続ける | 検出の失敗でバッチが毎晩止まるより、警告して続ける方がよいと判断した | 警告の頻度 |
+| `transcribe.vad_filter` の既定を `false` にしたこと | `true` から `false` に変えた | 36分の通話で `true` だと 82 文字/分、`false` で 260 文字/分。発話の約 2/3 を捨てていた（4-3）。1本の通話での観測で、対面は未測定 | 対面の録音を VAD あり・なしで文字起こしし直して比べる |
+| `transcribe.condition_on_previous_text` の既定を `false` にしたこと | 直前の区間を次の区間の文脈にしない | VAD を切ると無音部分で幻聴が出やすく、`true` だと次の区間へ連鎖するため | 文字起こしし直して JSON の `dropped_segments` と本文を見る |
+| `transcribe.hallucination_silence_threshold` の既定を `2.0` にしたこと | 2秒以上の無音を挟む区間を飛ばす（`word_timestamps=True` が自動で有効になり、所要は 119 → 148 秒） | 36分の通話で、無意味な約12区間などがこれで消えた | 文字起こしし直して JSON を見る。長い沈黙の前後の実発話が欠けていれば下げるのではなく上げる（または 0 にする） |
+| 幻聴の除去規則（重なりの割合 < 0.3 かつ `avg_logprob` < -0.5 なら除く） | `drop_max_speaker_overlap = 0.3`、`drop_max_avg_logprob = -0.5`。除いた区間は JSON の `dropped_segments` に残す | 残った幻聴3区間と断片2件だけを除き、確信度の高い実発話（-0.32、-0.08）は残す値として、1本の通話から置いた | 文字起こしし直して `dropped_segments` を見る。実発話が入っていれば閾値を下げる。`drop_max_speaker_overlap = 0` で無効にできる |
 
 この変更で、Strata の実測に基づく設定値（`max_tokens`、`reasoning_effort`、`reasoning_budget_tokens`、`start_command`、`stop_command`、`batch.strata_ready_timeout_sec`）は意味を持たなくなったので削除した。2026-11-04 以前の節に出てくる `extract.strata.*` は、当時の記録である。
 
