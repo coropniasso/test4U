@@ -1,6 +1,6 @@
 # 設計書：会話録音から判断基準を抽出する仕組み
 
-最終更新：2026-11-03
+最終更新：2026-11-05
 
 ---
 
@@ -10,7 +10,9 @@
 
 この文書は、それをどう実装したかを書いた**設計書**である。ファイルごとの役割、データベースの列、設定値の意味、そして「なぜその形にしたか」を書く。実装済みの部分は現在形で書き、未実装の部分はそう明記する。
 
-初版（2026-10-04）は実装前の計画として書いたが、その後の変更（抽出の背面を Ollama と Claude API から Strata に置き換えた、文字起こしの復元コマンドを足した、埋め込みの持ち方を変えた）を差分で重ねたため、旧設計の痕跡が残っていた。2026-11-03 に実装に合わせて全体を書き直した。同じ日に第2弾（Discord でのレビューと夜間バッチ）を実装し、仕様書（`docs/design-phase2.md`、統合して削除した）の内容を14節と15節に移した。変更の履歴は13節にある。
+初版（2026-10-04）は実装前の計画として書いたが、その後の変更（抽出の背面を Ollama と Claude API から Strata に置き換えた、文字起こしの復元コマンドを足した、埋め込みの持ち方を変えた）を差分で重ねたため、旧設計の痕跡が残っていた。2026-11-03 に実装に合わせて全体を書き直した。同じ日に第2弾（Discord でのレビューと夜間バッチ）を実装し、仕様書（`docs/design-phase2.md`、統合して削除した）の内容を14節と15節に移した。
+
+2026-11-05 に、抽出の背面を Strata から Ollama に移した（実装指示書 `docs/ollama-migration-plan.md` の内容を6-6、7、8-2、10、15節に統合し、指示書は削除した）。Strata の実測の記録は消さずに残してある（6-6の末尾、12節、`CLAUDE.md` 7章）。変更の履歴は13節にある。
 
 **実装の状況**
 
@@ -19,8 +21,8 @@
 | 取り込み、文字起こし、話者分離、抽出、照合、音声の削除、文字起こしの復元、推論サーバーの実測（第1弾） | 実装済み |
 | Discord bot（`CLAUDE.md` 8章 #7）、`direction` の導出、重要度の判定、矛盾の検出（第2弾。14節） | 実装済み。実際の Discord への接続は未確認 |
 | 夜間バッチの統合とタスクスケジューラ登録（同 #8。15節） | 実装済み。実機での実行とタスクスケジューラへの登録は未確認 |
-| 自動テスト | 564件のうち555件が通る（GPU・ネットワーク・Discord のトークンが要る9件は既定で実行しない） |
-| 実機（Windows + RTX 4070 Ti）での動作確認 | 未実施。11節に確認手段を書く |
+| 自動テスト | 719件のうち709件が通る（GPU・ネットワーク・Discord のトークンが要る10件は既定で実行しない） |
+| 実機（Windows + RTX 4070 Ti）での動作確認 | 文字起こしと話者分離は確認済み（`CLAUDE.md` 7章）。**Ollama への移行後の `doctor`・測定・`hotwords` の効果は未確認**。11節に手順を書く |
 
 ---
 
@@ -32,7 +34,7 @@
 |---|---|---|---|---|
 | 1 | `inbox` の音声ファイル | ファイル名から日時・形式・種類を読み、同じ会議に属するファイルを束ねる | `conversations` の行 | `kijun ingest` |
 | 2 | 束ねた音声 | faster-whisper で文字起こし、pyannote で話者分離、両者を突き合わせる | `utterances` の行、文字起こしの JSON、音声を `processed` へ移動 | `kijun transcribe` |
-| 3 | `utterances` | 20〜30分のチャンクに分け、Strata で要求・指摘を抽出する | `extracted_requests` の行 | `kijun extract` |
+| 3 | `utterances` | `chunk_minutes`（既定12分）ごとのチャンクに分け、Ollama で要求・指摘を抽出する | `extracted_requests` の行 | `kijun extract` |
 | 4 | `extracted_requests` | 埋め込みモデルでベクトル化し、既存のチェック項目と照合する | `item_evidence` の行、または `knowledge_items` の新規候補 | `kijun match` |
 | 5 | `knowledge_items` の候補 | Discord に投稿し、ユーザーがリアクションと返信で理由・適用条件を書き足す。翌晩のバッチが読み取って反映する | `knowledge_items` の確定、`review_log`、`speaker_map`、`direction` | `kijun discord post` / `kijun discord read`（14節） |
 
@@ -56,20 +58,22 @@ GPU、外部プロセス、ネットワークに触る処理は、すべて `typ
 |---|---|---|---|
 | `Transcriber` | `transcribe/base.py` | `faster_whisper_impl.py` | `FakeTranscriber` |
 | `Diarizer` | `transcribe/base.py` | `pyannote_impl.py` | `FakeDiarizer` |
-| `Extractor` | `extract/base.py` | `strata_impl.py` | `FakeExtractor` |
+| `Extractor` | `extract/base.py` | `ollama_impl.py` | `FakeExtractor` |
 | `HttpTransport` | `transport.py` | `httpx` を使う実装 | 偽の応答を返す実装 |
 | `Embedder` | `match/base.py` | `e5_impl.py` | `FakeEmbedder` |
 | `DiscordClient` | `discord/base.py` | `discord/impl.py`（discord.py） | `FakeDiscordClient` |
 | `CommandRunner` | `batch/runner.py` | `SubprocessRunner` | `FakeCommandRunner` |
-| `ImportanceJudge` | `review/importance.py` | `StrataImportanceJudge` | `FakeImportanceJudge` |
-| `ReplyRouter` | `review/reply.py` | `StrataReplyRouter` | `FakeReplyRouter` |
-| `SpeakerReplyInterpreter` | `review/speaker.py` | `StrataSpeakerInterpreter` | `FakeSpeakerInterpreter` |
+| `JsonChat` | `review/llm.py` | `OllamaJsonChat` | 偽の `HttpTransport`（`FakeOllamaTransport`） |
+| `ImportanceJudge` | `review/importance.py` | `LlmImportanceJudge` | `FakeImportanceJudge` |
+| `ReplyRouter` | `review/reply.py` | `LlmReplyRouter` | `FakeReplyRouter` |
+| `SpeakerReplyInterpreter` | `review/speaker.py` | `LlmSpeakerInterpreter` | `FakeSpeakerInterpreter` |
+| `ProcessLister` | `batch/defer.py` | `TasklistProcessLister` | `FakeProcessLister` |
 
 この境界を置く理由は2つある。1つは、開発と自動テストを行う環境（Anthropic のクラウド上の Linux コンテナ）に GPU も CUDA も無く、音声ファイルも1本も無いため、実装を差し込まずに論理を検査する必要があるから。もう1つは、`CLAUDE.md` 4-3 が kotoba-whisper を、4-5 が ruri を、将来の選択肢として残しているから。
 
 ### 2-2. プロセスの境界を VRAM の境界にする
 
-`CLAUDE.md` 4-4 に「faster-whisper・pyannote と抽出用のモデルを同時に VRAM に載せない」とある。RTX 4070 Ti の VRAM は12GBで、large-v3（約3GB）と pyannote（約1GB）と 125B の MoE を同時には載せられない。
+`CLAUDE.md` 4-4 に「faster-whisper・pyannote と抽出用のモデルを同時に VRAM に載せない」とある。RTX 4070 Ti の VRAM は12GBで、large-v3（約3GB）と pyannote（約1GB）と LLM（9B〜14B で数GB〜10GB）を同時には載せられない。
 
 Python の中で `del model` と `torch.cuda.empty_cache()` を呼ぶ方法は採らない。PyTorch のキャッシュアロケータや CTranslate2 が確保した分が残ることがあり、残ったかどうかを確認しにくいためである。代わりに次の形にする。
 
@@ -77,21 +81,22 @@ Python の中で `del model` と `torch.cuda.empty_cache()` を呼ぶ方法は�
 - 夜間バッチ（15節）は、この2つを**別々のプロセスとして順番に起動する**。プロセスが終了すれば OS が GPU メモリを解放するので、解放されたかどうかを疑う必要がなくなる。
 - `transcribe` と `extract` は、Python のモジュールとしても互いを import しない。
 
-Strata は別プロセスのサーバーなので、`transcribe` が動く間も VRAM を保持し続ける可能性がある。Strata にモデルを降ろす手段があるかは未確認なので、設定に `start_command` と `stop_command` を置いてプロセスごと止められるようにした。夜間バッチがこの2つを読んで、Strata を使う手順の前後で実行する（15-2）。
+LLM は別プロセスのサーバー（Ollama）なので、`transcribe` が動く間も VRAM を保持し続ける可能性がある。**設定 `extract.ollama.keep_alive = "0"` なら、Ollama は応答のたびにモデルを VRAM から下ろす**ので、文字起こしの時点で LLM は載っていない。`keep_alive` を `"0"` 以外にした場合だけ、夜間バッチが手順1の後と手順6の後にモデルを下ろす要求を送る（15-2）。以前の Strata は下ろす手段が確認できず、`start_command` と `stop_command` でプロセスごと止めていた。
 
 ### 2-3. 確認できない前提は、設定値と実測コマンドに委ねる
 
-Strata の API 仕様を記したサイト（`stratallm.org`、`docs.stratallm.org`）は、開発環境のネットワーク設定から到達できない。そのため次の4点が未確認である。
+Ollama に移った時点で、次の点は実機で確かめていない。
 
-- OpenAI 互換のエンドポイントのパスが `/v1/chat/completions` か
-- `response_format` による JSON スキーマの強制に対応しているか
-- `/v1/models` の応答がどの形式か
-- 応答に `usage`（トークン数）が含まれるか
-- 1リクエストで受け付ける入力トークンの上限
+- 設定のモデル（`qwen3.5:9b` など）が `ollama list` に存在し、GPU（VRAM 12GB）に収まるか
+- `format` にスキーマを渡したとき、出力が適合するか（`think` と同時に送ったときの挙動は、版とモデルによって推論にも制約が掛かる報告がある）
+- `prompt_eval_count` が返らないことがあるか（返らなければ入力の切り捨てを検出できない）
+- トークン数の概算の係数（Strata での実測1点からの推測。Ollama のモデルのトークナイザには当てはまらない）
 
-これらを推測で決め打ちしない。すべて `config.toml` の設定値にし、既定値は**動かない可能性が最も低い安全側**に置く（たとえば `enforces_json_schema = false`、すなわち `response_format` を送らない）。そして `kijun doctor` が実機で測り、`config.toml` に書くべき値を出す。
+Strata のときの未確認事項（OpenAI 互換のパス、`response_format`、`usage`、入力長の上限）は、実機で解決した（12節）。
 
-この原則の帰結として、**確認できない背面を吸収する処理は、確認できる場所に寄せる**。具体的には、サーバーが壊れた JSON を返す可能性に対して `extract/repair.py` を置いた。これは外部に一切接続しない純粋な文字列処理なので、壊れ方の見本を使ってクラウド環境で完全にテストできる（27件）。
+これらを推測で決め打ちしない。すべて `config.toml` の設定値にし、`kijun doctor` が実機で測り、`config.toml` に書くべき値を出す。既定値は設計者の初期値で、実測に基づかない（推奨・未確定）。入力が文脈長を超える設定は、読み込みで拒否する（原則2-4）。
+
+この原則の帰結として、**確認できない背面を吸収する処理は、確認できる場所に寄せる**。具体的には、サーバーが壊れた JSON を返す可能性に対して `extract/repair.py` を置いた（`format` にスキーマを渡しても、出力は必ず通す）。これは外部に一切接続しない純粋な文字列処理なので、壊れ方の見本を使ってクラウド環境で完全にテストできる（27件）。
 
 ### 2-4. 録音は録り直せないので、失うより止める
 
@@ -102,6 +107,7 @@ Strata の API 仕様を記したサイト（`stratallm.org`、`docs.stratallm.o
 - `kijun restore-transcript` は、`conversations` に同じ会議の行が既にあれば**上書きせずスキップ**する。壊れたデータベースを直す操作で、正しい行を踏み潰す危険を作らないため。上書きには `--force` を付ける。
 - **判定できないリアクションは、推測で決めない。** ✅と❌が両方付いていたら、片方を優先せず、`knowledge_items` を変えず、`processed_at` を埋めず、`review_log` に記録して人に見せる（14-4）。誤って承認したチェック項目は、間違いであることが後から分かりにくいため。
 - **返信の原文は、LLM に振り分けさせる前に `review_log` に残す。** 振り分けが間違っても、人が原文から直せるようにするため（14-5）。
+- **入力が `num_ctx` を超えて Ollama に切り捨てられた疑いがあれば、結果を使わずに止める。** Ollama はエラーを出さずに先頭を捨てるため、捨てられた発話が抽出結果から静かに消える。設定の読み込み、送る前の警告、応答の `prompt_eval_count` の3か所で止める（6-6）。
 - 抽出の出力が途中で切れていて、完全な要素が1件も無い場合、`repair.py` は**修復しない**。`{"items": []}` として閉じると「抽出0件」と区別が付かず、データを失ったことが見えなくなるためである。検証で落とし、失敗として記録する。
 
 ---
@@ -115,6 +121,7 @@ test4U/
 ├── docs/implementation-plan.md         # この文書
 ├── pyproject.toml                     # uv のプロジェクト定義。重い依存は extra に分ける
 ├── config.example.toml                # 設定ファイルの雛形。全項目の一次情報
+├── scripts/                           # measure_extraction.py（設定ごとの測定）、variants.example.toml
 ├── .gitignore                         # config.toml、data/、*.duckdb を除外
 ├── src/kijun/
 │   ├── config.py                      # config.toml の読み込みと既定値（pydantic）
@@ -130,7 +137,7 @@ test4U/
 │   │   ├── read.py                    # リアクションと返信の読み取り
 │   │   └── run.py                     # discord read / post の本体、実装の組み立て
 │   ├── review/
-│   │   ├── llm.py                     # 抽出以外の LLM 用途が共有する Strata 呼び出し（repair を通す）
+│   │   ├── llm.py                     # 抽出以外の LLM 用途が共有する Ollama 呼び出し（JsonChat / OllamaJsonChat。repair を通す）
 │   │   ├── importance.py              # 重要度の3段階判定
 │   │   ├── reply.py                   # スレッド返信の振り分けと反映
 │   │   ├── speaker.py                 # 話者の対応付けの返信の解釈
@@ -139,10 +146,11 @@ test4U/
 │   ├── batch/                         # 第2弾: 夜間バッチ（15節）
 │   │   ├── run.py                     # 手順の実行、記録、--dry-run
 │   │   ├── runner.py                  # CommandRunner（subprocess の境界）
-│   │   ├── strata.py                  # start_command / stop_command の窓と応答待ち
+│   │   ├── defer.py                   # ゲームの実行中の延期（ProcessLister、GameDeferrer）
 │   │   ├── pending.py                 # どの会議にどの処理が要るかを DB から調べる
 │   │   └── task_xml.py                # タスクスケジューラの XML
 │   ├── transport.py                   # HTTP の送受信の境界（HttpTransport）と所要時間の計測
+│   ├── ollama_api.py                  # Ollama の /api/chat のリクエストの組み立てと応答の読み取り、入力の切り捨ての判定、モデルのアンロード
 │   ├── doctor.py                      # 推論サーバーの実測と、config.toml への推奨値
 │   ├── db/
 │   │   ├── schema.sql                 # 10テーブルとビュー1つ
@@ -167,7 +175,7 @@ test4U/
 │   │   ├── chunk.py                   # チャンク分割、発話番号の復元、重複排除
 │   │   ├── tokens.py                  # 入力の長さのトークン数の概算（係数の置き場）
 │   │   ├── repair.py                  # 壊れた JSON の修復
-│   │   ├── strata_impl.py             # Strata の OpenAI 互換エンドポイント
+│   │   ├── ollama_impl.py             # Ollama のネイティブ API（/api/chat）
 │   │   └── run.py                     # extract の本体
 │   ├── match/
 │   │   ├── base.py                    # Embedder
@@ -175,7 +183,7 @@ test4U/
 │   │   └── link.py                    # コサイン類似度と閾値による分岐
 │   ├── compare/report.py              # 同じ会議の2回の抽出の対照表
 │   └── retention/purge.py             # 音声の削除
-└── tests/                             # test_*.py が31ファイル、564件（既定で555件を実行）
+└── tests/                             # test_*.py が35ファイル、719件（既定で709件を実行）
 ```
 
 `models.py`、`deps.py`、`table.py`、`transport.py`、`tokens.py` と各パッケージの `run.py` は、どれも1つの理由で分けてある。
@@ -318,6 +326,10 @@ pyannote に PyAV で読んだ波形を渡す理由は、torchaudio が Windows 
 
 **CUDA 12 の DLL（Windows）。** faster-whisper の計算エンジンである CTranslate2 4.8.2 は `cublas64_12.dll`（CUDA 12 の cuBLAS）と cuDNN を要求する。torch 2.15.0+cu132 が同梱するのは `cublas64_13.dll` で名前が違うため、`uv pip install nvidia-cublas-cu12 nvidia-cudnn-cu12` で CUDA 12 版を併せて入れる（`transcribe` extra に Windows 限定の依存として宣言してあるので、`uv sync --extra transcribe` でも入る）。DLL は `.venv\Lib\site-packages\nvidia\cublas\bin` と `...\cudnn\bin` に入る。コード（`transcribe/cuda_dlls.py` の `register_nvidia_dll_directories()`）が、`nvidia` パッケージの下の `bin` のうち `.dll` を含むものを `os.add_dll_directory()` に登録するので、PATH の手動設定は不要である（PATH への追加はそのウィンドウの間しか有効でなく、タスクスケジューラから起動する夜間バッチでは使えない）。**登録は `import faster_whisper` より前に行う**。import で `ctranslate2` の拡張モジュールが読み込まれ、そこで DLL が解決されるためである。登録したディレクトリは標準エラーに1行出る。`WhisperModel` の構築が cublas / cudnn のエラーで失敗したときは、対処を案内するメッセージを出す。
 
+**`hotwords`（頻出語の誤認識への対策）。** 設定 `transcribe.hotwords`（文字列のリスト）が空でなければ、前後の空白と空の語を除いて空白でつないだ1つの文字列にし、`WhisperModel.transcribe(..., hotwords=...)` に渡す（faster-whisper 1.2.1 の引数。署名はテストで確かめている）。空なら `None` を渡す。例は `["箇条書き", "感嘆符"]` で、`CLAUDE.md` 7章に実際に誤認識された語（「箇条書き」→「過剰書き」、「感嘆符」→「簡単フォーイス」）として記録されている。**既定は空**にした。効果は未検証で、`hotwords` は**その語を実際には言っていない箇所に当てはめる**ことがある（誤挿入）。
+
+*効果の確認の手順（実機。音声が要る）。* `conversations.source_files` で `20261103_1930_f2f_teirei` の音声の場所を調べる（30日の削除期限内なら残っている。見つからなければ確認は飛ばす）。`hotwords` を書いた設定と書かない設定の2つで、`uv run kijun --config <設定> transcribe --audio <音声> --out <出力先>.json` を実行する。`--audio` は DB に書かないので、`utterances` を上書きしない。出力の JSON を比べて、(1) 2語が正しく取れたか、(2) 他の箇所が悪化していないか、(3) 誤挿入が起きていないか、を見る。
+
 faster-whisper の `segments` は generator なので、使う前に list にする。generator のまま次の処理に渡すと、モデルを解放した後に評価されて落ちる。
 
 ### 6-2. 区間の突き合わせ（`transcribe/merge.py`）
@@ -366,34 +378,72 @@ JSON には、`conversations` の行を再構成するのに必要な項目を�
 - LLM に見せる発話番号はチャンク内の0始まりで、返ってきた番号を会議全体の `seq` に復元する。チャンク範囲外の番号や逆順の番号は捨て、件数を数える。
 - 重複排除：チャンク N と N+1 の重複区間に `seq_from` が収まる抽出結果のうち、後続チャンクから出たものを捨てる。保険として、`quote` の正規化（空白と句読点を除去）が一致し `seq_from` の差が2以内のものを1件にまとめる。**ただし前のチャンクが失敗している場合は捨てない。** 捨てると、その区間の結果がどちらからも得られなくなる。
 
-**`chunk_minutes` を大きくすれば1チャンクになる。** Qwen3.8-Flash-Next のネイティブの文脈長は262,144トークンで、2時間の会議（約6万トークンの概算）は1リクエストに収まる計算である。`chunk_minutes = 180` / `overlap_minutes = 0` にすれば1チャンクになり、重複排除が不要になって会議全体を見た抽出になる。これはコードを変えずに設定だけで切り替えられる。
+**`chunk_minutes` と文脈長。** Ollama は `extract.ollama.num_ctx`（既定 16384）の中に入力と出力（`num_predict`、既定 8192）を入れる。そのため既定は `chunk_minutes = 12` / `overlap_minutes = 1` とした（12分 × `tokens_per_meeting_minute` 180 ≒ 2,160 トークン ＋ システムプロンプト ＋ 8192 が収まる）。**推奨・未確定（2026-11-05 設計者の初期値）で、実測に基づかない。** 収まらない設定は読み込みで拒否される。`chunk_minutes` を大きくするには `num_ctx` を上げる必要があり、KV キャッシュが増えて VRAM を使う。GPU に収まるかは `kijun doctor` の検査3で確かめる。以前の Strata では文脈長が 204,800 あり、2時間を1リクエストで渡せる可能性があった（その記述は削除した。当時の実測は12節）。
 
-ただし 12GB の VRAM と 64GB のメモリで6万トークンの文脈を保持できるかは未確認なので、既定値は `chunk_minutes = 25` / `overlap_minutes = 2` のままにしてある。動かない設定を既定にしないためである。`kijun doctor` が実測し、通るなら180を推奨する。
+### 6-6. 抽出の背面（`extract/base.py`、`extract/ollama_impl.py`、`ollama_api.py`、`transport.py`）
 
-### 6-6. 抽出の背面（`extract/base.py`、`strata_impl.py`、`transport.py`）
-
-`Extractor` は5つのメンバーを持つ。
+2026-11-05 に、背面を Strata（Qwen3.8-Flash-Next）から Ollama に移した（13節）。`Extractor` は6つのメンバーを持つ。
 
 ```python
 class Extractor(Protocol):
-    model_name: str              # request_id と extracted_requests.model_name に使う
-    enforces_json_schema: bool   # サーバーがスキーマ適合を保証するか
-    max_input_tokens: int | None # 1リクエストの入力の上限。未確認なら None
+    model_name: str              # request_id と extracted_requests.model_name に使う（例: qwen3.5:9b）
+    enforces_json_schema: bool   # format にスキーマを渡すか（設定 extract.ollama.enforces_json_schema）
+    max_input_tokens: int | None # 入力に使ってよいトークン数。Ollama では num_ctx - num_predict
     repair_events: list[RepairEvent]  # 出力を修復した記録。run.py が extract_logs に書く
-    last_usage: dict | None      # 直近の extract() の usage（入力・出力のトークン数）。run.py が進捗の表示に使う
+    last_usage: dict | None      # 直近の extract() の使用量（入力・出力のトークン数）。run.py が進捗の表示に使う
     def extract(self, chunk: Chunk) -> ExtractionResult: ...
 ```
 
-`enforces_json_schema` と `max_input_tokens` を宣言させるのは、原則2-3のためである。背面ごとの挙動をハードコードせず、呼び出し側が判断できるようにする。
+`enforces_json_schema` と `max_input_tokens` を宣言させるのは、原則2-3のためである。背面ごと・設定ごとの挙動をハードコードせず、呼び出し側が判断できるようにする。
 
-`strata_impl.py` は OpenAI 互換のエンドポイントに `transport.py` 経由で投げる。Anthropic 互換側を `anthropic` SDK で叩く案は採らなかった。SDK は `betas`、`fallbacks`、`messages.parse` のサーバー側構造化出力に依存しており、ローカルサーバーが実装している保証がなく、失敗したときに原因が SDK 側かサーバー側か切り分けられなくなるためである。
+`ollama_impl.py` は Ollama のネイティブ API `POST /api/chat` に `transport.py` 経由で投げる。リクエストの組み立てと応答の読み取りは `ollama_api.py` にあり、抽出以外の LLM の用途（`review/llm.py`）、`doctor.py`、`scripts/measure_extraction.py` も同じものを使う。測るものと送るものを食い違わせないためである。
 
-- `enforces_json_schema` が true のときだけ `response_format` に JSON スキーマを付ける。false のときは付けない（対応していないサーバーが 400 を返す可能性があるため）。
-- `max_tokens`（設定 `extract.strata.max_tokens`、既定 20000、0 は送らない）を必ず送る。応答の `finish_reason` が `length` なら、出力が切れたことを標準エラーに出す（例外にはせず、`repair.py` の切り詰めに任せる）。
-- 応答の本文は必ず `repair.py` を通してから検証する。失敗したら同じチャンクをもう1回だけ投げ直し、2回失敗したら `ExtractionError` を出す。会議全体は落とさず、失敗したチャンクを記録して次に進む。
-- 失敗の記録先は `<db と同じディレクトリ>/extract_logs/<会議ID>__<モデル>.json`。スキーマに保存先の列が無いためファイルに置く。`compare` がこれを読む。
+**OpenAI 互換の `/v1/chat/completions` を使わない理由は、`num_ctx` と `keep_alive` をリクエストごとに渡せないためである。** `num_ctx` を送らないと Ollama の既定の文脈長になり、入力が長いとエラーを出さずに先頭から切り捨てられる。
+
+```json
+{
+  "model": "<extract.ollama.model>",
+  "messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}],
+  "stream": false,
+  "format": "<ExtractionResult.model_json_schema()>",
+  "keep_alive": "<extract.ollama.keep_alive>",
+  "think": "<extract.ollama.think>",
+  "options": {"temperature": 0, "num_ctx": "<num_ctx>", "num_predict": "<num_predict>"}
+}
+```
+
+- `format` は `enforces_json_schema` が真のときだけ付ける。`think` は `None` のとき送らない（モデルの既定に任せる）。
+- プロンプトは `prompt.py` の `build_messages` をそのまま使う。実装側で文面を足さない。
+- `build_payload(cfg, chunk)` はモジュールの関数で、`doctor.py` と `measure_extraction.py` が同じ形を組み立てるのに使う。
+
+**応答の扱い**
+
+| 応答の項目 | 扱い |
+|---|---|
+| `message.content` | 本文。**スキーマを強制していても**必ず `repair.parse_with_repair` を通してから検証する。保証が実際に効いていれば、修復は何もしないので結果は変わらない |
+| `message.thinking` | 推論の本文（`think` が真のとき）。保存しない。文字数を標準エラーに出す |
+| `done_reason` | `"length"` なら出力が `num_predict` で切れた。警告を出す。完全な要素が1件も読めなければ**投げ直さず** `ExtractionError`（投げ直しに最大で `num_predict` 分の生成時間がかかるのに、同じ設定では同じように切れる可能性が高い。設定を直す方が速く確実） |
+| `prompt_eval_count` | 入力のトークン数。**`>= num_ctx - num_predict` なら `ExtractionError`（投げ直さない）。** 下の「入力の切り捨て」 |
+| `eval_count` | 出力のトークン数 |
+| `eval_duration`、`total_duration`、`load_duration`、`prompt_eval_duration` | ナノ秒。`ChatReply` が秒に直す。標準エラーの表示と `doctor` の速度の見込みに使う |
+
+`last_usage` は `{"prompt_tokens": prompt_eval_count, "completion_tokens": eval_count}` の形にする。`run.py` が読む形を変えないため。
+
+**入力の切り捨て（原則2-4）。** Ollama は入力が `num_ctx` を超えると、**エラーを出さずに先頭を捨てる**。黙って捨てられた入力から抽出すると、捨てられた発話が抽出結果から静かに消える。そこで3か所で止める。(1) 設定の読み込み時に、`chunk_minutes × tokens_per_meeting_minute ＋ システムプロンプトの概算 ＋ num_predict` が `num_ctx` を超える設定を拒否する（`ConfigError`）。(2) `run.py` が送る前に、概算が `max_input_tokens` を超えるチャンクを警告する（処理は止めない。概算は外れ得る）。(3) 応答の `prompt_eval_count` が `num_ctx - num_predict` に達していたら `ExtractionError` にする。`measure_extraction.py` も同じ判定で、切り捨てられた疑いのあるチャンクを失敗として記録する。**限界：`prompt_eval_count` が返らなかったとき（プロンプトのキャッシュが効いた場合など）は判定できない。** 標準エラーに「確認できません」と出して続ける。`keep_alive = "0"` ならキャッシュは残らないので通常は返ると考えられるが、未確認である。
+
+再試行は読めなかったときだけ1回。2回読めなければ `ExtractionError`。会議全体は落とさず、失敗したチャンクを記録して次に進む。接続できないときのエラー文面には、Ollama が起動しているか（タスクトレイ）、`ollama list` にモデルがあるか、`kijun doctor` で確認することを含める。HTTP 404 は `ollama pull <モデル>` を、`think` を送っているときの HTTP 400 で `think` に触れていれば `extract.ollama.think` を書かないことを案内する。
+
+失敗の記録先は `<db と同じディレクトリ>/extract_logs/<会議ID>__<モデル>.json`（`:` などは `_` に置き換える）。スキーマに保存先の列が無いためファイルに置く。`compare` がこれを読む。
+
+**モデル名の `:` の扱い（設計者の判断）。** Ollama のモデル名には `:` が入る（`qwen3.5:9b`）。`extracted_requests.model_name` には**元の名前を `:` ごと入れる**。`compare` と `match` と `pending` が設定の名前と一致で引くためである。`request_id`（`{会議ID}#{モデル}#{連番}`）にだけ、使える文字（英数字と `. _ + -`）以外を `-` に置き換えた名前を入れる（`extract/run.py` の `request_id_model`）。`run_label` を英数字と `. _ -` に限っている理由が「`request_id` にも入るから」であり、モデル名にも同じ規則を揃えた。`extract_logs` のファイル名は以前から `_` に置き換えていた。
+
+`git` の履歴 7350993 にも Ollama の抽出の実装があるが、そのまま戻さず書き直した。以前の実装には欠陥が3つあった：`num_ctx` を送らない、`transport.py` と `repair.py` を通さない、使用量を記録しない。
 
 `transport.py` の `TransportError` は、応答そのものが得られなかった場合（接続できない、時間切れ）にだけ出す。HTTP のエラー応答（400 など）は `HttpResponse.status_code` で表す。**サーバーが機能に対応していないこと（400）と、サーバーに届かないこと（接続不可）を呼び出し側が区別できるようにするため**で、`doctor` の判定がこの区別に依存している。
+
+#### Strata のときの実機の記録（2026-11-03、記録として残す）
+
+以下は背面が Strata だったときの事実で、Ollama には当てはまらない。比較の基準と経緯として残す。`CLAUDE.md` 7章にも同じ内容がある。
 
 **2026-11-03 実機の訂正：`max_tokens` が無く、トークン数の概算が大きく外れていた。** 実機で初めて `kijun extract` を動かしたところ、次の事実が観測された。
 
@@ -420,7 +470,7 @@ class Extractor(Protocol):
 | 末尾が切れていれば最後の完全な要素までで閉じる | `ACTION_TRUNCATED_TO_LAST_COMPLETE_ITEM` |
 | JSON が見つからない | `ACTION_NO_JSON_FOUND` |
 
-トップレベルを配列から包み直すのは、`CLAUDE.md` 4-4 のプロンプト要件が「出力は JSON 配列のみ」であり、モデルが素直に従うと配列が返るためである。受け取る形は `{"items": [...]}` にしてある（Ollama の構造化出力がトップレベルの配列を扱いにくかったことに由来する形で、Strata でも同じ形を使っている）。
+トップレベルを配列から包み直すのは、`CLAUDE.md` 4-4 のプロンプト要件が「出力は JSON 配列のみ」であり、モデルが素直に従うと配列が返るためである。受け取る形は `{"items": [...]}` にしてある（Ollama の構造化出力がトップレベルの配列を扱いにくかったことに由来する形で、Strata でも、いまの Ollama の `format` でも同じ形を使っている）。
 
 `parse_with_repair(text) -> ParsedExtraction` が、テキストから `ExtractionResult` を作る**唯一の経路**である。修復を通さずに検証する経路を残さないためである。読めなければ `UnrepairableJsonError` を出す。
 
@@ -432,7 +482,7 @@ class Extractor(Protocol):
 
 `extracted_requests` に書く。`request_id` は `{conversation_id}#{model_name}#{連番}`。`direction` はこの時点では NULL（4-1の理由）。`source_type` は `live_conversation`。
 
-`max_input_tokens` が `None` でないとき、チャンクの推定トークン数がそれを超えていたら警告を出す。処理は止めない。推定には `tokens.py` の係数を使う。
+`max_input_tokens`（Ollama では `num_ctx - num_predict`）が `None` でないとき、チャンクの推定トークン数がそれを超えていたら警告を出す。処理は止めない（概算は外れ得るので、応答の `prompt_eval_count` で最終的に判定する。6-6）。推定には `tokens.py` の係数を使う。`request_id` のモデル名は、使えない文字を `-` に置き換える（6-6）。
 
 ---
 
@@ -442,35 +492,34 @@ class Extractor(Protocol):
 uv run kijun doctor [--out <パス>]
 ```
 
-原則2-3の実体である。推測を測定に置き換える。固定の日本語の文を繰り返して入力を作るので、**音声が1本も無くても実行できる**。途中で失敗しても残りを続け、最後にまとめを出す。
+原則2-3の実体である。推測を測定に置き換える。固定の日本語の文を繰り返して入力を作るので、**音声が1本も無くても実行できる**（Ollama は起動してモデルを取得しておく）。`db init` の前でも実行できる。
 
-| # | 検査 | 出す結果 |
-|---|---|---|
-| 1 | 接続確認 | `GET {base_url}/v1/models` の応答。モデルIDの一覧と、設定の `model` が含まれるか。応答は `data`/`id`、`models`/`name`、素の配列の3形式に対応 |
-| 2 | `response_format` なしの出力 | `direct_json`（そのまま読めた）/ `repaired`（修復すれば読めた。行った修復も出す）/ `unreadable` |
-| 3 | `response_format` ありの出力 | `unsupported`（400 等。対応していない）/ `enforced`（200でスキーマ適合。`enforces_json_schema = true` を推奨）/ `accepted_not_enforced`（200だが不適合。受け付けるが保証しない） |
-| 4 | 速度の実測 | 約1,000トークンのものと `chunk_minutes` 相当の2回。入力・出力のトークン数と所要秒数から tokens/s。`usage` が無ければ「サーバーが usage を返さない」と出す |
-| 5 | 最大入力長 | `chunk_minutes` 相当の1倍・2倍・4倍の3段階。エラーになる手前の長さを報告 |
+Strata のときは「125B の MoE が64GB の PC で動くか」を測った。Ollama に移った理由は、Strata のプロセスが RAM を約56GB 保持して PC の他の作業を圧迫したことであり、**VRAM 12GB に収まる 9B〜14B のモデルが本当に GPU に収まっているか**が最も大事な検査になる（検査3）。一部がメインメモリに溢れていれば速度が落ち、同じ問題が再発する。
 
-最後に `config.toml` に書くべき推奨値（`enforces_json_schema`、`max_input_tokens`、`max_tokens`、`tokens_per_character`、`timeout_sec`、`chunk_minutes`、`overlap_minutes`）を出し、同じ内容を `<db と同じディレクトリ>/doctor/strata_<日時>.json` に保存する。
+| # | 検査 | 内容 | 合格の条件 |
+|---|---|---|---|
+| 1 | 接続とモデルの有無 | `GET /api/tags` に設定のモデルがあるか。タグを省いた名前（`qwen3`）は `:latest` として探す | ある。無ければ `ollama pull <モデル>` を案内する。**失敗したら残りは実行しない**（同じ理由で失敗するため） |
+| 2 | スキーマへの適合 | 固定の3発話を、抽出と同じ `build_payload` で（設定によらず `format` を付けて）送り、`repair` を通さずに読めるか | 読める（`direct_json`）。修復すれば読める（`repaired`）なら注意、読めないなら失敗。どちらも `enforces_json_schema = false` を推奨する |
+| 3 | GPU に収まっているか | 検査2の直後に `GET /api/ps` を読み、対象モデルの `size_vram` と `size` を比べる | `size_vram >= size`。小さければ失敗とし、「一部がメインメモリに溢れている。`num_ctx` を下げるか、小さいモデルにする」と VRAM の割合を出す。**この検査がメモリの問題の再発を防ぐ要である** |
+| 4 | 速度 | `chunk_minutes` 相当の長さの入力を送り、`eval_count` と `eval_duration` から tokens/s、所要時間を出す | 合否なし。出力が 50 トークン未満なら速度は誤差が大きいと注意を出す（固定の文を繰り返した入力では、モデルが短い出力しか返さないことがある） |
+| 5 | 入力が切り捨てられていないか | 検査4の `prompt_eval_count` を `num_ctx - num_predict` と比べる。`tokens_per_character` の実測値も出す | `prompt_eval_count < num_ctx - num_predict` |
 
-`chunk_minutes` の推奨値は、**実際に通った長さから算出する**。既定の `chunk_minutes = 25` では4倍でも100分相当（約5万トークン）にしかならず、2時間に届かない。120分相当以上が通れば `180` / `0` を推奨し、届かなければ通った長さの8割を5分単位に切り下げる。4倍まで通った場合は「2時間相当はまだ確かめていない。確かめるには `chunk_minutes` を30以上にして `doctor` をもう一度実行する」と出す。
+検査3のために、モデルが VRAM に残っている必要がある。doctor 自身の要求だけは `keep_alive` を `"2m"` にし（設定は `"0"` で、そのままだと検査2の直後に下りてしまう）、最後に `POST /api/generate {"model": ..., "keep_alive": 0}` でモデルを下ろす。検査1が失敗したときは何も読み込んでいないので、下ろす要求も送らない。
 
-`tokens_per_character` の推奨値は、検査4で送った文字数（system と user の合計）と、サーバーが数えた `usage.prompt_tokens` から実測する（小数第2位に切り上げ）。根拠の文面に、何文字・何トークンから求めたかを書く。固定の文を繰り返した入力からの値なので、実際の会議ではずれ得る。
+**2時間の会議の所要時間の見込み**を、2通りで出す。(a) 検査4の1チャンクの所要時間 × チャンク数（`ceil((120 - overlap) / (chunk - overlap))`）。`keep_alive = "0"` のときは、チャンクごとにモデルの読み込みが入るので、検査2で観測した読み込みの時間を足す。(b) **最も遅い測定値**での最悪値：チャンクごとに `読み込み ＋ 入力の処理 ＋ num_predict ÷ 最も遅い生成速度`。生成速度は検査2と検査4のうち出力が 50 トークン以上ある測定の最小を採る。Strata では同じ設定でも生成速度が 4.9 倍振れた実績があるため、1回の測定の値では決めない（`CLAUDE.md` 7章）。
 
-`max_tokens` の推奨値は、検査4の長い側の「出力トークン ÷ 入力トークン」の比（実測では 6,952 ÷ 1,646 ≒ 4.2 倍）に、推奨する `chunk_minutes` の入力トークン数（検査4の実測入力を `chunk_minutes` の比で伸縮したもの）を掛けた出力見込みの2倍とする（下限 4096、1000 単位に切り上げ）。**この比は、固定の文を繰り返した入力に対する推論の長さであり、実際の会議で同じ比になる保証は無い。** 推論の長さは入力の長さに比例するとは限らない。`finish_reason` が `length` だった測定があれば、比は下限だと根拠に書く。
+最後に `config.toml` に書くべき推奨値を出し、同じ内容を `<db と同じディレクトリ>/doctor/ollama_<日時>.json` に保存する。
 
-`timeout_sec` の推奨値は、**1回の測定の定数倍では決めない**（生成速度が 4.4 倍振れた実測があるため）。次の式で算出する。
+| 推奨値 | 求め方 |
+|---|---|
+| `enforces_json_schema` | 検査2が `direct_json` なら true、そうでなければ false |
+| `tokens_per_character` | 検査4で送った文字数（system と user の合計）と `prompt_eval_count` から実測し、小数第2位に切り上げる。固定の文を繰り返した入力からの値なので、実際の会議ではずれ得る |
+| `timeout_sec` | 1チャンクの最悪値の 1.5 倍（下限 600 秒、分単位に切り上げ）。最悪値が出せないとき（出力が短い）は、実測の所要時間の 3 倍 |
+| `chunk_minutes` | 検査5が失敗したときだけ。半分にする。再度 doctor を実行して確かめること |
 
-```
-timeout_sec = プロンプト処理の推定秒数 + (推奨する max_tokens ÷ 検査4で観測された最も遅い生成速度) × 1.5
-```
+Strata のときの検査（推論の予算の逆算、`max_input_tokens` を求める段階的な入力の引き伸ばし、`max_tokens` と `chunk_minutes` の推奨）は削除した。当時の実測値は `CLAUDE.md` 7章と12節に残してある。
 
-生成速度は測定ごとに 出力トークン ÷ 所要秒数（プロンプト処理を含む）とし、2点のうち遅いほうを使う（1点しか取れなければその値）。プロンプト処理の秒数は、2点の「出力 ÷ 入力」の比が20%以上違うときだけ、2点・2係数の連立方程式（切片なし）で入力1トークンあたりの秒数を求めて足す（比が近いと入力と出力の寄与を分けられないため）。係数が負になるときも足さない。下限600秒、分単位に切り上げ。`usage` が取れない場合は、従来の入力長だけの直線（所要秒数 = 切片 + 傾き × 入力トークン数、推定の3倍）に戻し、根拠に「出力長を推定に入れていない」と書く。それも当てはまらない場合は実測の3倍とし、「推奨する chunk_minutes での所要時間は推定できていない」と書く。
-
-段階を3つに留めているのは、実測に時間をかけすぎないためである（125B の MoE をオフロードして動かすため、1回の応答に数分から十数分かかる見込み）。
-
-判定ロジックと推奨値の算出は、偽の `HttpTransport` を差し込んでクラウド環境でテストしている（46件）。実サーバーへの接続は `requires_network` マーカーを付けてある。
+判定ロジックと推奨値の算出は、偽の `HttpTransport` を差し込んでクラウド環境でテストしている（`tests/test_doctor.py`）。実サーバーへの接続は `requires_network`、GPU に収まっているかの確認は `requires_gpu` のマーカーを付けてある。
 
 ---
 
@@ -482,7 +531,7 @@ timeout_sec = プロンプト処理の推定秒数 + (推奨する max_tokens ÷
 uv run kijun compare --conversation <ID> [--model <名前> --model <名前>] [--out <パス>]
 ```
 
-初版では `CLAUDE.md` 4-4 の「Qwen と Claude API の両方で抽出して承認件数を比較する」を支える道具だったが、2026-11-03 の決定で背面が Strata 1つになったため、**同じ Strata で設定を変えた2回の実行を比べる道具**になった。比べる対象は、量子化の違い、`chunk_minutes` の違い、`enforces_json_schema` の違いなどである。`--model` を2回指定すると比べる2つを明示でき、省略すると設定の `model` を左に置く。
+初版では `CLAUDE.md` 4-4 の「Qwen と Claude API の両方で抽出して承認件数を比較する」を支える道具だったが、2026-11-03 の決定で背面が Strata 1つになったため、**同じ背面で設定を変えた2回の実行を比べる道具**になった（2026-11-05 から背面は Ollama）。比べる対象は、モデルの違い、`think` の違い、`chunk_minutes` の違い、`enforces_json_schema` の違いなどである。`--model` を2回指定すると比べる2つを明示でき、省略すると設定の `model` を左に置く。
 
 **承認件数そのものは出せない。** ユーザーがレビューして初めて決まる数字であり、レビューの受け皿は Discord（14節）で、承認は `review_log` に入るが、`compare` はそれを読まないからである。出せるのは次の2つである。
 
@@ -508,7 +557,7 @@ uv run python scripts/measure_extraction.py --conversation <ID> \
 行い、生の応答から比べる**道具が要ることが実機で分かった。2026-11-03 に実機で4回の測定を行ったが、
 どの2回も条件が揃わなかった。改訂前のプロンプトでは `medium` が推測を混入させ、改訂後は対照の
 `xhigh` が推論の予算切れで打ち切られていた。さらに、推論量が変わった原因が「プロンプトの改訂」か
-「`reasoning_effort` を明示したこと」かも切り分けられなかった。
+「`reasoning_effort` を明示したこと」かも切り分けられなかった（背面が Strata だったときの話）。
 
 原因は、比べる実行を人が別々のコマンドとして組み立てていたことである。そのたびに、設定以外のものが
 変わる余地が残る。このスクリプトは1回の実行で複数の設定を順に投げるので、**設定以外（プロンプト、
@@ -519,10 +568,11 @@ uv run python scripts/measure_extraction.py --conversation <ID> \
 1. **DB に書かない。** `repo.connect(..., read_only=True)` で開くので、`extracted_requests` を
    書き換えない。`run_label` の付け替えや `delete_requests` による取り違えが起きない。読むのは
    `utterances` だけである。
-2. **1回の実行で複数の設定を試す。** 変えるのは `reasoning_effort` /
-   `reasoning_budget_tokens` / `max_tokens` の3つで、`[[variant]]` の TOML で指定する
-   （`scripts/variants.example.toml` が例）。`Variant.applied_to` は `Config` を deep copy
-   するので、ある設定の値が次の設定に漏れない。
+2. **1回の実行で複数の設定を試す。** 変えられるのは `model` / `think` / `num_ctx` / `num_predict`
+   （と、必要なら `timeout_sec`）で、`[[variant]]` の TOML で指定する（`scripts/variants.example.toml` が例）。
+   書かなかった項目は `config.toml` の値になる。TOML に null が無いので、`think` を書かないことが
+   「variant では指定しない」を表し、`think = false` は明示的な上書きである。`Variant.applied_to` は
+   設定を作り直して**検査をやり直す**ので、入力が `num_ctx` に収まらない組み合わせは、測る前に拒否される。
 3. **文字起こしに無い語を機械的に検出する。** カタカナ3文字以上と漢字2文字以上の連なりを内容語の
    候補として拾い、会議の文字起こし全文に出てこないものを一覧にする。形態素解析を入れないのは、
    用途が「人が読む候補の一覧を出す」ことであり、取りこぼしより見落としを防ぐ方が重要だからである。
@@ -531,7 +581,31 @@ uv run python scripts/measure_extraction.py --conversation <ID> \
    語に別の語を当てはめたものか正当な言い換えかは人が判断する。出力にその旨を明記している。
 
 リクエストの本文は `kijun extract` と同じ `build_payload` で作る。測定したものと本番が送るものを
-食い違わせないためで、テストでも両者が一致することを確認している。
+食い違わせないためで、テストでも両者が一致することを確認している。入力が切り捨てられた疑いのある
+チャンク（`prompt_eval_count` が `num_ctx - num_predict` に達した）は、失敗として記録する。
+切り捨てられた入力から出た結果を並べると、発話が欠けた結果を品質として比べてしまうためである。
+
+`variants.example.toml` は次の4つで、モデル名は**推奨・未確定**（2026-11-05 設計者の初期値）。存在するかは
+`ollama list` で確認する。
+
+| label | model | think |
+|---|---|---|
+| `q35-9b-think` | `qwen3.5:9b` | true |
+| `q35-9b-nothink` | `qwen3.5:9b` | false |
+| `q3-14b-think` | `qwen3:14b` | true |
+| `q3-14b-nothink` | `qwen3:14b` | false |
+
+**比較の基準。** 出力の `.md` には、Strata の結果（2026-11-04、同じ会議 `20261103_1930_f2f_teirei`、同じプロンプト）を並べた表が入る。基準が使えるのはこの会議だけで、別の会議では「比べられない」と出る。
+
+| 項目 | Strata `xhigh` | Strata `medium` |
+|---|---|---|
+| 抽出件数 | 6 | 6 |
+| `stated_reason` / `applies_when` / `pass_criterion` が非 null | 4 / 2 / 4 | 4 / 1 / 4 |
+| 文字起こしに無い語の数 | 5 | 17 |
+
+加えて、人が確認する2点を、該当する項目の値として `.md` に出す（判定はしない）。(1) 「簡単フォーイス」の発話（`quote` に「フォーイス」を含む項目）が `transcription_unclear = true`、`pass_criterion` が null、`reusable` が false か。(2) `applies_when` に「参加者が募りたい場合」が取れているか。
+
+**モデルの採否はユーザーが決める。** この道具は判断の材料を並べるだけで、どれがよいとは書かない。
 
 出力は `<out>/<会議ID>_<日時>.json`（全設定の生の結果と要約）と同名の `.md`（人が読む対照表）である。
 
@@ -579,23 +653,29 @@ uv run python scripts/measure_extraction.py --conversation <ID> \
 | `transcribe.min_utterance_sec` | `0.4` | 同一話者の連続区間を結合する間隔。話者が不明な区間どうしは結合しない（6-2） |
 | `transcribe.max_utterance_sec` | `30.0` | 結合した発話の長さの上限（秒）。`0` は上限なし。1つの区間そのものが上限より長い場合は分割しない。根拠は 6-2（実機で125秒の読み上げが101.7秒の発話を含む2件になった） |
 | `diarize.num_speakers` | `0` | TOML に null が無いため、`0` を「指定なし」として扱う |
-| `extract.provider` | `"strata"` | 値は1つだが `Literal` のままにしてある。将来背面を足すときの型の受け皿 |
-| `extract.chunk_minutes` | `25` | 動かない設定を既定にしないため25のまま。`doctor` の実測後に180へ変え得る（6-5） |
-| `extract.strata.chat_path` | `"/v1/chat/completions"` | 未確認。`doctor` で確認してから書き換える |
-| `extract.strata.enforces_json_schema` | `false` | 安全側の仮定。false のときは `response_format` を送らない（6-6） |
-| `extract.strata.max_input_tokens` | `0` | `0` は未確認を意味し、入力長の検査をしない。`Extractor` の属性では `None` に変換する |
-| `extract.tokens_per_character` | `0.55` | 入力トークン数の概算の係数。実測 1,646 ÷ 約3,141文字 ≒ 0.52 に余裕を持たせた値で、**実測1点からの推測**。`doctor` の推奨値で置き換える（6-6） |
-| `extract.tokens_per_meeting_minute` | `180` | 会議1分あたりの入力トークン数の概算。従来の 500 を 0.55/1.5 の比で換算して切り下げた値で、**推測**（6-6） |
-| `extract.strata.max_tokens` | `20000` | 1リクエストの出力トークン数の上限（推論を含む）。`0` は送らない。実測 13,050 トークン（`stop`）に余裕を持たせた値で、実測2回分しか無い。小さすぎると推論の途中で切れて JSON が出ず、そのチャンクが失敗する（6-6） |
-| `extract.strata.timeout_sec` | `3600` | 125B の MoE をオフロードして動かすため長く取ってある。`doctor` の実測で詰める |
-| `extract.strata.start_command` / `stop_command` | `""` | 文字起こしに VRAM を明け渡すための手段。夜間バッチが読む（15-2）。空なら何もしない。`start_command` は Strata を起動したらすぐに戻るコマンドを書く。`stop_command` は抽出が失敗しても必ず実行する |
+| `extract.provider` | `"ollama"` | 値は1つだが `Literal` のままにしてある。将来背面を足すときの型の受け皿 |
+| `extract.chunk_minutes` / `overlap_minutes` | `12` / `1` | **推奨・未確定（2026-11-05 設計者の初期値）。** `num_ctx` 16384 の中に入力と出力が収まる大きさ（6-5）。`chunk_minutes > overlap_minutes` と、入力が `num_ctx` に収まることを読み込みで検査する |
+| `extract.tokens_per_character` | `0.55` | 入力トークン数の概算の係数。Strata での実測 1,646 ÷ 約3,141文字 ≒ 0.52 に余裕を持たせた値で、**Ollama のモデルには当てはまらない推測**。`doctor` の推奨値で置き換える（7節） |
+| `extract.tokens_per_meeting_minute` | `180` | 会議1分あたりの入力トークン数の概算。従来の 500 を 0.55/1.5 の比で換算して切り下げた値で、**推測** |
+| `extract.ollama.base_url` | `"http://127.0.0.1:11434"` | `localhost` ではなく数字で書く。Windows では `localhost` が IPv6 の `::1` に解決されることがあり、サーバーが IPv4 だけで待ち受けていると接続拒否になる（`CLAUDE.md` 4-4 で踏んだ問題） |
+| `extract.ollama.model` | `"qwen3.5:9b"` | **推奨・未確定。** 12GB の VRAM に収まる 9B〜14B から、測定（8-2）でユーザーが決める。存在するかは `ollama list`。`:` を含む名前の扱いは 6-6 |
+| `extract.ollama.num_ctx` | `16384` | 文脈長。リクエストごとに送る。大きくすると KV キャッシュが増えて VRAM を使う。GPU に収まるかは `doctor` の検査3。**推奨・未確定** |
+| `extract.ollama.num_predict` | `8192` | 出力の上限（推論を含む）。1024 未満と、`num_ctx` 以上は拒否する。`think` を有効にしたモデルは推論も数える。1チャンクの最悪の所要時間は `num_predict` ÷ 最も遅い生成速度。**推奨・未確定** |
+| `extract.ollama.think` | 未指定（`None`） | `think` を送るか。TOML に null が無いので、書かないことで未指定（モデルの既定）を表す。測定（8-2）の対象 |
+| `extract.ollama.keep_alive` | `"0"` | 応答のたびにモデルを VRAM から下ろす。原則2-2のため。`"0"` 以外にすると、手順1と6の後にアンロードの要求を送る（15-2）。**推奨・未確定**（応答のたびにモデルの読み込みが入る代わりの値） |
+| `extract.ollama.timeout_sec` | `1800` | モデルの読み込みを含む。`doctor` の推奨値で置き換える。**推奨・未確定** |
+| `extract.ollama.enforces_json_schema` | `true` | `format` にスキーマを渡す。出力は必ず `repair` を通す。`doctor` の検査2が読めないと出たら false |
 | `discord.review_channel_id` / `contradictions_channel_id` | `""` | 空なら `post` と `read` は何もせず、設定が必要であることを出して終了コード 0 で終わる。チャンネルは個人サーバーに作る（`CLAUDE.md` 2章） |
 | `discord.max_candidates_per_run` | `20` | 1回の `post` で投稿する新規候補の上限。`CLAUDE.md` 6章の「レビュー所要時間が15分を超え続けたら上限を下げる」の調整用。超えた分は次回に回る（14-2） |
 | `discord.max_contradictions_per_run` | `5` | 1回の `post` で投稿する矛盾の組の上限 |
 | `discord.contradiction_min_similarity` | `0.70` | 矛盾の候補とみなす類似度の下限。上限は `match.similarity_threshold`。**設計者が考案した規則の閾値で、運用して見直す**（14-7） |
 | `discord.speaker_sample_count` | `3` | 話者の対応付けで投稿する発言サンプルの件数（`CLAUDE.md` 4-6） |
 | `batch.log_dir` | `./data/batch_logs` | 夜間バッチの各手順の記録（`<日時>.json`）の保存先（15-4） |
-| `batch.strata_ready_timeout_sec` | `1800` | **仕様に無い設定を足した。** `start_command` を実行してから Strata が応答するまで待つ秒数。125B の MoE の読み込みには時間がかかり、待たずに抽出を始めると接続できず毎晩失敗する。`start_command` が戻らない場合の打ち切りにも使う。実機で起動にかかる時間を測って詰める |
+| `batch.task_time` | `"23:30"` | 夜間バッチの開始時刻（HH:MM）。`kijun batch install-task` が `--time` を省略されたときに使う（15-5） |
+| `batch.defer_if_running` | `[]` | 動いている間は GPU を使う手順を始めないプロセスの実行ファイル名。空なら検出しない。**ユーザーが自分の環境で確認して書く（推奨・未確定）**（15-2） |
+| `batch.defer_check_interval_min` | `30` | 延期中に再確認する間隔（分）。**推奨・未確定** |
+| `batch.defer_max_hours` | `4` | 延期する時間の上限（バッチ全体の合計）。超えたらその夜の GPU を使う手順を飛ばす。**推奨・未確定** |
+| `transcribe.hotwords` | `[]` | faster-whisper の `hotwords`。空なら渡さない。効果は未検証で、その語を言っていない箇所に当てはめる副作用がある（6-1） |
 | `match.query_prefix` / `passage_prefix` | `"query: "` / `"passage: "` | e5 系が要求する接頭辞。ruri に差し替えるなら書き換える（9-1） |
 | `match.similarity_threshold` | `0.85` | `CLAUDE.md` 4-5 の初期値 |
 | `retention.audio_days` | `30` | `CLAUDE.md` 2章の参加者への説明と一致させる |
@@ -620,7 +700,7 @@ uv run python scripts/measure_extraction.py --conversation <ID> \
 | `match` | sentence-transformers |
 | `discord` | discord.py（無料。運転費用はゼロのまま） |
 
-**torch の CUDA 版について。** `pyproject.toml` に CUDA 版のインデックス指定（`[[tool.uv.index]]` と `[tool.uv.sources]`）を書いてあるが、**コメントアウトしてある**。`uv lock` は extra を使わなくても `download.pytorch.org` に接続し、開発環境の proxy がそれを 403 で拒否して `uv sync` が失敗するためである。Windows では**コメントを外してから** `uv sync --extra transcribe` を実行する。タグは 2026-11-03 に https://pytorch.org/get-started/locally/ で確認した `cu132`（CUDA 13.2、torch 2.15.0、Windows）を書いてある。CUDA 13.4 を選ぶ場合は `cu134`。実機の Strata のエンジンも CUDA 13 系（`cublas64_13.dll`）なので一致する。
+**torch の CUDA 版について。** `pyproject.toml` に CUDA 版のインデックス指定（`[[tool.uv.index]]` と `[tool.uv.sources]`）を書いてあるが、**コメントアウトしてある**。`uv lock` は extra を使わなくても `download.pytorch.org` に接続し、開発環境の proxy がそれを 403 で拒否して `uv sync` が失敗するためである。Windows では**コメントを外してから** `uv sync --extra transcribe` を実行する。タグは 2026-11-03 に https://pytorch.org/get-started/locally/ で確認した `cu132`（CUDA 13.2、torch 2.15.0、Windows）を書いてある。CUDA 13.4 を選ぶ場合は `cu134`。
 
 この変更は実機の環境に固有なので、**コミットしない**。コミットすると、開発環境の `uv sync` が `download.pytorch.org` に接続できずに失敗する。
 
@@ -641,7 +721,7 @@ uv run kijun discord read                                # リアクションと
 uv run kijun discord post                                # 新規候補・矛盾・話者の対応付け・束ね結果を投稿（手順8）
 uv run kijun derive-direction (--conversation <ID> | --all)   # speaker_map から direction を導出
 uv run kijun batch run [--dry-run]                       # 夜間バッチ
-uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクスケジューラ用の XML を生成
+uv run kijun batch install-task [--time HH:MM] [--out <パス>]  # タスクスケジューラ用の XML を生成（--time の既定は batch.task_time）
 ```
 
 `transcribe --audio` は DuckDB に書かず、結果を標準出力と JSON に出すだけである。`CLAUDE.md` 8章 #4 の「1ファイルで faster-whisper と pyannote を試すスクリプト」が、登録を経ずに1本の音声で試せる必要があるためで、ユーザーが最初に実行するコマンドになる。
@@ -650,11 +730,11 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 
 ### 11-3. テスト
 
-自動テストは34ファイル・668件で、GPU・ネットワーク・Discord のトークンが要る9件は既定で実行しない（`pyproject.toml` の `addopts` に `-m 'not requires_gpu and not requires_network'` を書いてある）。実機では `uv run pytest -m requires_gpu` と `-m requires_network` で実行でき、試験用の音声のパスは環境変数 `KIJUN_TEST_AUDIO` で渡す。
+自動テストは35ファイル・719件で、GPU・ネットワーク・Discord のトークンが要る10件は既定で実行しない（`pyproject.toml` の `addopts` に `-m 'not requires_gpu and not requires_network'` を書いてある）。実機では `uv run pytest -m requires_gpu` と `-m requires_network` で実行でき、試験用の音声のパスは環境変数 `KIJUN_TEST_AUDIO` で渡す。
 
-クラウド環境で検証できるのは、第2弾の文面の生成、投稿の順序と件数の上限、リアクションの判定（判定できない場合を含む）、返信の原文の保存、話者の対応付けの解釈、`direction` の導出、矛盾の検出、スキーマの移行、夜間バッチの手順と失敗時の動き、タスクスケジューラの XML、および設定の読み込み、ファイル名の解析、会議単位への束ね、DuckDB のスキーマと読み書き、チャンク分割と発話番号の復元、重複排除、区間の突き合わせ、壊れた JSON の修復、コサイン類似度と閾値の分岐、音声の削除の対象選定、文字起こしの書き出しと読み戻しの往復、`doctor` の判定ロジックと推奨値の算出である。
+クラウド環境で検証できるのは、第2弾の文面の生成、投稿の順序と件数の上限、リアクションの判定（判定できない場合を含む）、返信の原文の保存、話者の対応付けの解釈、`direction` の導出、矛盾の検出、スキーマの移行、夜間バッチの手順と失敗時の動き、タスクスケジューラの XML、および設定の読み込み、ファイル名の解析、会議単位への束ね、DuckDB のスキーマと読み書き、チャンク分割と発話番号の復元、重複排除、区間の突き合わせ、壊れた JSON の修復、コサイン類似度と閾値の分岐、音声の削除の対象選定、文字起こしの書き出しと読み戻しの往復、`doctor` の判定ロジックと推奨値の算出、ゲームの実行中の延期（偽のプロセス一覧と偽の `sleep`）、Ollama の応答の扱い（偽の `HttpTransport`）である。
 
-検証できないのは、faster-whisper、pyannote、Strata、sentence-transformers の実呼び出しと、torch の CUDA 版のインストール、**discord.py の実接続**、**Windows のタスクスケジューラへの登録**である。
+検証できないのは、faster-whisper、pyannote、Ollama、sentence-transformers の実呼び出しと、torch の CUDA 版のインストール、**discord.py の実接続**、**Windows のタスクスケジューラへの登録**である。
 
 ### 11-4. 実機での確認の順序
 
@@ -662,9 +742,12 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 |---|---|---|
 | 1 | Python 3.12 と uv を入れる | `uv --version` が出る |
 | 2 | `uv sync` | `uv run kijun --help` がサブコマンド一覧を出す |
-| 3 | `uv run pytest` | 555件通り、9件が除外される |
+| 3 | `uv run pytest` | 709件通り、10件が除外される |
 | 4 | `uv run kijun db init` | `data/kijun.duckdb` に10テーブルとビュー1つができる |
-| 5 | Strata を起動し `uv run kijun doctor` | 実測の表が出る。**音声が無くても実行できる。** 出た推奨値を `config.toml` に書き写す |
+| 5 | Ollama for Windows を入れ（ollama.com）、`ollama pull qwen3.5:9b` と `ollama pull qwen3:14b` を実行して、`uv run kijun doctor` | 検査1〜5が出る。**検査3（GPU に収まっているか）が「良」であること。** 音声が無くても実行できる。出た推奨値を `config.toml` に書き写す |
+| 5b | ゲームを起動した状態で、タスクマネージャーの「詳細」タブの実行ファイル名を確かめ、`batch.defer_if_running` に書く | 手順14のバッチで、ゲームが動いている間は GPU を使う手順が延期される |
+| 5c | `uv run python scripts/measure_extraction.py --conversation 20261103_1930_f2f_teirei --variants scripts/variants.example.toml` | 4通りの対照表が出る。Strata の基準（8-2）と並べて、ユーザーがモデルと `think` を決める |
+| 5d | `hotwords` の効果の確認（6-1） | 「箇条書き」「感嘆符」が正しく取れ、他の箇所が悪化せず、誤挿入が無い |
 | 6 | `pyproject.toml` の torch のインデックスを有効にして `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
 | 7 | Hugging Face で pyannote の3つのモデルページの利用条件に同意し `HF_TOKEN` を設定 | 次の手順が通る |
 | 8 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する（別の端末で `nvidia-smi`） |
@@ -672,13 +755,13 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 | 10 | `uv run kijun match` | 初回は全件が新規候補になる |
 | 11 | Discord Developer Portal でアプリケーションと bot を作り、Message Content Intent を有効にし、個人サーバーに招待する。`uv sync --extra discord` と `DISCORD_BOT_TOKEN` の設定、`config.toml` にチャンネルIDを書く | `uv run pytest -m requires_network`（`KIJUN_TEST_DISCORD_CHANNEL` に試験用チャンネルのID）で投稿・リアクション・返信の取得が通る |
 | 12 | `uv run kijun discord post` | 新規候補と話者の対応付けが Discord に出る。✅などのリアクションとスレッドへの返信を付ける |
-| 13 | `uv run kijun discord read` | リアクションが `knowledge_items` に、返信の原文が `review_log` に入る。返信の振り分けには Strata が要る |
+| 13 | `uv run kijun discord read` | リアクションが `knowledge_items` に、返信の原文が `review_log` に入る。返信の振り分けには Ollama が要る |
 | 14 | `uv run kijun batch run --dry-run`、続けて `uv run kijun batch run` | 手順と順序が出る。実行すると `data/batch_logs/` に記録が残り、最後に成否の表が出る |
 | 15 | `uv run kijun batch install-task` が作った XML を `schtasks /create /xml` で登録する | タスクスケジューラに登録され、翌晩に起動する（スリープ解除を含む） |
 
-手順5、8、9で記録した値は、12節の未確認事項への回答になる。手順11から15は、14節と15節の未確認事項（Discord への実接続、Strata の起動時間、スリープ解除）への回答になる。結果を `CLAUDE.md` 7章に書き込む。
+手順5、8、9で記録した値は、12節の未確認事項への回答になる。手順11から15は、14節と15節の未確認事項（Discord への実接続、スリープ解除）への回答になる。結果を `CLAUDE.md` 7章に書き込む。
 
-手順1から4は、音声が1本も無くても、Strata が無くても実行できる。手順5は Strata があれば音声なしで実行できる。手順8から10は音声が必要で、`CLAUDE.md` 8章 #1〜#3（iCloud for Windows の導入、ショートカットの作成、通話の録音テスト）が終わっていることが前提である。
+手順1から4は、音声が1本も無くても、Ollama が無くても実行できる。手順5は Ollama とモデルがあれば音声なしで実行できる。手順8から10は音声が必要で、`CLAUDE.md` 8章 #1〜#3（iCloud for Windows の導入、ショートカットの作成、通話の録音テスト）が終わっていることが前提である。
 
 ---
 
@@ -691,21 +774,24 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 
 | 事項 | 現状 | 確認する手段 |
 |---|---|---|
-| **`medium` が `applies_when` を取りこぼすか** | **未確定。`medium` の採用に伴って残った risk。** 実測では、文字起こしに実在する「参加者が募りたい場合」を `medium` が落とし、`xhigh` は取った。`applies_when` は `CLAUDE.md` 1章が暗黙知の中身として挙げる2点のうちの1つである。ただし実測は1チャンク・6件・`applies_when` が実在するのは2件だけで、割合として扱える数字ではない | 運用して、取りこぼしが目立つなら `xhigh` に戻す（`max_tokens` を 32000 以上にする）。手がかりは、レビューでユーザーが `applies_when` を書き足した頻度 |
+| **Ollama のモデルが GPU（VRAM 12GB）に収まるか、速度、品質** | **未確認（2026-11-05 の移行で新しくなった最大の未確認事項）。** `extract.ollama` の既定（`qwen3.5:9b`、`num_ctx` 16384、`num_predict` 8192、`keep_alive` "0"、`chunk_minutes` 12）は設計者の初期値で、実測に基づかない。モデル名が存在するかも未確認 | `kijun doctor`（検査3が GPU に収まっているか）。`scripts/measure_extraction.py` で品質を比べる（8-2） |
+| **Ollama の `format` が出力をスキーマに適合させるか。`think` と同時に送ってよいか** | 未確認。版とモデルによっては、推論にも制約が掛かって壊れる報告がある | `doctor` の検査2。`think` を変えた測定（8-2） |
+| `prompt_eval_count` が返らないことがあるか | 未確認。返らなければ、入力の切り捨てを検出できない（6-6） | 実機の抽出の標準エラー（「確認できません」が出るか） |
+| **`hotwords` の効果と副作用** | 未検証。「箇条書き」「感嘆符」が正しく取れるかは分からない。その語を言っていない箇所に当てはめる副作用がある | 6-1 の手順で、同じ音声を `hotwords` あり・なしで文字起こしし直す |
+| `applies_when` の取りこぼし | Strata の `medium` は、文字起こしに実在する「参加者が募りたい場合」を落とした（`CLAUDE.md` 7章）。Ollama のモデルで起きるかは未確認。`applies_when` は `CLAUDE.md` 1章が暗黙知の中身として挙げる2点のうちの1つである | 8-2 の「人が確認する2点」。運用では、レビューでユーザーが `applies_when` を書き足した頻度 |
 | `transcription_unclear` の投稿への返信を受け付けるか | **未確定。** いまはリアクションだけを読み、返信は読まない。`review_log` が `item_id` NOT NULL で記録する先が無いためである。受け付ける形にするには `review_log` のスキーマ変更が要る | ❌ の頻度と、投稿の文面で「返信は読み取りません」と伝えたうえでユーザーが何を書くかを見る |
-| 1リクエストの入力長の上限 | **未確定。** 約10,000トークン（会議20分相当）までは通った。文脈長は204,800あるが、通る長さと現実的な時間で終わる長さは別問題 | `chunk_minutes` を30以上にして `doctor` を再実行 |
-| トークン数の概算の係数 | 日本語1文字あたり 0.55 トークン、会議1分あたり 180 トークン。**実測1点からの推測**（旧 1.5 / 500 は約2〜3倍の過大だった） | `doctor` が `tokens_per_character` を実測して推奨する |
-| 生成速度の振れの原因 | 同じ profile・モデルで **14.0〜68.9 tokens/s（約4.9倍）**。サーバーのインスタンスが違うだけで 14〜21 と 37〜42 の差が出た。**速いのも遅いのも起動直後に出ており、「温まると速くなる」関係ではない。** ログの `expert cache ... hit`（26〜64%）が手がかりだが因果は未確認 | `timeout_sec` は観測された最も遅い 14.0 tokens/s で決める。原因は未調査 |
-| 文字起こしが壊れた発話から作られた項目をユーザーに見せるか | **未決定。ユーザーの判断待ち。** `reusable = false` は 9-1 で照合の対象から外れるので Discord に出ず、ユーザーの目に触れないまま消える。対処案3つは `CLAUDE.md` 7章 | ユーザーが案を選ぶ |
-| Strata にモデルを VRAM から降ろす手段があるか | 未確認。無い場合は `stop_command` でプロセスごと止める | Strata のドキュメント |
+| トークン数の概算の係数 | 日本語1文字あたり 0.55 トークン、会議1分あたり 180 トークン。**Strata での実測1点からの推測**で、Ollama のモデルには当てはまらない | `doctor` の検査4・5が `tokens_per_character` を実測して推奨する |
 | プロンプトキャッシュ | `usage.prompt_tokens_details.cached_tokens` が 0。同じ system プロンプトの連続リクエストでキャッシュが効いていない | 未対応。気づきとして記録 |
+| ゲームの実行ファイル名と、延期の動作 | ユーザーが `batch.defer_if_running` に書く名前が実際のプロセス名と一致するかは未確認。一致しなければゲームが動いていても延期されない | 手順5b。ゲームを起動した状態で `uv run kijun batch run` を試す |
 | 通話を PC スピーカー出力で録音したときに相手の声が十分に入るか | 未確認（`CLAUDE.md` 7章） | 30分の実通話テスト |
 | `artifact_type` と `counterpart_role` の値の一覧 | LLM が自由な文字列を入れる。候補を固定していない | 3回分の抽出結果を見て、よく出る値を `config.toml` に列挙する |
 
-**解決したこと（2026-11-03〜04 の実機での確認）**
+**解決したこと（2026-11-03〜04 の実機での確認。背面が Strata だったときのもの）**
 
 | 事項 | 結論 |
 |---|---|
+| ~~Strata にモデルを VRAM から降ろす手段があるか、Strata の起動にかかる時間、`start_command` が戻るコマンドとして書けるか~~ | **2026-11-05 に Ollama へ移ったので問わなくなった。** Ollama は `keep_alive` でモデルを下ろせる（15-2）。`start_command` / `stop_command` / `batch.strata_ready_timeout_sec` は削除した |
+| ~~1リクエストの入力長の上限、生成速度の振れの原因~~ | Strata（約10,000トークン＝会議20分相当までは通った。速度は 14.0〜68.9 tokens/s の振れ）の記録。Ollama では `doctor` で測り直す |
 | ~~Qwen3.8-Flash-Next が 12GB VRAM + 64GB メモリで動くか~~ | **動く。** 量子化は IQ3_XXS、モデルID は `qwen3.8-flash-next-iq3_xxs`。`strata` プロセスが約56GB（実メモリ約42GB）を保持して動作した。Unsloth の「1bit量子化で最低75GB」は Strata の動的オフロードには当てはまらなかった |
 | ~~Strata が `response_format` による JSON スキーマの強制に対応するか~~ | **対応する。** `doctor` の検査3が「200 でスキーマに適合」。`config.toml` は `enforces_json_schema = true`。`repair.py` は保険として残す |
 | ~~Strata の OpenAI 互換のパス~~ | `/v1/chat/completions`。`/v1/models`、`/v1/messages`（Anthropic 互換）、`/v1/responses` も同じポートにある |
@@ -732,8 +818,6 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 | 重要度の回帰による再推定 | `CLAUDE.md` 4-6 の「2〜3か月後」の作業。上書き履歴を残す形だけ決めてある | 2〜3か月分の `review_log` |
 | 束ね結果に ❌ が付いたときの再分割 | 自動では行わない。ユーザーが `bundle.gap_minutes` を調整して `kijun ingest` をやり直す | — |
 | 1日のレビュー所要時間の測定 | `discord_posts.posted_at` と `review_log.reviewed_at` の差から概算できるが、ユーザーが画面を見ていた時間とは一致しない | 運用してからビューの形を決める |
-| Strata の起動にかかる時間 | 未確認。夜間バッチは手順1・6・8で最大3回起動する（15-2）。起動が重ければ、`start_command` を空にして Strata を手で起動しておく運用に切り替える | 実機手順14の記録（`batch_logs` の `1:start`、`6:start`、`8:start` の所要時間） |
-| `start_command` が戻るコマンドとして書けるか | 未確認。フォアグラウンドで動き続けるコマンドは `batch.strata_ready_timeout_sec` で打ち切って失敗にする | 実機手順14 |
 | タスクスケジューラのスリープ解除 | 未確認。XML の `WakeToRun` で指定したが、PC の電源設定（スリープ解除タイマーの許可）に左右される | 実機手順15の翌朝に `batch_logs` の時刻を見る |
 | 話者の対応付けの返信の原文が残らない | `review_log` は `item_id` が NOT NULL で、項目に属さない出来事を入れられない。`speaker_map` の結果だけが残る。LLM が自然文を誤って解釈しても、原文から直せない | 問題になったら `review_log` を `conversation_id` も持てる形にする（スキーマ変更） |
 | 処理済みの投稿への後からの返信 | 取り込まない（`processed_at` を埋めた投稿は読み直さない）。承認のリアクションを付けた後で、次の `read` までの間に書いた返信は取り込まれる | 運用で、リアクションと返信を同じ時間帯に付ける |
@@ -743,6 +827,28 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]  # タスクス�
 ---
 
 ## 13. 変更の履歴
+
+### 2026-11-05：抽出の背面を Strata から Ollama に移した
+
+**背景。** Strata（Qwen3.8-Flash-Next、125B の MoE）は動作したが、プロセスが RAM を約56GB 保持し、PC の他の作業を圧迫した。文字起こしと抽出を無料で行うことを前提に、Strata 以外の背面に移した。
+
+**ユーザーが決めたこと（`CLAUDE.md` 10章にも記録した）。**
+
+| 対象 | 決定内容 |
+|---|---|
+| 抽出の背面 | Ollama で、GPU（VRAM 12GB）に収まる 9B〜14B のモデルを動かす。データは PC の外に出さない（`CLAUDE.md` 2章の参加者への説明を変えない）。無料のクラウド API（Gemini・Groq）と `claude -p` は、同意の取り直しが要るので採らない |
+| LLM の他の用途 | 返信の振り分け・重要度の判定・話者の解釈も、同じ Ollama を使う |
+| Strata | コードを削除する（`strata_impl.py`、`batch/strata.py`、`doctor` の Strata 用の検査、`StrataConfig`）。`CLAUDE.md` 7章とこの文書にある Strata の実測の記録は残す。経緯と、比較の基準として使うため |
+| 文字起こし | faster-whisper ＋ pyannote のまま。加えて、頻出語の誤認識への対策として `hotwords` を設定から渡せるようにする |
+| ゲームとの競合 | 夜間バッチの開始時刻を設定で変えられるようにする。加えて、指定したゲームのプロセスが動いている間は、バッチを延期する |
+
+**設計者（Claude）が決めたこと（推奨・未確定）。** 既定値：モデル名 `qwen3.5:9b`、`num_ctx` 16384、`num_predict` 8192、`chunk_minutes` 12 / `overlap_minutes` 1、`keep_alive` "0"、延期の上限 4 時間・確認の間隔 30 分。どれも実測に基づかない初期値である。ほかに、(1) モデル名の `:` を `model_name` に残して `request_id` でだけ置き換えたこと（6-6）、(2) `tasklist` が失敗したら警告して続けること（15-2）、(3) `hotwords` の既定を空にしたこと（6-1）、(4) `keep_alive` が "0" 以外のときのアンロードを実装したこと（15-2）。
+
+**実装したこと。** 設定 `[extract.ollama]` と、入力が `num_ctx` に収まるかの読み込み時の検査（6-6、10節）。`ollama_api.py` と `extract/ollama_impl.py`（6-6）。`review/llm.py` の `JsonChat` / `OllamaJsonChat` とクラス名の変更（`LlmReplyRouter` など。14節の LLM 用途）。夜間バッチの Strata の窓の削除と、ゲームによる延期・開始時刻の設定（15-2、15-5）。`doctor` の書き直し（7節）。測定スクリプトの variant の置き換えと、Strata の基準の併記（8-2）。`transcribe.hotwords`（6-1）。
+
+**指示書と食い違えた判断。** (1) `hotwords` の例（`["箇条書き", "感嘆符"]`）は、`config.example.toml` でコメントとして示し、既定は空のままにした。`tests/test_config.py` が `config.example.toml` と既定値の一致を検査するため、例を有効にすると既定が変わることと、効果が未検証であることによる。(2) 指示書の `build_llm_parts` は、実際の関数名が `build_llm` で、名前は変えていない。(3) 指示書にない追加：`doctor` は検査1が失敗したら残りを実行しない、`doctor` の結果に2時間の会議の見込みを入れた、測定スクリプトに「人が確認する2点」の抽出を入れた、`install-task` のテストが利用者の `config.toml` を読まないよう作業ディレクトリを一時ディレクトリにした。(4) 指示書は `chunk_minutes` の検査を「入力が `num_ctx` を超えるなら拒否」としており、システムプロンプトの概算に `SYSTEM_PROMPT` の文字数 × `tokens_per_character` を使った（概算なので、実際の `prompt_eval_count` での確認が最終判定になる）。
+
+**この変更で失われたもの。** Strata の実測に基づく設定値（`max_tokens = 20000`、`reasoning_effort = "medium"` など）は、Ollama では意味を持たないので削除した。Strata の記録は6-6の末尾と12節、`CLAUDE.md` 7章に残してある。
 
 ### 2026-11-04：推論量の測定と、その結果による2つの決定
 
@@ -961,24 +1067,39 @@ LLM に、チェック項目の文言と、根拠になった発言（`item_evid
 | 2 | `kijun ingest` | **止める**（会議が登録できなければ以降が何もできない） |
 | 3-4 | `kijun transcribe --conversation <ID>`（会議ごと） | その会議だけ飛ばして次に進む |
 | 5 | （手順3-4のプロセスの終了。OS が GPU メモリを解放する） | — |
-| 6 | `start_command` → `kijun extract --conversation <ID>`（会議ごと）→ `stop_command` | その会議だけ飛ばす。`stop_command` は必ず実行する |
+| 6 | `kijun extract --conversation <ID>`（会議ごと） | その会議だけ飛ばす |
 | 7 | `kijun match --conversation <ID>`（会議ごと） | その会議だけ飛ばす |
 | 8 | `kijun discord post` | 続ける |
 | 9 | 処理済み音声を `processed` へ移動（`transcribe` が既に行う） | — |
 
-終了コードは、失敗した手順が1つでもあれば 1。
+GPU を使う手順（1、3-4、6、7、8の一部）の直前には、ゲームの実行を確かめる（15-2）。終了コードは、失敗した手順が1つでもあれば 1。飛ばした手順（ゲームの延期の上限に達した、対象が無い、など）は失敗に数えない。
 
-### 15-2. Strata の起動・停止（`batch/strata.py`）
+### 15-2. ゲームの実行中の延期（`batch/defer.py`）と、モデルのアンロード
 
-faster-whisper・pyannote と Strata を同時に VRAM に載せないため、Strata を使う手順の前後で `extract.strata.start_command` と `stop_command` を実行する。
+2026-11-05 に Strata から Ollama に移ったため、バッチは LLM の起動も停止もしない（以前は `extract.strata.start_command` / `stop_command` と `batch.strata_ready_timeout_sec` で挟んでいた。`batch/strata.py` は削除した）。`keep_alive = "0"` なら Ollama が応答のたびにモデルを VRAM から下ろすので、手順3-4（文字起こし）の時点で LLM は載っていない。原則2-2は変えていない。
 
-- `start_command` は、Strata を起動したらすぐに戻るコマンドを前提にする。戻らなければ `batch.strata_ready_timeout_sec` で打ち切って失敗にする。
-- `start_command` が戻っても Strata の読み込みは終わっていないので、`GET {base_url}/v1/models`（`doctor` と同じ）が応答するまで待つ。仕様書には無かったが、待たずに `extract` を始めると接続できず毎晩失敗する。
-- `stop_command` は、起動に失敗しても、窓の中の処理が失敗しても、必ず実行する。
-- 空文字のコマンドは何もしない。`start_command` が空なら、どの手順でも Strata を起動しない（手で起動しておく運用）。
-- 手順6の窓は会議ごとではなく、抽出する全会議を1回の起動で挟む（125B の MoE の読み込みを会議の数だけ繰り返さないため）。抽出前の会議が無ければ窓を開かない。
+**keep_alive が "0" 以外のとき。** この前提が崩れる。手順1の後と手順6の後に、モデルを下ろす要求（`POST /api/generate {"model": ..., "keep_alive": 0}`）を送る（`ollama_api.unload_model`）。記録のステップ名は `1:unload`、`6:unload`。失敗しても処理は止めず、失敗として記録する。手順6の後は、抽出する会議があったときだけ送る。`keep_alive = "0"` のときは送らない。
 
-**仕様書と違う点（手順1と8にも窓を広げた）。** 仕様書は Strata を起動するのを手順6だけにしていた。しかし手順1（`read`：返信の振り分けと話者の自然文の解釈）と手順8（`post`：重要度の判定）も LLM を使う。手順6の終わりに `stop_command` で Strata を止める以上、手順1と8の時点で Strata は動いていない。そのため手順1と8も、LLM が要るときだけ窓で挟む：手順1は未処理の投稿があるとき、手順8は重要度が未判定の候補があり review チャンネルが設定されているとき。どちらも `start_command` が設定されているときだけである。手順1と8は LLM が使えなくても動く（返信は原文だけ記録して未処理に残り、重要度は NULL で投稿される）ので、Strata が起動できなくてもその手順は実行する。Strata の起動が重ければ、窓は夜に最大3回開くことになる。重い場合は `start_command` を空にして、Strata を手で起動しておく運用にする。
+**ゲームの実行中は延期する。** PC でゲーム（F1 25、League of Legends など）が動いていると、GPU を使う手順と VRAM を奪い合う。設定 `batch.defer_if_running` に実行ファイル名を挙げると、GPU を使う手順の直前に、そのどれかが動いていないかを確かめる。
+
+```toml
+[batch]
+task_time = "23:30"            # kijun batch install-task が --time を省略されたときに使う
+defer_if_running = []          # タスクマネージャーの「詳細」タブの実行ファイル名（大文字小文字は区別しない）
+defer_check_interval_min = 30  # 延期中に再確認する間隔（分）
+defer_max_hours = 4            # 延期する時間の上限（バッチ全体の合計）
+```
+
+- **GPU を使う手順**は、手順1（未処理の投稿があるとき。返信の振り分けに LLM を使う）、手順3-4（会議ごと）、手順6（会議ごと）、手順7（会議ごと）、手順8（重要度が未判定の候補があり review チャンネルが設定されているとき）。手順2（ingest）は GPU を使わないので、延期の影響を受けない。
+- 動いていれば、`defer_check_interval_min` ごとに再確認して待つ。**待った時間はバッチ全体で合計**し、`defer_max_hours` を超えたら、残りの GPU を使う手順をすべて `skipped` にして終える（`note` に「ゲームの実行中のため延期の上限に達した」とプロセス名）。上限に達した後は、検出も待機もしない。1回の待機は残りの時間を超えない（上限 45 分・間隔 30 分なら 30 分と 15 分）。`defer_max_hours = 0` は待たずに飛ばす。
+- **飛ばした会議は、翌晩に `batch/pending.py` が未処理として拾う。** 飛ばしただけで DB は変わらないため、このために新しい仕組みは要らない。`tests/test_batch.py` で、2晩目に文字起こし・抽出が実行されることを確認している。飛ばしたこと自体は失敗ではない（終了コードは 0）。
+- 待ったときは `StepRecord`（ステップ名は `3-4:defer` のように `<手順>:defer`）に、待った時間と原因のプロセス名を残す。
+- プロセスの検出は `ProcessLister`（Protocol）の背後に置き、Windows の実装は `tasklist /FO CSV /NH` の1列目を読む（`TasklistProcessLister`）。新しい依存（psutil）は足さない。`tasklist` の出力は UTF-8 で読めなければ cp932 で読む。テストでは `FakeProcessLister` と、`sleep` を差し替えて実時間を待たない。
+- `defer_if_running` が空なら、検出そのものを行わない。
+- **`tasklist` が失敗して一覧が得られないとき**は、警告を出して「動いていない」とみなして続ける（設計者の判断）。検出の失敗で、バッチが毎晩止まるよりよいと考えた。ゲームの実行を見逃す可能性は残る。
+- 実行ファイル名は、ユーザーが自分の環境で確認して書く（推奨・未確定）。名前が違えば、ゲームが動いていても延期されない。
+
+**手順1と8は LLM が使えなくても動く**（返信は原文だけ記録して未処理に残り、重要度は NULL で投稿される）。LLM が要るとき以外は、ゲームの確認を挟まない。
 
 ### 15-3. 処理が要る会議の選び方（`batch/pending.py`）
 
@@ -990,15 +1111,15 @@ faster-whisper・pyannote と Strata を同時に VRAM に載せないため、S
 
 ### 15-4. 実行の記録
 
-各手順（Strata の `start`・`ready`・`stop` を含む）の開始・終了時刻、終了コード、標準出力と標準エラーをまとめた末尾 2,000 文字を、`batch.log_dir`（既定 `./data/batch_logs`）に `<日時>.json` として保存する。最後に全手順の成否を表で標準出力に出す。子プロセスの出力は UTF-8 に固定して取り込む（Windows の既定 cp932 での文字化けを避ける）。実機で未検証の部分が多いので、失敗の記録が最初の数週間の主な情報源になる。
+各手順（ゲームによる待機 `<手順>:defer` と、モデルのアンロード `<手順>:unload` を含む）の開始・終了時刻、終了コード、標準出力と標準エラーをまとめた末尾 2,000 文字を、`batch.log_dir`（既定 `./data/batch_logs`）に `<日時>.json` として保存する。最後に全手順の成否を表で標準出力に出す。子プロセスの出力は UTF-8 に固定して取り込む（Windows の既定 cp932 での文字化けを避ける）。実機で未検証の部分が多いので、失敗の記録が最初の数週間の主な情報源になる。
 
 ### 15-5. タスクスケジューラへの登録（`batch/task_xml.py`）
 
-`kijun batch install-task [--time 23:30] [--out <パス>]` が XML（UTF-16）を作る。登録そのものは `schtasks /create /tn "kijun nightly batch" /xml <パス>` をユーザーが実行する（管理者権限が必要なことがあるので、コマンドを案内する形にした）。
+`kijun batch install-task [--time HH:MM] [--out <パス>]` が XML（UTF-16）を作る。`--time` を省略すると設定の `batch.task_time`（既定 23:30）を使う。登録そのものは `schtasks /create /tn "kijun nightly batch" /xml <パス>` をユーザーが実行する（管理者権限が必要なことがあるので、コマンドを案内する形にした）。
 
 - `WakeToRun = true`：`CLAUDE.md` 4-8 の「タスクを実行するためにスリープを解除する」。これが無いと PC がスリープしていると実行されない。
 - `StartWhenAvailable = true`：PC が電源オフだった場合に、次に起動したときに実行する。
 - `MultipleInstancesPolicy = IgnoreNew`：前夜のバッチがまだ動いているときに重ねて起動しない（DuckDB は同時に複数のプロセスから書き込めない）。
-- `ExecutionTimeLimit = PT0S`（無制限）：抽出が長い。打ち切りよりも、記録で遅さを見て判断する。
+- `ExecutionTimeLimit = PT0S`（無制限）：ゲームによる延期の待ち時間（最大 `batch.defer_max_hours`）を含めると所要時間が読めないため。打ち切りよりも、記録で遅さを見て判断する。
 - `LogonType = InteractiveToken`：ユーザーがログオンしている間（画面ロックを含む）に実行する。パスワードを保存しないで済むが、ログオフ中は実行されない。
 - 作業ディレクトリは `install-task` を実行したディレクトリ（`config.toml` と `./data` の基準になる）。`--config` を付けて実行したときは、それを引き継ぐ。`uv` のフルパスが見つかればそれを書き、見つからなければ `uv` と書いて、書き換えを案内する。

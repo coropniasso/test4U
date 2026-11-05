@@ -8,7 +8,7 @@
 | 作業表 | 内容 | サブコマンド |
 |---|---|---|
 | #4 | 文字起こし（faster-whisper）と話者分離（pyannote.audio） | `transcribe` |
-| #5 | Strata（Qwen3.8-Flash-Next）による抽出と、設定を変えた2回の実行の比較 | `doctor`、`extract`、`compare` |
+| #5 | Ollama による抽出と、設定を変えた2回の実行の比較 | `doctor`、`extract`、`compare` |
 | #6 | DuckDB のスキーマ | `db init` |
 | #7 | Discord でのレビュー（投稿と、リアクション・返信の読み取り）。`direction` の導出、重要度の判定、矛盾の検出を含む | `discord read`、`discord post`、`derive-direction` |
 | #8 | 夜間バッチの統合とタスクスケジューラへの登録 | `batch run`、`batch install-task` |
@@ -32,7 +32,7 @@ copy config.example.toml config.toml   # 必要な項目だけ書き換える。
 | 用途 | コマンド | 入るもの |
 |---|---|---|
 | 文字起こしと話者分離 | `uv sync --extra transcribe` | faster-whisper、pyannote.audio、torch、torchaudio |
-| 抽出（Strata への通信）と `doctor` | `uv sync --extra extract` | httpx |
+| 抽出（Ollama への通信）と `doctor` | `uv sync --extra extract` | httpx |
 | 埋め込みによる照合 | `uv sync --extra match` | sentence-transformers |
 | Discord でのレビュー | `uv sync --extra discord` | discord.py |
 
@@ -82,7 +82,7 @@ uv pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 - 3つとも、同意した直後に許可された。手動の承認待ちはない。
 - gated repo の同意フォームでは Company/university と Website が必須だが、内容は検証されない。個人なら `Individual` と、自分の GitHub のプロフィール URL を書けばよい。
 
-抽出は Strata（ローカルの推論サーバー）に対して行うので、API キーは要らない。秘密情報は `HF_TOKEN` だけで、環境変数で渡し、設定ファイルには書かない。
+抽出は Ollama（ローカルの推論サーバー）に対して行うので、API キーは要らない。秘密情報は `HF_TOKEN` だけで、環境変数で渡し、設定ファイルには書かない。
 
 ### Discord bot の準備
 
@@ -107,18 +107,34 @@ Discord でのレビュー（`discord read` / `discord post`）には、Discord 
 | 矛盾の投稿への返信 | A か B のどちらについてかが分かるように書く（例：「Aは社外向けの告知のとき。Bは社内連絡のとき」） |
 | 束ね結果への ❌ | 束ね方の誤り。自動では分割し直さない。`bundle.gap_minutes` を調整して `kijun ingest` をやり直す |
 
-### Strata と Qwen3.8-Flash-Next
+### Ollama の準備
 
-抽出の背面は、Strata で Qwen3.8-Flash-Next をローカル実行する（2026-11-03 決定。Ollama と Claude API は使わない）。
+抽出の背面は **Ollama** で、GPU（VRAM 12GB）に収まる 9B〜14B のモデルをローカル実行する（2026-11-05 決定。それ以前の Strata は、プロセスが RAM を約56GB 保持して PC の他の作業を圧迫したため、削除した）。返信の振り分け・重要度の判定・話者の解釈も、同じ Ollama を使う。音声も文字起こしも PC の外に出さない。
 
-- Strata は MoE 向けのローカル推論エンジンで、動的オフロードで大きい MoE を一般向けの PC で動かす。API サーバーの既定ポートは 8080。
-- Qwen3.8-Flash-Next は 125B の MoE（1トークンあたりの活性は約 6B）で、ネイティブの文脈長は 262,144 トークン。
+**インストールとモデルの取得は、ユーザーが行う**（実装を担当するセッションは行わない）。
 
-**動くかどうかは確かめられていない。** Unsloth はこのモデルに「1bit量子化で最低 75GB の RAM」としており、この PC は 64GB で 11GB 足りない。また Strata の API 仕様（構造化出力に対応するか、OpenAI 互換のパスが何か）も、実装時に確認できていない。
+1. Ollama for Windows をインストールする（https://ollama.com から）。インストール後、タスクトレイに常駐する。
+2. モデルを取得する。
 
-そのため、設定には推測値を書かず、**`uv run kijun doctor` で実測してから `config.toml` に書く**手順にしてある。`doctor` は DuckDB も音声も GPU 用の依存も要らないので、Strata を起動すればすぐ実行できる。下の確認の順序では、torch を入れる前に `doctor` を実行する。
+   ```powershell
+   ollama pull qwen3.5:9b
+   ollama pull qwen3:14b
+   ollama list        # 取得できていることを確認する
+   ```
 
-動かなかった場合は、量子化を下げる・オフロードの設定を変えるなどでローカル実行の維持を試す。クラウドへの退避は実装していない。
+   モデル名は設計者（Claude）の初期値で、**存在するかは確かめていない**。無ければ Ollama のライブラリ（https://ollama.com/library）で近い名前を探して決める。名前を変えたら `config.toml` の `[extract.ollama] model` も変える。
+3. `uv sync --extra extract` を実行する（httpx が入る）。
+4. `config.toml` に `[extract.ollama]` を書く（`config.example.toml` に全項目とコメントがある）。`base_url` は `http://127.0.0.1:11434` と**数字で書く**（`localhost` は Windows で IPv6 の `::1` に解決されることがあり、接続拒否になる）。
+5. `uv run kijun doctor` を実行する。**検査3（モデルが GPU に収まっているか）が「良」であること。** 一部がメインメモリに溢れていると出たら、`num_ctx` を下げるか、小さいモデルにする。
+6. 品質を比べる。`uv run python scripts/measure_extraction.py --conversation 20261103_1930_f2f_teirei --variants scripts/variants.example.toml` が、モデルと `think` を変えた4通りの対照表を出す。結果には Strata の基準（同じ会議・同じプロンプト）も並ぶ。**採否はユーザーが決める。**
+
+古い設定が残っていると、設定の読み込みが失敗する。`config.toml` から次を削除する：`[extract.strata]` の節、`[extract] provider = "strata"`、`[batch] strata_ready_timeout_sec`。
+
+**Strata が常駐していれば終了する。** Strata のデスクトップアプリが動いていると、エンジンが約56GBを保持したままになる。トレイのメニューから「終了」する（ウィンドウを閉じるだけでは終わらない）。必要ならアンインストールする（ユーザーの判断）。
+
+### ゲームとの競合
+
+夜間バッチの開始時刻は設定 `batch.task_time`（既定 23:30）で変えられる（`kijun batch install-task` が `--time` を省略されたときに使う）。加えて、`batch.defer_if_running` に実行ファイル名を挙げると、そのプロセスが動いている間は GPU を使う手順を始めずに待つ。実行ファイル名は、ゲームを起動した状態で、**タスクマネージャーの「詳細」タブ**に出る名前を書く（F1 25、League of Legends など。大文字小文字は区別しない）。待つのは `defer_check_interval_min`（既定30分）ごとの再確認で、バッチ全体で合計 `defer_max_hours`（既定4時間）を超えたら、その夜の残りの GPU を使う手順を飛ばす。飛ばした会議は翌晩に拾われる。
 
 ## ユーザーが実機で行う確認の順序
 
@@ -130,11 +146,11 @@ Discord でのレビュー（`discord read` / `discord post`）には、Discord 
 | 2 | `uv sync` | `uv run kijun --help` がサブコマンド一覧を出す |
 | 3 | `uv run pytest` | すべて通る（GPU とネットワークが要るテストはスキップされる） |
 | 4 | `uv run kijun db init` | `data/kijun.duckdb` ができ、テーブルが10個とビューが1つある |
-| 5 | Strata を入れ、Qwen3.8-Flash-Next を取得して API サーバーを起動する | サーバーが起動する（既定ポート 8080）。**ここが最大の関門**。Unsloth の 75GB に対してこの PC は 64GB なので、起動しない・極端に遅い可能性がある |
+| 5 | 上の「Ollama の準備」の 1〜2（Ollama のインストールと `ollama pull`） | `ollama list` にモデルが出る |
 | 6 | `uv sync --extra extract` | `httpx` が入る |
-| 7 | `uv run kijun doctor` | 接続・スキーマ適合・速度・最大入力長の実測結果と、推奨値が出る。接続できなければ `config.toml` の `base_url` と `chat_path` を直して再実行する |
-| 8 | `doctor` が出した推奨値を `config.toml` に書く | `enforces_json_schema` / `max_input_tokens` / `timeout_sec` / `chunk_minutes` / `overlap_minutes` の5つ |
-| 9 | `doctor` の結果を `CLAUDE.md` 7章に書き込む | 未検証事項2件（Strata がスキーマ適合を保証するか、このモデルが 64GB で動くか）への回答になる |
+| 7 | `uv run kijun doctor` | 検査1〜5の結果と、推奨値が出る。**検査3が「良」であること。** 接続できなければ `config.toml` の `base_url` を直して再実行する |
+| 8 | `doctor` が出した推奨値を `config.toml` に書く | `enforces_json_schema` / `timeout_sec` / `tokens_per_character`（検査5が失敗したときは `chunk_minutes` も） |
+| 9 | `doctor` の結果を `CLAUDE.md` 7章に書き込む | 「Ollama のモデルが GPU に収まるか、速度、品質」への回答になる |
 | 10 | `pyproject.toml` の torch のインデックスのコメントを外し、タグを確認して `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
 | 11 | Hugging Face で pyannote の3つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
 | 12 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する |
@@ -144,11 +160,13 @@ Discord でのレビュー（`discord read` / `discord post`）には、Discord 
 | 16 | `config.toml` の `model` を変えてもう一度 `extract` し、`uv run kijun compare --conversation <ID>` | 対照表の Markdown が出る |
 | 17 | 上の「Discord bot の準備」を行う | `uv run pytest -m requires_network`（`KIJUN_TEST_DISCORD_CHANNEL` に試験用チャンネルのID）で、投稿・リアクションの取得・返信の取得が通る |
 | 18 | `uv run kijun discord post` | 話者の対応付けと新規候補が Discord に出る |
-| 19 | Discord で ✅ とスレッドへの返信を付け、話者の対応付けに `00=self 01=...` と返信してから `uv run kijun discord read` | `knowledge_items` の status、`review_log` の返信の原文、`speaker_map`、`direction` に反映される。返信の振り分けには Strata が要る |
+| 19 | Discord で ✅ とスレッドへの返信を付け、話者の対応付けに `00=self 01=...` と返信してから `uv run kijun discord read` | `knowledge_items` の status、`review_log` の返信の原文、`speaker_map`、`direction` に反映される。返信の振り分けには Ollama が要る |
 | 20 | `uv run kijun batch run --dry-run`、続けて `uv run kijun batch run` | 手順と順序が出る。実行すると `data/batch_logs/` に記録が残り、最後に成否の表が出る |
 | 21 | `uv run kijun batch install-task` が作った XML を、表示された `schtasks /create /xml` のコマンドで登録する | タスクスケジューラに登録され、翌晩にスリープ解除を含めて起動する。翌朝 `data/batch_logs/` を見る |
+| 22 | ゲームを起動した状態で `uv run kijun batch run` を試す（`batch.defer_if_running` に実行ファイル名を書いてから） | `data/batch_logs/` に `<手順>:defer` の記録が残り、ゲームを終了すると再開する（短くするには `defer_check_interval_min` を小さくする） |
+| 23 | `hotwords` の効果の確認。`20261103_1930_f2f_teirei` の音声（`conversations.source_files` で場所を調べる。30日の削除期限内なら残っている）を、`transcribe.hotwords = ["箇条書き", "感嘆符"]` を書いた設定と書かない設定で `uv run kijun --config <設定> transcribe --audio <音声> --out <出力先>.json` | 「箇条書き」「感嘆符」が正しく取れ、他の箇所が悪化せず、その語を言っていない箇所に当てはめていない（DB の `utterances` は変わらない） |
 
-手順5から9を手順10より前に置いてある理由は2つある。(1) Strata が 64GB で動くかどうかが最も不確かな部分で、動かないなら他の作業の前提が変わる。(2) `doctor` は音声も DB も GPU 用の依存も要らないので、torch の CUDA 版（数GB）を入れる前に、抽出が成立するかどうかを知れる。
+手順5から9を手順10より前に置いてある理由は2つある。(1) モデルが GPU（VRAM 12GB）に収まるかどうかが最も不確かな部分で、収まらないなら他の作業の前提が変わる。(2) `doctor` は音声も DB も GPU 用の依存も要らないので、torch の CUDA 版（数GB）を入れる前に、抽出が成立するかどうかを知れる。
 
 補足:
 
@@ -161,17 +179,17 @@ Discord でのレビュー（`discord read` / `discord post`）には、Discord 
   - ただし、`extracted_requests`、`knowledge_items`、`item_evidence`、`speaker_map` などは JSON に入っていないので復元されない。復元後に `kijun extract` と `kijun match` をやり直すこと。レビュー済みの `knowledge_items` を失うので、DB ファイルの削除は最後の手段にする（先に上の `DROP TABLE embeddings` で直す）。
 - 手順4の10テーブルは、CLAUDE.md 5章の8テーブルに、`schema_version` と `embeddings` の2テーブルを足したものである。ビューは `v_weekly_metrics`（抽出モデルごとの週次の指標）の1つ。
 - 手順12の `--audio` は DuckDB に書かず、結果を標準出力と JSON に出すだけである。VRAM 使用量は、実行中に別の端末で `nvidia-smi` を実行して記録する。
-- 手順12で記録した処理時間と VRAM 使用量は、CLAUDE.md 7章の未検証事項「pyannote.audio が Windows + CUDA 環境で問題なく動くか」への回答になる。手順7の `doctor` の結果は「Strata が JSON スキーマに従った出力を保証するか」と「Qwen3.8-Flash-Next が 12GB VRAM ＋ 64GB RAM で動くか、動く場合の tokens/s と最大入力長」への回答になる。どちらも結果を CLAUDE.md 7章に書き込む。
-- 手順8で `chunk_minutes` を 180 にできるのは、`doctor` の手順5で2時間（約6万トークン）相当が1リクエストで通った場合だけである。既定の `chunk_minutes = 25` では、`doctor` が試す最大（4倍）でも100分相当にしかならず、2時間は確かめられない。確かめるには `chunk_minutes` を 30 以上にして `doctor` をもう一度実行する。`doctor` の出力にもそのことが出る。
-- 手順14で修復したチャンクが多い場合、背面が壊れた JSON を返している。`doctor` の手順3が「200 でスキーマに適合」と出ていれば `enforces_json_schema = true` にすると減る可能性がある。
-- `uv run pytest -m requires_gpu`、`uv run pytest -m requires_network` で、実機でだけ動く確認用のテストを実行できる（`KIJUN_TEST_AUDIO` に試験用の音声のパスを設定する）。
+- 手順12で記録した処理時間と VRAM 使用量は、CLAUDE.md 7章の未検証事項「pyannote.audio が Windows + CUDA 環境で問題なく動くか」への回答になる。手順7の `doctor` の結果は「Ollama のモデルが GPU に収まるか、速度、品質」と「`format` が出力をスキーマに適合させるか」への回答になる。どちらも結果を CLAUDE.md 7章に書き込む。
+- 既定の `chunk_minutes = 12` / `overlap_minutes = 1` と `num_ctx = 16384` は設計者の初期値で、実測に基づかない。入力が `num_ctx` に収まらない設定は、読み込みで拒否される（Ollama は入力が文脈長を超えると、エラーを出さずに先頭を捨てるため）。
+- 手順14で修復したチャンクが多い場合、背面が壊れた JSON を返している。`doctor` の検査2が「適合」と出ていれば `enforces_json_schema = true` にすると減る可能性がある。
+- `uv run pytest -m requires_gpu`、`uv run pytest -m requires_network` で、実機でだけ動く確認用のテストを実行できる（`KIJUN_TEST_AUDIO` に試験用の音声のパスを設定する）。`requires_gpu` には、Ollama のモデルが GPU に収まっているかの確認も含む。
 
 ### VRAM の扱い
 
-faster-whisper・pyannote と Qwen3.8-Flash-Next は、同時に VRAM に載せない。`transcribe` と `extract` は別のプロセスとして順に実行する。
+faster-whisper・pyannote と LLM（Ollama）は、同時に VRAM に載せない。`transcribe` と `extract` は別のプロセスとして順に実行する。
 プロセスが終われば OS が GPU メモリを解放する。
 
-Strata に Ollama の `keep_alive: 0` に相当するアンロードの手段があるかは確認できていない。そのため、Strata をプロセスごと起動・停止する手段を設定（`extract.strata.start_command` / `stop_command`）で持たせてある。夜間バッチ（`kijun batch run`）がこの2つを読み、Strata を使う手順（Discord の返信の読み取り、抽出、Discord への投稿）の前後で実行する。`start_command` は Strata を起動したらすぐに戻るコマンド（バックグラウンドで起動するもの）を書く。戻ったあと、Strata が応答するまで `batch.strata_ready_timeout_sec` を上限に待つ。空にすると、バッチは Strata を起動も停止もしない（手で起動しておく運用）。夜間バッチを使わず手で実行するときは、必要なら手で Strata を止めてから `transcribe` を実行する。
+Ollama は、設定 `extract.ollama.keep_alive` が `"0"`（既定）なら、応答のたびにモデルを VRAM から下ろす。したがって文字起こしの時点で LLM は載っていない。夜間バッチは LLM の起動も停止もしない（Strata のときは `start_command` / `stop_command` で挟んでいたが、削除した）。`keep_alive` を `"0"` 以外にしたときは、夜間バッチが手順1と手順6の後にモデルを下ろす要求を送る。夜間バッチを使わず手で実行するときは、`keep_alive` を `"0"` のままにしておくか、`ollama stop <モデル名>` で手で下ろしてから `transcribe` を実行する。
 
 ## CLI のサブコマンド
 
@@ -182,8 +200,8 @@ uv run kijun transcribe --conversation <ID>            # 文字起こしと話�
 uv run kijun transcribe --audio <ファイル>              # 単発の試し実行（作業表 #4 の用途）
 uv run kijun restore-transcript (--conversation <ID> | --all) [--force] [--dry-run]
                                                        # 文字起こしの JSON から conversations と utterances を復元
-uv run kijun doctor [--out <パス>]                      # Strata の実測（接続・スキーマ適合・速度・最大入力長）
-uv run kijun extract --conversation <ID> [--provider strata]
+uv run kijun doctor [--out <パス>]                      # Ollama の実測（接続・スキーマ適合・GPU に収まるか・速度・入力の切り捨て）
+uv run kijun extract --conversation <ID> [--provider ollama]
 uv run kijun compare --conversation <ID> [--out <パス>] [--model <名前> --model <名前>]
                                                        # 同じ会議を2回抽出した結果の対照表（作業表 #5）
 uv run kijun match --conversation <ID> [--dry-run]     # 既存項目との照合
@@ -193,7 +211,7 @@ uv run kijun discord post                              # 新規候補・矛盾�
 uv run kijun derive-direction (--conversation <ID> | --all)
                                                        # speaker_map から direction（自分→相手 / 相手→自分）を導出
 uv run kijun batch run [--dry-run]                     # 夜間バッチ（作業表 #8）。--dry-run は順序とコマンドを表示するだけ
-uv run kijun batch install-task [--time 23:30] [--out <パス>]
+uv run kijun batch install-task [--time HH:MM] [--out <パス>]
                                                        # タスクスケジューラ登録用の XML を生成（登録は schtasks をユーザーが実行）
 ```
 
@@ -206,15 +224,15 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]
 | `transcribe --conversation <ID>` | 登録済みの会議の音声を文字起こしして話者を付け、`utterances` に書く。同じ内容を `[paths].transcripts/<ID>.json` に保存し、音声を `[paths].processed` に移す。 |
 | `transcribe --audio <ファイル>` | 1本の音声を試す。DuckDB には書かない。 |
 | `restore-transcript` | `[paths].transcripts` の JSON から、`conversations` と `utterances` を復元する（DB を失ったときに、文字起こしをやり直さずに済む）。`--conversation <ID>` で1会議、`--all` で全部。`conversations` に同じ会議が既にあれば、上書きせずスキップする（`--force` で上書き）。`extracted_requests`、`knowledge_items`、`item_evidence` は復元されないので、`extract` と `match` をやり直す。`--dry-run` は書かずに、復元される内容を出す。 |
-| `doctor` | Strata を実測し、`config.toml` に書くべき値を出す。(1) `/v1/models` に接続できるか (2) `response_format` なしの出力がそのまま読めるか・修復が要るか (3) `response_format` ありでスキーマに適合するか (4) tokens/s と所要秒数 (5) 1リクエストに入る最大の入力長。DuckDB も音声も要らないので最初に実行できる。結果は `data/doctor/strata_<日時>.json` にも保存する。 |
-| `extract` | 発話を `chunk_minutes` ごと（`overlap_minutes` 重ねる）に分け、Strata で要求・指摘を抽出し、`extracted_requests` に書く。出力は必ず修復（前置きの散文、コードフェンス、トップレベルが配列、末尾が切れている）を通してから検証する。読めなければ同じチャンクを1回だけ投げ直し、2回失敗したらそのチャンクを失敗として記録して次に進む。 |
-| `compare` | 同じ会議を**設定を変えて2回抽出した結果**を、数字の表と、左右に並べた対照表の Markdown にする。比べる対象は `model_name` が違う2組なので、2回目の抽出の前に `config.toml` の `extract.strata.model` をその設定を表す名前（例: `qwen3.8-flash-next-q8`）に変えておく。同じ名前のまま2回抽出すると、2回目が1回目を置き換える。 |
+| `doctor` | Ollama を実測し、`config.toml` に書くべき値を出す。(1) 接続できるか・設定のモデルがあるか (2) `format` にスキーマを付けて、出力がそのまま読めるか (3) **モデルが GPU に収まっているか**（`/api/ps` の `size_vram` と `size`） (4) tokens/s と所要秒数、2時間の会議の見込み (5) 入力が `num_ctx` を超えて切り捨てられていないか。最後にモデルを下ろす。DuckDB も音声も要らないので最初に実行できる。結果は `data/doctor/ollama_<日時>.json` にも保存する。 |
+| `extract` | 発話を `chunk_minutes` ごと（`overlap_minutes` 重ねる）に分け、Ollama で要求・指摘を抽出し、`extracted_requests` に書く。入力が切り捨てられた疑い（`prompt_eval_count` が `num_ctx - num_predict` に達した）があれば、そのチャンクを失敗にする。出力は必ず修復（前置きの散文、コードフェンス、トップレベルが配列、末尾が切れている）を通してから検証する。読めなければ同じチャンクを1回だけ投げ直し、2回失敗したらそのチャンクを失敗として記録して次に進む。 |
+| `compare` | 同じ会議を**設定を変えて2回抽出した結果**を、数字の表と、左右に並べた対照表の Markdown にする。比べる対象は `model_name` が違う2組なので、2回目の抽出の前に `config.toml` の `extract.run_label` に設定を表す名前（例: `nothink`）を入れておく（`model_name` が `qwen3.5:9b+nothink` になる）。同じ名前のまま2回抽出すると、2回目が1回目を置き換える。設定ごとの測定を1コマンドで行うには `scripts/measure_extraction.py` を使う。 |
 | `match` | `reusable = true` の抽出結果を、既存のチェック項目とコサイン類似度で照合する。閾値（既定 0.85）以上なら既存項目に紐付け、未満なら `status = 'candidate'` の新規候補を作る。`--dry-run` は書かず、類似度の降順の表を出す。`--provider` で、どのモデルの抽出結果を対象にするかを選ぶ（省略すると設定の `extract.provider`）。 |
 | `discord read` | 前回までに投稿したメッセージのリアクションと返信を読む。✅❌⏸が1つだけ付いていれば status を更新し、**2つ以上付いていたら何も変えずに会議IDと項目IDを出す**（次回また対象になる）。1️⃣2️⃣3️⃣は重要度の上書き。返信は原文を `review_log` に残してから LLM で `reason` / `applies_when` / `not_applies_when` / `check_text` に振り分ける。話者の対応付けの返信は `speaker_map` に反映し、`self` が決まった会議の `direction` を導出する。`[discord]` のチャンネルIDが空なら何もせず、設定が必要だと出して終わる。 |
 | `discord post` | 新規候補（重要度の降順、同じなら新しい順に、`max_candidates_per_run` 件まで。残りの件数を出す）、矛盾の可能性がある組、話者の対応付けの依頼、複数ファイルを束ねた会議の一覧を投稿する。重要度が未判定の候補は投稿の前に LLM で判定する。`DISCORD_BOT_TOKEN` が要る。 |
 | `derive-direction` | `speaker_map` から `extracted_requests.direction` を導出する。`self` が決まっていない会議は導出しない。`speaker_map` を手で直した後や、`extract` をやり直した後に使う。 |
-| `batch run` | 夜間バッチ。`discord read` → `ingest` → `transcribe`（会議ごと）→ `extract`（会議ごと。前後で `start_command` / `stop_command`）→ `match`（会議ごと）→ `discord post` を、別プロセスとして順に起動する。`ingest` が失敗したら止め、それ以外は1つの会議の失敗で止めない。各手順の記録を `batch.log_dir` に JSON で保存し、最後に成否の表を出す。失敗があれば終了コード 1。 |
-| `batch install-task` | Windows のタスクスケジューラ用の XML（毎日 `--time` に実行。`WakeToRun` と `StartWhenAvailable` が true）を作り、登録用の `schtasks /create /xml` のコマンドを案内する。登録そのものはしない。 |
+| `batch run` | 夜間バッチ。`discord read` → `ingest` → `transcribe`（会議ごと）→ `extract`（会議ごと）→ `match`（会議ごと）→ `discord post` を、別プロセスとして順に起動する。GPU を使う手順の直前には、`batch.defer_if_running` のゲームが動いていないかを確かめ、動いていれば待つ（上限を超えたら残りの GPU を使う手順を飛ばす）。`ingest` が失敗したら止め、それ以外は1つの会議の失敗で止めない。各手順の記録を `batch.log_dir` に JSON で保存し、最後に成否の表を出す。失敗があれば終了コード 1。 |
+| `batch install-task` | Windows のタスクスケジューラ用の XML（毎日 `--time`（省略すると `batch.task_time`）に実行。`WakeToRun` と `StartWhenAvailable` が true）を作り、登録用の `schtasks /create /xml` のコマンドを案内する。登録そのものはしない。 |
 | `purge-audio` | 文字起こし完了から `retention.audio_days`（既定 30）日以上たった音声の一覧を出す。`--execute` を付けたときだけ削除する。文字起こしの JSON は削除しない。 |
 
 ## 既知の制約
@@ -227,14 +245,15 @@ uv run kijun batch install-task [--time 23:30] [--out <パス>]
 - `artifact_type` と `counterpart_role` の値は、LLM が自由な文字列を入れる。3回分の抽出結果を見て、よく出る値を決める。
 - 矛盾の検出規則と重要度の3段階の基準は、設計者（Claude）が考案したもので、`CLAUDE.md` に根拠が無い。運用して見直す。
 - 失敗したチャンクの記録と、出力を修復した記録は、DuckDB のスキーマに列が無いので、DB と同じディレクトリの `extract_logs/` に JSON で保存する。`compare` と夜間バッチ（0件で済んだ抽出を毎晩やり直さないため）がここを読む。
-- 夜間バッチは、Strata を最大3回起動する（返信の読み取り、抽出、投稿）。起動が重いときは `start_command` を空にして、Strata を手で起動しておく。
+- `batch.defer_if_running` に書く実行ファイル名が実際のプロセス名と違うと、ゲームが動いていても延期されない。ユーザーが「詳細」タブで確認して書く。
+- `hotwords` の効果は未検証で、既定は空である。
 
 ## テスト
 
 ```powershell
 uv run pytest                        # GPU とネットワークが要るテストを除いて実行
 uv run pytest -m requires_gpu        # 実機で、GPU を使う確認だけ実行
-uv run pytest -m requires_network    # 実機で、Strata・Hugging Face を使う確認だけ実行
+uv run pytest -m requires_network    # 実機で、Ollama・Hugging Face を使う確認だけ実行
 ```
 
 GPU・ネットワーク・外部プロセスに触る処理は、すべて `typing.Protocol` で定義したインターフェース
