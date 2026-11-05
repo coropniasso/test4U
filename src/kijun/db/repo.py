@@ -96,6 +96,10 @@ class RequestRow:
     # 一致していなければならない。SELECT の結果から RequestRow(*r) で位置で組み立てるためである。
     # 既定が False なのは「文字起こしは読めた」が通常の場合であり、DB の列の既定値と同じである。
     transcription_unclear: bool = False
+    # 原文と照合して一致しなかったときの、モデルが返した元の値（extract/verbatim.py）。
+    # stated_reason / applies_when はその場合 None になる。
+    stated_reason_unverified: str | None = None
+    applies_when_unverified: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,7 +153,7 @@ _REQUEST_COLUMNS = (
     "request_id, conversation_id, seq_from, seq_to, speaker_from_label, speaker_to_label, "
     "direction, counterpart_role, artifact_type, quote, request_summary, stated_reason, "
     "applies_when, reusable, pass_criterion, source_type, model_name, extracted_at, "
-    "transcription_unclear"
+    "transcription_unclear, stated_reason_unverified, applies_when_unverified"
 )
 
 _ITEM_COLUMNS = (
@@ -333,7 +337,7 @@ def insert_requests(con: duckdb.DuckDBPyConnection, rows: list[RequestRow]) -> N
         return
     con.executemany(
         f"INSERT INTO extracted_requests ({_REQUEST_COLUMNS}) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             [
                 r.request_id,
@@ -355,6 +359,8 @@ def insert_requests(con: duckdb.DuckDBPyConnection, rows: list[RequestRow]) -> N
                 r.model_name,
                 r.extracted_at,
                 r.transcription_unclear,
+                r.stated_reason_unverified,
+                r.applies_when_unverified,
             ]
             for r in rows
         ],

@@ -175,3 +175,15 @@ def test_プロンプトは_request_summary_に注釈を付けさせない():
     s = SYSTEM_PROMPT
     assert "のような注釈は付けない" in s
     assert "チェック項目として読めなくなる" in s
+
+
+def test_プロンプトは_stated_reason_と_applies_when_を原文のまま写すことを求める():
+    s = SYSTEM_PROMPT
+    assert "一字一句そのまま写" in s
+    assert "プログラムが" in s and "捨てられ" in s
+    assert "言い換えない" in s
+    # 別の分野の例（料理）を使う。過去に、例の文（読む人は忙しいから）をモデルがそのまま写した。
+    assert "甘みが出るから" in s
+    assert "読む人は忙しいから" not in s
+    # 言い換えが誤りである悪い例が残っている
+    assert "甘みを引き出すため" in s

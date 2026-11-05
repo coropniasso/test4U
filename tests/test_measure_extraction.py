@@ -360,3 +360,32 @@ def test_基準の値は_CLAUDE_md_7章の記録と一致する():
         "item_count": 6, "stated_reason": 4, "applies_when": 2, "pass_criterion": 4, "novel": 5,
     }
     assert m.STRATA_BASELINE["Strata medium"]["applies_when"] == 1
+
+
+# --- 原文照合（本番の extract/run.py と同じ照合を通す） ----------------------------------
+
+
+def test_測定でも原文照合を通し_外した元の値を_unverified_に残す():
+    cfg = Config()
+    chunks = split_into_chunks(_utterances(), cfg.extract.chunk_minutes, cfg.extract.overlap_minutes)
+    # 「結論を先に書いて」は原文の一部。「読む人は忙しいから」は原文に無い。
+    transport = _Transport([_body([_item(stated_reason="読む人は忙しいから", applies_when="結論を先に書いて")])])
+    out = m.run_variant(cfg, m.Variant("x"), chunks, transport)[0]
+    item = out.items[0]
+    assert item["stated_reason"] is None and item["stated_reason_unverified"] == "読む人は忙しいから"
+    assert item["applies_when"] == "結論を先に書いて" and item["applies_when_unverified"] is None
+
+
+def test_まとめと対照表に_照合で外した数が出る():
+    items = [
+        _item(stated_reason=None, stated_reason_unverified="読む人は忙しいから"),
+        _item(applies_when=None, applies_when_unverified="社外向け"),
+        _item(stated_reason="結論を先に書いて"),
+    ]
+    variants = [m.Variant("a")]
+    results = _results(variants, items)
+    s = results["a"]
+    assert s["verbatim_rejected"] == {"stated_reason": 1, "applies_when": 1}
+    md = m.build_markdown("20261103_1930_f2f_teirei", variants, results, Config())
+    assert "| stated_reason を照合で外した数 | 1 |" in md
+    assert "| applies_when を照合で外した数 | 1 |" in md

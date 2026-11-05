@@ -15,7 +15,9 @@ import duckdb
 # バージョン2: discord_posts に channel_id と pair_item_id を足した（第2弾の Discord 連携）。
 # バージョン3: extracted_requests に transcription_unclear を、discord_posts に request_id を
 # 足した（CLAUDE.md 7章の案A。文字起こしが壊れた発話から作られた抽出結果を Discord に出す）。
-SCHEMA_VERSION = 3
+# バージョン4: extracted_requests に stated_reason_unverified と applies_when_unverified を足した
+# （stated_reason / applies_when を原文と照合し、一致しなかった元の値を残す。2026-11-05）。
+SCHEMA_VERSION = 4
 
 # 移行先のバージョン -> 既存の DB に適用する文。
 # schema.sql は `CREATE TABLE IF NOT EXISTS` なので、既存のテーブルに列を足さない。
@@ -40,6 +42,11 @@ MIGRATIONS: dict[int, list[str]] = {
         "transcription_unclear BOOLEAN DEFAULT FALSE",
         "ALTER TABLE extracted_requests ALTER COLUMN transcription_unclear SET NOT NULL",
         "ALTER TABLE discord_posts ADD COLUMN IF NOT EXISTS request_id VARCHAR",
+    ],
+    # 既存の行は NULL になる。これらの行は照合の前に保存されたので、「照合で外れた」とは言えない。
+    4: [
+        "ALTER TABLE extracted_requests ADD COLUMN IF NOT EXISTS stated_reason_unverified VARCHAR",
+        "ALTER TABLE extracted_requests ADD COLUMN IF NOT EXISTS applies_when_unverified VARCHAR",
     ],
 }
 

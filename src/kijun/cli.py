@@ -345,6 +345,13 @@ def extract(ctx: typer.Context, conversation: ConversationOpt, provider: Provide
             f"捨てた件数: 番号が範囲外 {o.invalid_count}、重複区間 {o.overlap_dropped_count}、"
             f"quote の重複 {o.duplicate_count}"
         )
+        typer.echo(
+            "原文と照合して外した値（NULL にし、元の値は *_unverified 列に残した）: "
+            f"stated_reason {run.rejected_count('stated_reason')} 件、"
+            f"applies_when {run.rejected_count('applies_when')} 件"
+        )
+        for r in run.verbatim_rejections:
+            typer.echo(f"  外した {r.field}: 「{r.value}」（引用: {r.quote[:40]}）")
         if run.repair_events:
             truncated = sum(r.truncated_items for r in run.repair_events)
             typer.echo(

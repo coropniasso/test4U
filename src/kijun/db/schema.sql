@@ -48,7 +48,12 @@ CREATE TABLE IF NOT EXISTS extracted_requests (
     transcription_unclear BOOLEAN NOT NULL DEFAULT FALSE,
     source_type         VARCHAR NOT NULL,     -- live_conversation / dictated_review
     model_name          VARCHAR NOT NULL,     -- 抽出に使ったモデル。#5 の比較で使う
-    extracted_at        TIMESTAMP NOT NULL
+    extracted_at        TIMESTAMP NOT NULL,
+    -- stated_reason / applies_when は、文字起こしの原文の連続した一部と照合して一致したものだけを入れる
+    -- (extract/verbatim.py)。一致しなかったときは上の列を NULL にし、モデルが返した元の値をここに残す
+    -- (バージョン4で追加)。一致した、または元から NULL のときは NULL。
+    stated_reason_unverified VARCHAR,
+    applies_when_unverified  VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_items (

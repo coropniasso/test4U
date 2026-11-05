@@ -43,6 +43,7 @@ from kijun.db import repo
 from kijun.extract.chunk import split_into_chunks
 from kijun.extract.ollama_impl import build_payload
 from kijun.extract.repair import UnrepairableJsonError, parse_with_repair
+from kijun.extract.verbatim import VERBATIM_FIELDS, check_items, source_text
 from kijun.transport import HttpxTransport, TransportError
 
 # 内容語の目安。カタカナは3文字以上、漢字は2文字以上の連なりを拾う。
@@ -206,7 +207,9 @@ def run_variant(cfg: Config, variant: Variant, chunks: list, transport) -> list[
             outcomes.append(out)
             continue
         out.repair_actions = list(parsed.repair.actions)
-        out.items = [i.model_dump() for i in parsed.result.items]
+        # 本番（extract/run.py）と同じ原文照合を通す。外した元の値は項目に *_unverified として残す。
+        checked = check_items(parsed.result.items, source_text(chunk.utterances))
+        out.items = [i.model_dump() for i in checked]
         print(
             f"[{variant.label}] {out.elapsed_sec:.1f} 秒、出力 {out.completion_tokens} トークン、"
             f"{len(out.items)} 件、done_reason={out.done_reason}",
@@ -255,6 +258,10 @@ def summarize(outcomes: list[ChunkOutcome], transcript: str) -> dict:
         "item_count": len(items),
         "non_null": {f: sum(1 for i in items if i.get(f) is not None) for f in GROUNDED_FIELDS},
         "reusable_true": sum(1 for i in items if i.get("reusable")),
+        "verbatim_rejected": {
+            f: sum(1 for i in items if i.get(f"{f}_unverified") is not None)
+            for f in VERBATIM_FIELDS
+        },
         "novel_terms": novel,
         "novel_term_count": sum(len(v) for v in novel.values()),
         "human_checks": human_checks(items),
@@ -301,6 +308,13 @@ def build_markdown(conversation_id: str, variants: list[Variant], results: dict,
     for f in GROUNDED_FIELDS:
         row(f"{f} が非 null", lambda s, f=f: s["non_null"][f])
     row("文字起こしに無い語の数", lambda s: s["novel_term_count"])
+    row("stated_reason を照合で外した数", lambda s: s["verbatim_rejected"]["stated_reason"])
+    row("applies_when を照合で外した数", lambda s: s["verbatim_rejected"]["applies_when"])
+    lines += [
+        "",
+        "「非 null」の行は、原文との照合（extract/verbatim.py）を通した後の値の数である。"
+        "照合で外れた値は NULL になり、元の値は JSON の stated_reason_unverified / applies_when_unverified に残る。",
+    ]
 
     lines += ["", "## Strata の基準との対照", ""]
     if conversation_id == BASELINE_CONVERSATION:

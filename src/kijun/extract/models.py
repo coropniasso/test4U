@@ -42,10 +42,10 @@ class ExtractedRequest(BaseModel):
         description="何を求めたかを1文で書いた要約。"
     )
     stated_reason: str | None = Field(
-        description="発言の中で実際に語られた理由だけ。推測で補わない。語られていなければ null。"
+        description="発言の中で語られた理由を、入力の本文から一字一句そのまま写した文字列。言い換え・要約・推測をしない。語られていなければ null。"
     )
     applies_when: str | None = Field(
-        description="発言の中で実際に語られた適用条件だけ。推測で補わない。語られていなければ null。"
+        description="発言の中で語られた適用条件を、入力の本文から一字一句そのまま写した文字列。言い換え・要約・推測をしない。語られていなければ null。"
     )
     reusable: bool = Field(
         description="同じ種類の成果物を別の機会に作るときにも使えるチェック項目になる場合は true。この場限りの修正指示なら false。"

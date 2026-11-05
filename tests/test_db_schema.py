@@ -56,6 +56,7 @@ def test_extracted_requests_の列は計画書どおり(con):
         "speaker_to_label", "direction", "counterpart_role", "artifact_type", "quote",
         "request_summary", "stated_reason", "applies_when", "reusable", "pass_criterion",
         "transcription_unclear", "source_type", "model_name", "extracted_at",
+        "stated_reason_unverified", "applies_when_unverified",
     ]
 
 
@@ -73,7 +74,7 @@ def test_スキーマの適用は何度でも安全で_バージョン行は1つ
     migrate.apply_schema(con)
     migrate.apply_schema(con)
     assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 1
-    assert migrate.current_version(con) == migrate.SCHEMA_VERSION == 3
+    assert migrate.current_version(con) == migrate.SCHEMA_VERSION == 4
 
 
 def test_適用前のバージョンは_None(tmp_path):

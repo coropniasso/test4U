@@ -36,7 +36,7 @@ def conv(con):
 def test_抽出結果が_グローバルな_seq_で_extracted_requests_に保存される(con, cfg, conv):
     extractor = FakeExtractor(
         {
-            0: [make_item(3, 4, quote="a", summary="s1", reason="理由あり")],
+            0: [make_item(3, 4, quote="a", summary="s1", reason="発話3")],  # reason は原文照合を通すため、発話の本文の一部にする
             1: [make_item(5, 6, quote="b", summary="s2")],  # チャンク1 は seq 23 から
         },
         model_name="qwen3.8-flash-next",
@@ -51,7 +51,7 @@ def test_抽出結果が_グローバルな_seq_で_extracted_requests_に保存
     assert rows[0].model_name == "qwen3.8-flash-next"
     assert rows[0].source_type == "live_conversation"
     assert rows[0].direction is None  # speaker_map が埋まるまで確定しない
-    assert rows[0].stated_reason == "理由あり" and rows[1].stated_reason is None
+    assert rows[0].stated_reason == "発話3" and rows[1].stated_reason is None
     assert rows[0].extracted_at == NOW
 
 
@@ -272,3 +272,33 @@ def test_入力長の警告は_num_ctx_を案内する(cfg):
     warning = check_chunk_input_size(chunk, cfg, 10)
     assert warning is not None and "num_ctx" in warning and "chunk_minutes" in warning
     assert "strata" not in warning.lower()
+
+
+def test_原文に無い_stated_reason_と_applies_when_は_NULL_にして_元の値を_unverified_に残す(con, cfg, conv):
+    # 発話の本文は「発話3」「発話4」…。「発話4」は原文の一部、「忙しいから」「社外向け」は原文に無い。
+    extractor = FakeExtractor(
+        {
+            0: [
+                make_item(3, 3, quote="a", summary="s1", reason="忙しいから", applies_when="発話4"),
+                make_item(5, 5, quote="b", summary="s2", reason="発話5", applies_when="社外向け"),
+            ],
+        }
+    )
+    run = run_extraction(con, cfg, conv, extractor, now=NOW)
+
+    rows = repo.get_requests(con, conv)
+    assert (rows[0].stated_reason, rows[0].stated_reason_unverified) == (None, "忙しいから")
+    assert (rows[0].applies_when, rows[0].applies_when_unverified) == ("発話4", None)
+    assert (rows[1].stated_reason, rows[1].stated_reason_unverified) == ("発話5", None)
+    assert (rows[1].applies_when, rows[1].applies_when_unverified) == (None, "社外向け")
+    assert run.rejected_count("stated_reason") == 1 and run.rejected_count("applies_when") == 1
+    log = json.loads(extract_log_path(cfg, conv, run.model_name).read_text(encoding="utf-8"))
+    assert log["verbatim_rejected"]["stated_reason"] == [{"value": "忙しいから", "quote": "a"}]
+    assert [r["value"] for r in log["verbatim_rejected"]["applies_when"]] == ["社外向け"]
+
+
+def test_原文照合の原文は_seq_の範囲ではなくチャンクの全発話(con, cfg, conv):
+    # モデルが返す seq は不正確なので、seq 3 の項目でも、同じチャンクの別の発話（発話10）の文字列を照合に通す。
+    extractor = FakeExtractor({0: [make_item(3, 3, quote="a", summary="s", reason="発話10")]})
+    run_extraction(con, cfg, conv, extractor, now=NOW)
+    assert repo.get_requests(con, conv)[0].stated_reason == "発話10"

@@ -53,13 +53,13 @@ def test_バージョン1のDBにALTER_TABLEで列が足され_既存の行が�
     assert "channel_id" not in columns(con, "discord_posts")
     assert migrate.current_version(con) == 1
 
-    assert migrate.apply_schema(con) == 3
+    assert migrate.apply_schema(con) == 4
 
     assert columns(con, "discord_posts")[-3:] == ["channel_id", "pair_item_id", "request_id"]
     rows = con.execute("SELECT message_id, post_type, item_id, channel_id, pair_item_id FROM discord_posts").fetchall()
     assert rows == [("m1", "new_candidate", "item_0001", None, None)]  # 既存の行が残り、新しい列は NULL
-    assert migrate.current_version(con) == 3
-    assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 2  # 1 と 3 の履歴
+    assert migrate.current_version(con) == 4
+    assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 2  # 1 と 4 の履歴
 
 
 def test_移行後の表に新しい列を使って書き込める(tmp_path):
@@ -144,9 +144,9 @@ def test_バージョン2のDBに_transcription_unclear_が足され_既存の�
     assert "transcription_unclear" not in columns(con, "extracted_requests")
     assert migrate.current_version(con) == 2
 
-    assert migrate.apply_schema(con) == 3
+    assert migrate.apply_schema(con) == 4
 
-    assert columns(con, "extracted_requests")[-1] == "transcription_unclear"
+    assert "transcription_unclear" in columns(con, "extracted_requests")
     assert columns(con, "discord_posts")[-1] == "request_id"
     # 既存の行は NULL ではなく FALSE になる。文字起こしが壊れていたかは後から判定できないので
     # 推測で埋めず、「読めた」側の FALSE にする。
@@ -197,3 +197,70 @@ def test_バージョン2からの移行後に新しい列を使って読み書�
     )
     posts = {p.message_id: p for p in repo.list_discord_posts(con)}
     assert posts["m9"].request_id == "c1#m#1" and posts["m9"].item_id is None
+
+
+# --- バージョン3 から 4 への移行 -------------------------------------------------------
+
+
+def make_v3_db(path):
+    """バージョン3のスキーマで作った DB。extracted_requests に行が1つ入っている。"""
+    con = duckdb.connect(str(path))
+    con.execute(migrate.read_schema_sql())
+    con.execute("ALTER TABLE extracted_requests DROP COLUMN stated_reason_unverified")
+    con.execute("ALTER TABLE extracted_requests DROP COLUMN applies_when_unverified")
+    con.execute("DELETE FROM schema_version")
+    con.execute("INSERT INTO schema_version VALUES (3, ?)", [datetime(2026, 11, 3)])
+    con.execute(
+        "INSERT INTO conversations (conversation_id, recorded_at, setting_format, setting_kind, "
+        "source_files, created_at) VALUES ('c1', ?, 'f2f', 'teirei', '[]', ?)",
+        [datetime(2026, 11, 3, 19, 30), datetime(2026, 11, 3)],
+    )
+    con.execute(
+        "INSERT INTO extracted_requests (request_id, conversation_id, seq_from, seq_to, quote, "
+        "request_summary, stated_reason, reusable, source_type, model_name, extracted_at) "
+        "VALUES ('c1#m#0', 'c1', 0, 0, '結論を先に書いて', '結論を先に書くことを求めた', '理由', TRUE, "
+        "'live_conversation', 'm', ?)",
+        [datetime(2026, 11, 3)],
+    )
+    return con
+
+
+def test_バージョン3のDBに_unverified_の2列が足され_既存の行は残って_NULL_になる(tmp_path):
+    con = make_v3_db(tmp_path / "v3.duckdb")
+    assert "stated_reason_unverified" not in columns(con, "extracted_requests")
+
+    assert migrate.apply_schema(con) == 4
+
+    assert columns(con, "extracted_requests")[-2:] == ["stated_reason_unverified", "applies_when_unverified"]
+    rows = repo.get_requests(con, "c1")
+    assert len(rows) == 1
+    assert rows[0].stated_reason == "理由"  # 既存の値は変えない
+    assert rows[0].stated_reason_unverified is None and rows[0].applies_when_unverified is None
+    assert migrate.current_version(con) == 4
+
+
+def test_バージョン3から移行した表に_unverified_を書いて読める(tmp_path):
+    con = make_v3_db(tmp_path / "v3.duckdb")
+    migrate.apply_schema(con)
+    repo.insert_requests(
+        con,
+        [
+            repo.RequestRow(
+                request_id="c1#m#1", conversation_id="c1", seq_from=1, seq_to=1,
+                speaker_from_label=None, speaker_to_label=None, direction=None,
+                counterpart_role=None, artifact_type=None, quote="q", request_summary="s",
+                stated_reason=None, applies_when=None, reusable=True, pass_criterion=None,
+                source_type="live_conversation", model_name="m", extracted_at=datetime(2026, 11, 5),
+                stated_reason_unverified="読む人は忙しいから",
+            )
+        ],
+    )
+    got = [r for r in repo.get_requests(con, "c1") if r.request_id == "c1#m#1"][0]
+    assert got.stated_reason is None and got.stated_reason_unverified == "読む人は忙しいから"
+
+
+def test_バージョン4への移行は2回実行しても安全(tmp_path):
+    con = make_v3_db(tmp_path / "v3.duckdb")
+    migrate.apply_schema(con)
+    migrate.apply_schema(con)
+    assert migrate.current_version(con) == 4

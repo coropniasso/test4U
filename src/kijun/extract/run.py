@@ -24,6 +24,7 @@ from kijun.extract.chunk import Chunk, MergeOutcome, merge_chunk_results, split_
 from kijun.extract.models import ExtractedRequest
 from kijun.extract.prompt import build_messages
 from kijun.extract.tokens import estimate_messages_tokens
+from kijun.extract.verbatim import Rejection, check_items, rejections, source_text
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,11 @@ class ExtractionRun:
     repair_events: list[RepairEvent] = field(default_factory=list)
     # 推定トークン数が max_input_tokens を超えたチャンクの警告
     oversize_warnings: list[str] = field(default_factory=list)
+    # stated_reason / applies_when を原文と照合して外した値（保存した項目のぶん。extract/verbatim.py）
+    verbatim_rejections: list[Rejection] = field(default_factory=list)
+
+    def rejected_count(self, field_name: str) -> int:
+        return sum(1 for r in self.verbatim_rejections if r.field == field_name)
 
 
 def extract_log_path(cfg: Config, conversation_id: str, model_name: str) -> Path:
@@ -81,6 +87,16 @@ def write_extract_log(path: Path, conversation_id: str, run: ExtractionRun, at: 
             for r in run.repair_events
         ],
         "oversize_warnings": run.oversize_warnings,
+        "verbatim_rejected": {
+            "stated_reason": [
+                {"value": r.value, "quote": r.quote}
+                for r in run.verbatim_rejections if r.field == "stated_reason"
+            ],
+            "applies_when": [
+                {"value": r.value, "quote": r.quote}
+                for r in run.verbatim_rejections if r.field == "applies_when"
+            ],
+        },
         "invalid_count": run.outcome.invalid_count,
         "overlap_dropped_count": run.outcome.overlap_dropped_count,
         "duplicate_count": run.outcome.duplicate_count,
@@ -129,6 +145,8 @@ def _to_row(
         reusable=item.reusable,
         pass_criterion=item.pass_criterion,
         transcription_unclear=item.transcription_unclear,
+        stated_reason_unverified=getattr(item, "stated_reason_unverified", None),
+        applies_when_unverified=getattr(item, "applies_when_unverified", None),
         source_type=repo.SOURCE_LIVE_CONVERSATION,
         model_name=model_name,
         extracted_at=at,
@@ -208,7 +226,9 @@ def run_extraction(
         started = time.monotonic()
         try:
             result = extractor.extract(chunk)
-            results.append((chunk, result.items))
+            # 渡したチャンクの全発話を原文として、stated_reason / applies_when を照合する。
+            checked = check_items(result.items, source_text(chunk.utterances))
+            results.append((chunk, checked))
             log(
                 f"{label} 完了（{time.monotonic() - started:.0f} 秒、"
                 f"{_usage_text(getattr(extractor, 'last_usage', None))}、抽出 {len(result.items)} 件）"
@@ -229,6 +249,7 @@ def run_extraction(
         raise ExtractionError(f"すべてのチャンク（{len(chunks)} 個）の抽出に失敗しました")
 
     run.outcome = merge_chunk_results(results)
+    run.verbatim_rejections = rejections(run.outcome.items)
 
     linked = repo.count_linked_requests(con, conversation_id, run.model_name)
     if linked:
