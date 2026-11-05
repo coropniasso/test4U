@@ -38,24 +38,26 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/kijun"]
 
-# Windows で torch を CUDA 版にするための設定。既定では無効（コメントアウト）にしてある。
-# 理由: uv は `uv sync` のたびにロックファイルを作るために、ここに書いた index へ接続して
-# 全 extra のパッケージ情報を取得する。download.pytorch.org に接続できない環境
-# （例: 外向き通信を制限したクラウドコンテナ）では、extra を使わない場合でも
-# `uv sync` 自体が失敗する。
-# Windows の実機で `uv sync --extra transcribe` を行う前に、下の 8 行のコメントを外す。
+# Windows で torch を CUDA 版にするための設定。2026-11-05 に有効にした（以前はコメントアウトしていた）。
+# 有効にした理由: これが無いと `uv run` / `uv sync` が CPU 版の torch を入れ直し、文字起こし・話者分離・
+# 夜間バッチが GPU を使えなくなる。実機（Windows）で動かすことが本来の用途なので、こちらを既定にした。
+# 注意: uv は `uv sync` のたびにここに書いた index へ接続して全 extra のパッケージ情報を取得する。
+# download.pytorch.org に接続できない環境（例: 外向き通信を制限したクラウドコンテナ）では、
+# extra を使わない場合でも `uv sync` 自体が失敗する。その環境では下の 8 行をコメントアウトする。
+# `uv sync` は extra を全部指定する（`uv sync --all-extras`）。一部だけ指定すると他の extra の
+# パッケージ（faster-whisper など）が消える。
 # タグ cu132 は 2026-11-03 に https://pytorch.org/get-started/locally/ で確認した値（CUDA 13.2、torch 2.15.0）。
 # 現在も正しいかは同じページで確認し、
 # 違う場合は index の name と url、sources の index 名の 3 か所を書き換える。
 #
-# [[tool.uv.index]]
-# name = "pytorch-cu132"
-# url = "https://download.pytorch.org/whl/cu132"
-# explicit = true
-#
-# [tool.uv.sources]
-# torch = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
-# torchaudio = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
+torchaudio = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not requires_gpu and not requires_network'"
