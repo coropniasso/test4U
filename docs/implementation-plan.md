@@ -211,6 +211,7 @@ test4U/
 | `embeddings` に `text_hash` を持たせた | ベクトル化した元テキストを NFKC 正規化した後の SHA-256（16進） | `knowledge_items.check_text` は、レビューでユーザーが文言を直す前提の列である（`CLAUDE.md` 4-6）。ハッシュが無いと、文言を直しても古いベクトルが使われ続ける。全角と半角の違いだけでは再計算しないよう NFKC 正規化を挟む |
 | `schema_version` テーブルを足した | `(version, applied_at)` | スキーマを後から変更したときに、どのバージョンが適用済みか分かるようにする |
 | `v_weekly_metrics` ビューを足した | 週・形式・抽出モデルごとの指標 | `CLAUDE.md` 6章の「毎週記録する指標」を SQL で出せるようにする |
+| `extracted_requests` に `stated_reason_unverified` と `applies_when_unverified` を足した（スキーマバージョン4、2026-11-05） | 原文照合（6-4-1）で外れたときの、モデルの元の値 | 外れた値を黙って捨てず、後から数えられるようにする。バージョン3の DB には `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` で足す（既存の行は NULL） |
 | `discord_posts` に `channel_id` と `pair_item_id` を足した（スキーマバージョン2、第2弾） | 投稿先のチャンネルID、矛盾の組のもう一方の `item_id` | 読み取りのときにどのチャンネルを見るかが要る。設定値のチャンネルIDは後から変わり得るので、投稿時の値を残す。`pair_item_id` は、既に投稿した矛盾の組を再投稿しない判定に要る（`item_id` と `pair_item_id` の両方で組を表す） |
 
 ### 4-2. テーブル一覧
@@ -219,10 +220,10 @@ test4U/
 
 | テーブル | 役割 | 設計上の判断 |
 |---|---|---|
-| `schema_version` | 適用済みのスキーマのバージョン | 現在のバージョンは2（`migrate.SCHEMA_VERSION`）。バージョン1の DB には `kijun db init` が `ALTER TABLE` で列を足す（14-9） |
+| `schema_version` | 適用済みのスキーマのバージョン | 現在のバージョンは4（`migrate.SCHEMA_VERSION`）。バージョン1の DB には `kijun db init` が `ALTER TABLE` で列を足す（14-9） |
 | `conversations` | 会議単位の管理 | `conversation_id` は束の先頭ファイルの `yyyyMMdd_HHmm_<形式>_<種類>`。`transcribed_at` は音声の削除判定（9節）が見る |
 | `utterances` | 発話単位の文字起こし | 主キーは `(conversation_id, seq)`。`seq` は会議内で0から始まる通し番号。`speaker_label` は話者分離が失敗した場合 NULL |
-| `extracted_requests` | 抽出した指摘・要求1件ごと | `request_id` は `{conversation_id}#{model_name}#{連番}`。同じ会議を2つの設定で抽出しても衝突しない。`stated_reason` と `applies_when` は語られていなければ NULL（6-4参照）。`transcription_unclear` は、文字起こしの聞き取り誤りで要求の中心が決まらなかった場合に TRUE（バージョン3で追加。`CLAUDE.md` 7章の案A） |
+| `extracted_requests` | 抽出した指摘・要求1件ごと | `request_id` は `{conversation_id}#{model_name}#{連番}`。同じ会議を2つの設定で抽出しても衝突しない。`stated_reason` と `applies_when` は、原文照合（6-4-1）を通ったものだけが入り、語られていない・照合で外れたときは NULL。外れたときの元の値は `stated_reason_unverified` / `applies_when_unverified`（バージョン4で追加）。`transcription_unclear` は、文字起こしの聞き取り誤りで要求の中心が決まらなかった場合に TRUE（バージョン3で追加。`CLAUDE.md` 7章の案A） |
 | `knowledge_items` | チェック項目本体 | `status` は `candidate` / `approved` / `rejected` / `held`。`importance` は抽出の段階では NULL。Discord への投稿の直前に LLM が判定し（14-3）、ユーザーのリアクションが上書きする |
 | `item_evidence` | 項目と根拠発言の対応 | 新規候補として作られた場合 `similarity` は NULL |
 | `review_log` | 修正履歴 | `log_id` はシーケンス `review_log_seq` から採番。`action` の値は `db/repo.py` の定数1か所で定義し、定義外の値は書けない（14-9）。`item_id` が NOT NULL なので、項目に属さない出来事（話者の対応付け、束ね結果）は入らない |
@@ -365,6 +366,8 @@ faster-whisper の `segments` は generator なので、使う前に list にす
 
 既定値30秒は、通常の1文〜数文の長さに収まり、かつ位置の精度として許容できる値として置いた初期値である。運用して調整する。
 
+**`min_utterance_sec` の既定を 0.4 から 2.0 にした（2026-11-05、ユーザー承認）。** `word_timestamps=True`（`hallucination_silence_threshold` > 0 で自動的に有効）だと、Whisper の各区間が最後の単語で終わるので、1人の話の中の間が 0.4〜2.6 秒の間隔として現れ、手順2で結合されずに細かく割れた。2本の録音での実測は、約2分の独話が 23 発話（0.4）から 7 発話（2.0）、36分の通話が 255 発話から 136 発話である。2.0 は設計者の実測値で、広い測定ではない。
+
 この処理は純粋な計算なのでクラウド環境でテストできる。
 
 ### 6-3. 文字起こしの JSON と復元（`transcribe/restore.py`）
@@ -382,9 +385,22 @@ JSON には、`conversations` の行を再構成するのに必要な項目を�
 要件のうち、プロンプトの中で繰り返し書いて守らせているのは次の2つである。
 
 - **`stated_reason` と `applies_when` は、発言中で実際に語られた内容だけを書く。推測で補ってはならない。語られていなければ `null`。** プロンプトにはこの理由も書く。この仕組みの目的はユーザー自身が理由と適用条件を言語化することであり、LLM が推測で埋めるとその機会が失われる（`CLAUDE.md` 1章）。
+- **（2026-11-05 追加）`stated_reason` と `applies_when` は、入力の本文から一字一句そのまま写した連続した一部分に限る。** 言い換え・要約・語尾の追加を禁じ、聞き取り誤りも直さずに写させる。本文に無い値はプログラムが捨てる（6-4-1）と、プロンプトに書いて伝える。例は会議と無関係な料理の話（「玉ねぎは先に炒めて。甘みが出るから」）にし、言い換えが誤りである悪い例と、理由が語られていない発言に例の文を写す悪い例を入れた。以前の例（「読む人は忙しいから」）は、qwen3:14b が文字起こしに無いのにそのまま写した（`CLAUDE.md` 7章）。
 - **`pass_criterion` は Yes/No で判定できる形にする。** 例として `CLAUDE.md` の「冒頭2行以内に、読み手にしてほしい行動が書かれているか」を入れる。作れない場合は `null`。
 
 `build_messages(chunk, cfg) -> tuple[str, str]`（system と user）という1つの関数にまとめてある。背面を増やしたときに文面が分かれないようにするためで、文面が違えば2回の抽出の比較（8節）が成立しない。
+
+### 6-4-1. 原文照合（`extract/verbatim.py`）
+
+`run_extraction` が、背面から受け取ったチャンクごとの結果に対し、保存の前に `stated_reason` と `applies_when` を原文と照合する。
+
+- `normalize(text)`: Unicode NFKC にし、カテゴリが P（句読点）・Z（区切り）・S（記号）・C（制御）の文字と空白を除き、小文字にする。
+- `is_verbatim(value, source)`: `normalize(value)` が空でなく、`normalize(source)` の部分文字列なら真。
+- 原文 `source` は、モデルに渡したチャンクの**全発話**の本文を、区切りなしでつないだもの。モデルが返す `seq_from`〜`seq_to` は正確でないので、範囲には絞らない。
+- `check_item` は、外れた値を `None` にし、元の値を `CheckedRequest.stated_reason_unverified` / `applies_when_unverified` に入れる。`CheckedRequest` は `ExtractedRequest` を継承した別のクラスで、モデルに渡す JSON スキーマ（`ExtractionResult`）には含まれない。含めると、モデルがこの2項目を自分で埋めようとする。
+- 重複区間の除去（`merge_chunk_results`）を通った後の項目から、外した値の一覧（`rejections`）を作る。件数と値は `kijun extract` の標準出力と `extract_logs` の JSON（`verbatim_rejected`）に出す。
+
+言い換えられた本物の理由も外れる。それは承知の上での取捨で、外れた値は `*_unverified` 列に残るので、後から数えられる（`CLAUDE.md` 7章の未検証事項）。`scripts/measure_extraction.py`（8-2）も同じ関数を通し、外した数を結果の表に出す。
 
 ### 6-5. チャンク分割（`extract/chunk.py`）
 
@@ -497,7 +513,7 @@ class Extractor(Protocol):
 
 ### 6-8. 抽出結果の保存
 
-`extracted_requests` に書く。`request_id` は `{conversation_id}#{model_name}#{連番}`。`direction` はこの時点では NULL（4-1の理由）。`source_type` は `live_conversation`。
+`extracted_requests` に書く。`request_id` は `{conversation_id}#{model_name}#{連番}`。`direction` はこの時点では NULL（4-1の理由）。`source_type` は `live_conversation`。`stated_reason` / `applies_when` は原文照合（6-4-1）を通った値で、外れたときは NULL にし、元の値を `stated_reason_unverified` / `applies_when_unverified` に入れる。
 
 `max_input_tokens`（Ollama では `num_ctx - num_predict`）が `None` でないとき、チャンクの推定トークン数がそれを超えていたら警告を出す。処理は止めない（概算は外れ得るので、応答の `prompt_eval_count` で最終的に判定する。6-6）。推定には `tokens.py` の係数を使う。`request_id` のモデル名は、使えない文字を `-` に置き換える（6-6）。
 
@@ -667,7 +683,7 @@ uv run python scripts/measure_extraction.py --conversation <ID> \
 | `settings.formats` | `["f2f", "call"]` | ここに無い形式は解析を失敗させる（5-1） |
 | `settings.kinds` | `["teirei", "sagyou", "zatsudan"]` | ここに無い種類は警告を出して受け入れる（5-1） |
 | `bundle.require_same_setting` | `true` | `CLAUDE.md` 4-7 への追加条件。無効にできる（5-3） |
-| `transcribe.min_utterance_sec` | `0.4` | 同一話者の連続区間を結合する間隔。話者が不明な区間どうしは結合しない（6-2） |
+| `transcribe.min_utterance_sec` | `2.0` | 同一話者の連続区間を結合する間隔。話者が不明な区間どうしは結合しない（6-2）。2026-11-05 に 0.4 から変更（単語時刻で発話が細かく割れるため。ユーザー承認） |
 | `transcribe.max_utterance_sec` | `30.0` | 結合した発話の長さの上限（秒）。`0` は上限なし。1つの区間そのものが上限より長い場合は分割しない。根拠は 6-2（実機で125秒の読み上げが101.7秒の発話を含む2件になった） |
 | `diarize.num_speakers` | `0` | TOML に null が無いため、`0` を「指定なし」として扱う |
 | `extract.provider` | `"ollama"` | 値は1つだが `Literal` のままにしてある。将来背面を足すときの型の受け皿 |
@@ -848,6 +864,14 @@ uv run kijun batch install-task [--time HH:MM] [--out <パス>]  # タスクス�
 ---
 
 ## 13. 変更の履歴
+
+### 2026-11-05：原文照合と `min_utterance_sec`
+
+**背景。** qwen3:14b（`think` あり）の測定で、`stated_reason` に文字起こしに無い値（プロンプトの例の写し）や言い換え、推測が出た。同じ入力でも実行ごとの振れが大きかった（`CLAUDE.md` 7章）。
+
+**ユーザーが決めたこと（`CLAUDE.md` 10章にも記録した）。** (1) `stated_reason` / `applies_when` は文字起こしの本文からそのまま写した値に限り、プログラムで照合する。外れた値は NULL にして元の値を別の列に残す。(2) `transcribe.min_utterance_sec` の既定を 2.0 にする。(3) Windows の torch の CUDA 版 index を `pyproject.toml` で既定で有効にする。
+
+**実装したこと。** `extract/verbatim.py`（6-4-1）、スキーマバージョン4（`extracted_requests` に 2 列）、プロンプトの書き直し（6-4）、`kijun extract` の出力と `extract_logs` への外した値の記録、`scripts/measure_extraction.py` への照合の適用（8-2）、`min_utterance_sec` の既定（6-2）。
 
 ### 2026-11-05：抽出の背面を Strata から Ollama に移した
 

@@ -116,6 +116,17 @@ iPhone で録音した Discord の通話（36分）で、faster-whisper の Sile
 
 VAD を切ると、Whisper が無音部分に文を作る（「ご視聴ありがとうございました」「早送り」、鎧・猫・スイカについての約12区間など）。`hallucination_silence_threshold=2.0` で大半が消え、録音末尾の無音にある3区間だけが残った。その3区間は、話者区間との重なりの割合が 0.00、`avg_logprob` が -0.5 未満だった。そこで「重なりの割合 < 0.3 かつ `avg_logprob` < -0.5 の区間を除く」規則を足した（重なりの割合は話者区間の和集合で数える）。この規則は、残った3区間と意味の無い断片 2 件（「心」「はい」）だけを除き、pyannote が拾えなかったが Whisper が確信していた実発話は残した。`no_speech_prob` は実発話でも 0.5〜0.8 で、使えなかった。**除いた区間は黙って消さず、文字起こしの JSON の `dropped_segments` に残し、`kijun transcribe` が件数と内容を表示する。** 設定は `transcribe.vad_filter`・`condition_on_previous_text`・`hallucination_silence_threshold`・`drop_max_speaker_overlap`・`drop_max_avg_logprob`。
 
+**単語時刻で発話が細かく割れる問題と `min_utterance_sec` の変更（2026-11-05）**
+
+`word_timestamps=True`（`hallucination_silence_threshold` > 0 で自動的に有効になる。上の VAD の節）にすると、Whisper の各区間が最後の単語で終わる。そのため、1人の話の中の間（ま）が 0.4〜2.6 秒の区間の間隔として現れ、`transcribe.min_utterance_sec`（0.4 秒未満の間隔なら結合する）では結合されずに細かく割れた。2本の録音で、`min_utterance_sec` を変えて数えた。
+
+| 録音 | `min_utterance_sec` = 0.4 | `min_utterance_sec` = 2.0 |
+|---|---|---|
+| 対面（f2f）の約2分の独話 | 23 発話 | 7 発話 |
+| 通話（call）36分 | 255 発話 | 136 発話 |
+
+発話が細かいと、`extract.chunk_minutes` で区切った 1 チャンクの中の行数が増え、抽出の入力が長くなり、1つの指摘が複数の発話にまたがる。そこで既定を 2.0 に変えた（ユーザーが 2026-11-05 に承認）。2.0 という値は 2 本の録音での設計者の実測であり、広い測定ではない。2.0 秒を超える間は別の発話として残る。運用して調整する。
+
 ### 4-4. 指摘・要求の抽出（LLM）
 
 **決定（2026-11-05 更新）**
@@ -152,6 +163,7 @@ VAD を切ると、Whisper が無音部分に文を作る（「ご視聴あり�
 - 文字起こしから、ある人物が別の人物に対して行った要求・指摘・指示を1件ずつ抽出する。
 - 各件について、`extracted_requests` の各カラム（5章）に対応する値を出力する。
 - `stated_reason` と `applies_when` は、発言中で語られた内容だけを書く。推測で補わない。語られていなければ null。
+- **（決定。2026-11-05）`stated_reason` と `applies_when` は、文字起こしの本文から一字一句そのまま写した、連続した一部分に限る。** 言い換え、要約、語尾の追加（「から」など）は認めない。文字起こしの聞き取り誤りは、直さずにそのまま写す。プログラム（`src/kijun/extract/verbatim.py`）が、モデルに渡したチャンクの全発話の本文と照合する。照合は、Unicode NFKC で正規化し、句読点・記号・空白・制御文字を除き、英字を小文字にしたうえで、部分文字列として含まれるかを見る。**本文に無い値は、`stated_reason` / `applies_when` の列に NULL を入れ、モデルが返した元の値を `extracted_requests.stated_reason_unverified` / `applies_when_unverified`（5章）に残す。黙って捨てない。** 言い換えて語られた本物の理由も外れる。それは承知の上で、推測の混入を防ぐことを優先した（7章の測定）。外した件数と値は、`kijun extract` の出力と `extract_logs` の JSON に出る。
 - `pass_criterion` は Yes/No で判定できる形の基準にする。例：「冒頭2行以内に、読み手にしてほしい行動が書かれているか」。作れない場合は null。
 - 出力は JSON 配列のみとし、前置きの文章を付けない。受け取る形は `{"items": [...]}` にして Python 側で配列に展開する（トップレベルが配列だとモデルがスキーマに従わないことがあるため）。プロンプトが「配列のみ」と指示している結果として素の配列が返ることもあるので、修復がそれを `items` に包む。
 
@@ -245,7 +257,7 @@ PC がスリープしていると実行されない。タスクスケジュー�
 |---|---|---|
 | `conversations` | conversation_id, recorded_at, setting（形式・種類）, source_files, transcript_path | 会議単位の管理 |
 | `utterances` | conversation_id, seq, speaker_label, start_sec, end_sec, text | 発話単位の文字起こし |
-| `extracted_requests` | request_id, conversation_id, seq_from, seq_to, direction（自分→相手／相手→自分）, counterpart_role, artifact_type, quote, request_summary, stated_reason, applies_when, reusable, pass_criterion, ★transcription_unclear（2026-11-04 追加。7章の案A）, ★source_type（実会話／口述振り返り）, model_name, extracted_at | 抽出した指摘・要求1件ごと |
+| `extracted_requests` | request_id, conversation_id, seq_from, seq_to, direction（自分→相手／相手→自分）, counterpart_role, artifact_type, quote, request_summary, stated_reason, applies_when（原文と照合して一致したものだけ。4-4）, reusable, pass_criterion, ★transcription_unclear（2026-11-04 追加。7章の案A）, ★source_type（実会話／口述振り返り）, model_name, extracted_at, ★stated_reason_unverified, ★applies_when_unverified（2026-11-05 追加。原文との照合で外れたときのモデルの元の値。4-4） | 抽出した指摘・要求1件ごと |
 | `knowledge_items` | item_id, artifact_type, check_text, pass_criterion, reason, applies_when, not_applies_when, importance（1〜3）, status（候補／承認／却下／保留）, version, updated_at | チェック項目本体 |
 | `item_evidence` | item_id, request_id, similarity | 項目と根拠発言の対応 |
 | `review_log` | item_id, action, before, after, reviewed_at | 修正履歴 |
@@ -289,6 +301,18 @@ PC がスリープしていると実行されない。タスクスケジュー�
 - **VAD なし＋この設定が、対面の録音でも良いかは再測定していない。** 上の測定は通話の録音（iPhone で Discord の音声をスピーカー経由で録音）だけである。対面の録音は、VAD を入れた場合と入れない場合を同じ音声で比べる。
 - **幻聴は非決定的である。** 同じ音声を2回処理して、同じ位置に別の作り話が出た。1回の結果で「幻聴が消えた」とは言えない。
 
+- **qwen3:14b（`think` あり）の抽出で、文字起こしの修正（4-3 の VAD の節）後も `stated_reason` / `applies_when` に捏造が出た（2026-11-05 測定）。** 同じ設定で、`min_utterance_sec` を 0.4 と 2.0 にして 2 本の録音を抽出した。
+
+  | 録音 | `min_utterance_sec` | 抽出件数 | `stated_reason` が非 null | `applies_when` が非 null |
+  |---|---|---|---|---|
+  | f2f（20261103_1930_f2f_teirei） | 0.4 | 5 | 0 | — |
+  | f2f | 2.0 | 5 | 3 | — |
+  | call（36分） | 0.4 | 18 | 4 | 3 |
+  | call | 2.0 | 13 | 0 | 0 |
+
+  読み取れることは次のとおり。(1) f2f の 2.0 で出た `stated_reason` 3 件のうち 1 件の「読む人は忙しいから」は、文字起こしのどこにも無かった。`src/kijun/extract/prompt.py` の few-shot の例（発言「結論を先に書いて。読む人は忙しいから」）の写しだった。(2) 他の値は、実際の発言の言い換えだった（文字起こし「スマホとかで読む人もいると思うんで」に対し、モデルは「スマホで読む人もいるから」）。(3) call の 0.4 の `applies_when` 3 件は、すべて適用条件ではない語句を置き違えたものか、推測だった。(4) **同一の文字起こしでも、実行ごとの振れが大きい**（`stated_reason` が非 null の件数が 0 と 3）。n が小さく、設定の優劣を数字で決められる段階ではない。
+
+  この結果を受けて、ユーザーが 4-4 の原文照合を決めた。**未検証:** 照合が、言い換えられた本物の理由を何件落とすか。照合を入れた後の抽出で、`stated_reason_unverified` / `applies_when_unverified` を見て、落とした値のうち本物の理由だった割合を数える必要がある。
 - 通話を PC スピーカー出力で録音した場合、Discord や PC のエコーキャンセルで相手の声が小さくならないか（30分の実通話テストで確認）
 - ショートカットの「オーディオを録音」が、画面ロック中に2時間録音できるか（案Aを使う場合のみ）
 - iOS 18.1以降の電話アプリの通話録音機能が日本で使えるか、メモアプリからファイルとして書き出せるか
@@ -393,6 +417,7 @@ PC がスリープしていると実行されない。タスクスケジュー�
 | 14 | Strata のデスクトップアプリが常駐していれば終了し、必要ならアンインストールする（ユーザーの判断） | ユーザー | 未着手 |
 | 15 | `config.toml` の `[extract.strata]`・`provider = "strata"`・`[batch] strata_ready_timeout_sec` を削除し、`[extract.ollama]` を書く（古い節が残ると設定の読み込みが失敗する） | ユーザー | 未着手 |
 | 16 | 通話の音声を VAD が捨てる問題の対処（`vad_filter` の既定を false、`condition_on_previous_text`・`hallucination_silence_threshold`、幻聴の除去規則、JSON の `dropped_segments`、`kijun transcribe` の表示） | Claude Code | **実装済み（2026-11-05。自動テストで確認。この変更後の実機での再文字起こしは未確認）** |
+| 17 | `min_utterance_sec` の既定を 2.0 にする。`stated_reason` / `applies_when` の原文照合（`extract/verbatim.py`、スキーマ v4 の `*_unverified` 列、プロンプトの書き直し、`measure_extraction.py` への反映） | Claude Code | **実装済み（2026-11-05。自動テストで確認。この変更後の実機の Ollama での再抽出は未確認。既存の DB（v3）の移行も未実行）** |
 
 作業が進んだら、この表の「状況」と、上の各章の「推奨・未確定」を更新すること。
 
@@ -401,6 +426,23 @@ PC がスリープしていると実行されない。タスクスケジュー�
 ---
 
 ## 10. 決定の記録
+
+### 2026-11-05（追記。ユーザーが決定）
+
+| 対象 | 決定内容 | 根拠 |
+|---|---|---|
+| `transcribe.min_utterance_sec` | 既定を 0.4 から **2.0** にする | `word_timestamps=True` で 1人の話の中の間が発話の区切りになり、2分の独話が 23 発話、36分の通話が 255 発話に割れた。2.0 では 7 と 136（4-3） |
+| `stated_reason` / `applies_when` | 文字起こしの本文から一字一句そのまま写した値だけを認め、プログラムで照合する。本文に無い値は列に NULL を入れ、モデルの元の値を `*_unverified` 列に残す。言い換えた本物の理由も外れる（承知の上） | qwen3:14b の測定で、プロンプトの例の写し（「読む人は忙しいから」）や言い換え、推測が出た（7章）。同一の入力でも実行ごとに振れた |
+| `pyproject.toml` の torch の index | Windows の torch を CUDA 版（cu132）にする index を、既定で有効にする（コミット 664ff79）。コメントアウトしていた 8 行が有効になった | `uv run` / `uv sync` が CPU 版の torch を入れ直し、GPU を使えなくなるため。同期は `uv sync --all-extras` で行う。外向き通信を制限した環境では `uv sync` が失敗するので、その環境では 8 行をコメントアウトする |
+
+次は、この決定に伴って設計者（Claude）が決めたもので、**ユーザーが決めたものではない**。
+
+| 対象 | 判断の内容 | 理由 | 見直しの手段 |
+|---|---|---|---|
+| 照合の原文 | モデルに渡したチャンクの全発話の本文をつなげたもの。`seq_from`〜`seq_to` の範囲には絞らない | モデルが返す番号は不正確なため | 照合で外れた値のうち、別のチャンクにあった本物の理由がないか確認する |
+| 照合の正規化 | NFKC、句読点・記号・空白・制御文字の除去、小文字化 | 文字起こしの句読点の揺れと、発話をつなぐ境目で外れないようにするため | `*_unverified` の値を見て、正規化で救えるものがないか確認する |
+| プロンプトの例 | 料理の話（「玉ねぎは先に炒めて。甘みが出るから」）に差し替え、言い換えが誤りである悪い例を足した | 会議の内容と無関係な分野にして、例の写しを見分けやすくするため | `*_unverified` に「甘みが出るから」が出ないか確認する |
+| 既存の DB の扱い | バージョン3の行は `*_unverified` が NULL のまま。再抽出はしない | 照合の前に保存した行で、「照合で外れた」とは言えないため | — |
 
 ### 2026-11-05（ユーザーが決定）
 

@@ -42,18 +42,18 @@ extra が足りない状態でサブコマンドを実行すると、どの extr
 ### torch を CUDA 版にする（Windows）
 
 Windows で `uv sync --extra transcribe` をそのまま実行すると CPU 版の torch が入り、`torch.cuda.is_available()` が False になる。
-CUDA 版を入れるには、`pyproject.toml` の末尾近くにある、コメントアウトした `[[tool.uv.index]]` と `[tool.uv.sources]` を有効にする。
-有効にしていない理由は、uv が `uv sync` のたびに、そこに書いた index（download.pytorch.org）へ接続して全 extra の情報を取得するため、
-その host に接続できない環境（外向き通信を制限したクラウド環境など）では、extra を使わなくても `uv sync` が失敗するからである。
+`pyproject.toml` の `[[tool.uv.index]]` と `[tool.uv.sources]` が、Windows の torch を CUDA 版（`cu132`）にする設定で、2026-11-05 から既定で有効になっている。
+ただし uv は `uv sync` のたびに、そこに書いた index（download.pytorch.org）へ接続して全 extra の情報を取得するため、
+その host に接続できない環境（外向き通信を制限したクラウド環境など）では、extra を使わなくても `uv sync` が失敗する。その環境では、`pyproject.toml` の該当する 8 行をコメントアウトする。
+同期は `uv sync --all-extras` で行う（extra を一部だけ指定すると、他の extra のパッケージが消える）。
 
 1. https://pytorch.org/get-started/locally/ を開く。
 2. Stable、Windows、Pip、Python、CUDA を選ぶ。表示される `pip install ... --index-url https://download.pytorch.org/whl/cuXXX` の `cuXXX` が、現在のタグである。
    2026-11-03 に確認した値は `cu132`（CUDA 13.2、torch 2.15.0、Windows）。CUDA 13.4 を選ぶと `cu134` になる。
    RTX 4070 Ti はどちらでも動くが、新しいほうはより新しいドライバを要求するので、迷ったら `cu132` を使う。画面に出たタグを優先する。
-3. `pyproject.toml` のコメントアウトした部分の `#` を外す。
-4. 4 か所の `cu132` が、2 で確認したタグと違っていれば書き換える（`[[tool.uv.index]]` の `name` と `url`、`[tool.uv.sources]` の `index` 名の 2 行）。
-5. `uv sync --extra transcribe` を実行する。
-6. `uv run python -c "import torch; print(torch.cuda.is_available())"` が `True` になることを確認する。
+3. `pyproject.toml` の 4 か所の `cu132` が、2 で確認したタグと違っていれば書き換える（`[[tool.uv.index]]` の `name` と `url`、`[tool.uv.sources]` の `index` 名の 2 行）。
+4. `uv sync --all-extras` を実行する。
+5. `uv run python -c "import torch; print(torch.cuda.is_available())"` が `True` になることを確認する。
 
 ### CUDA 12 の DLL を入れる（Windows）
 
@@ -151,7 +151,7 @@ Discord でのレビュー（`discord read` / `discord post`）には、Discord 
 | 7 | `uv run kijun doctor` | 検査1〜5の結果と、推奨値が出る。**検査3が「良」であること。** 接続できなければ `config.toml` の `base_url` を直して再実行する |
 | 8 | `doctor` が出した推奨値を `config.toml` に書く | `enforces_json_schema` / `timeout_sec` / `tokens_per_character`（検査5が失敗したときは `chunk_minutes` も） |
 | 9 | `doctor` の結果を `CLAUDE.md` 7章に書き込む | 「Ollama のモデルが GPU に収まるか、速度、品質」への回答になる |
-| 10 | `pyproject.toml` の torch のインデックスのコメントを外し、タグを確認して `uv sync --extra transcribe` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
+| 10 | `pyproject.toml` の torch のインデックスのタグ（既定で有効。`cu132`）を確認して `uv sync --all-extras` | `uv run python -c "import torch; print(torch.cuda.is_available())"` が True |
 | 11 | Hugging Face で pyannote の3つのモデルページの利用条件に同意し、`HF_TOKEN` を設定 | 次の手順が通る |
 | 12 | 5分程度の音声1本で `uv run kijun transcribe --audio <ファイル>` | 日本語の文字起こしと `SPEAKER_00` 等のラベルが出る。処理時間と VRAM 使用量を記録する |
 | 13 | 音声を inbox に置いて `uv run kijun ingest` → `uv run kijun transcribe --conversation <ID>` | `utterances` に発話が入る |
