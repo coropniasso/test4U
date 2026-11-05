@@ -118,9 +118,11 @@ num_predict = 8192
 # Qwen の推論モード。TOML には null が無いので、「書かない」ことで未指定（think を送らず、
 # モデルの既定に任せる）を表す。true / false を書くと、その値を送る。測定の対象:
 # scripts/variants.example.toml の *-think / *-nothink。
-# 2026-11-05 にユーザーが qwen3.5:9b・think = false に決めた（CLAUDE.md 10章）。qwen3.5:9b は think を
-# 書かないと推論し、num_predict 8192 を推論で使い切って JSON が出なかった。
-think = false
+# **qwen3.5:9b では下の行のコメントを外して think = false を書く。** 2026-11-05 にユーザーが
+# qwen3.5:9b・think = false に決めた（CLAUDE.md 10章）。qwen3.5:9b は think を書かないと推論し、
+# num_predict 8192 を推論で使い切って JSON が出なかった。コードの既定を false にしないのは、think に
+# 対応しないモデル（HTTP 400 になる）で、「書かない」ことで think を送らない選択を残すため。
+# think = false
 # 応答のたびにモデルを VRAM に置いておく時間。"0" なら応答のたびに下ろす。
 # "0" にする理由は、faster-whisper・pyannote と LLM を同時に VRAM に載せないため
 # （docs/implementation-plan.md 原則2-2）。"5m" のような値にすると、文字起こしの手順の時点で
