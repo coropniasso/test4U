@@ -438,7 +438,7 @@ PC がスリープしていると実行されない。タスクスケジュー�
 
 | 11 | 抽出の背面を Strata から Ollama に移す（`extract.ollama`、`ollama_impl.py`、`doctor` の書き直し、バッチのゲームによる延期と開始時刻、`hotwords`、Strata のコードの削除） | Claude Code | **実装済み（2026-11-05。自動テストで確認。実機の Ollama では未確認）** |
 | 12 | Ollama for Windows のインストール（ollama.com から）、`ollama pull qwen3.5:9b` と `ollama pull qwen3:14b`（モデル名が存在しなければ、Ollama のライブラリで近い名前を探して決める）、`uv run kijun doctor`（検査3が「良」であること）、`scripts/measure_extraction.py` による測定とモデルの選択 | ユーザー | 未着手 |
-| 13 | ゲームの実行ファイル名の確認（F1 25、League of Legends を起動した状態で、タスクマネージャーの「詳細」タブを見て、`batch.defer_if_running` に書く） | ユーザー | 未着手 |
+| 13 | ゲームの実行ファイル名の確認（F1 25、League of Legends を起動した状態で、タスクマネージャーの「詳細」タブを見て、`batch.defer_if_running` に書く） | ユーザー | **F1 25 は完了（2026-11-05。起動中に `tasklist` で `F1_25.exe` を確認し、`config.toml` に記入。バッチの検出処理が「動いている」と判定することも確認）。League of Legends はユーザーの判断で当面入れない** |
 | 14 | Strata のデスクトップアプリが常駐していれば終了し、必要ならアンインストールする（ユーザーの判断） | ユーザー | 未着手 |
 | 15 | `config.toml` の `[extract.strata]`・`provider = "strata"`・`[batch] strata_ready_timeout_sec` を削除し、`[extract.ollama]` を書く（古い節が残ると設定の読み込みが失敗する） | ユーザー | 未着手 |
 | 16 | 通話の音声を VAD が捨てる問題の対処（`vad_filter` の既定を false、`condition_on_previous_text`・`hallucination_silence_threshold`、幻聴の除去規則、JSON の `dropped_segments`、`kijun transcribe` の表示） | Claude Code | **実装済み（2026-11-05。自動テストで確認。この変更後の実機での再文字起こしは未確認）** |
