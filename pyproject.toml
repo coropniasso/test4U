@@ -62,5 +62,5 @@ addopts = "-m 'not requires_gpu and not requires_network'"
 testpaths = ["tests"]
 markers = [
     "requires_gpu: GPU と大きなモデルファイルが必要。クラウド環境では実行しない",
-    "requires_network: 外部サービス（Strata の推論サーバー、Hugging Face）への通信が必要",
+    "requires_network: 外部サービス（Ollama の推論サーバー、Hugging Face）への通信が必要",
 ]
