@@ -55,119 +55,63 @@ device = "cuda"
 num_speakers = 0
 
 [extract]
-# Strata のみ。CLAUDE.md 4-4 の Qwen 対 Claude の比較は、2026-11-03 の決定で取りやめた。
-provider = "strata"
-# 既定は25分のまま。kijun doctor で6万トークンの入力が通ることを実測できたら
-# chunk_minutes = 180 / overlap_minutes = 0 に変え、会議全体を1リクエストで渡す。
-chunk_minutes = 25
-overlap_minutes = 2
-# 入力トークン数の概算の係数。既定値は実測1点からの推測で、kijun doctor で置き換えるべきもの。
-# 従来は 1文字 1.5 トークンとしていたが、実機で概算 4,711 に対し実際は 1,646 トークンで約2.9倍の過大評価だった
-# （Qwen3.8-Flash-Next は n-gram 埋め込みテーブルを持ち、日本語のトークン効率が高いと考えられる）。
-# tokens_per_character: 実測 1,646 ÷ 約3,141文字 ≒ 0.52 に少し余裕を持たせた値。
+# 抽出の背面は Ollama のみ（2026-11-05 のユーザーの決定。それ以前の Strata は削除した）。
+provider = "ollama"
+# 1リクエストに入れる会議の長さ（分）。推奨・未確定（2026-11-05 設計者の初期値）。
+# Ollama は ollama.num_ctx の中に入力と出力を入れる。Strata のときの 25 分より小さくした。
+# 目安: 12 分 × tokens_per_meeting_minute 180 ≒ 2,160 トークン + システムプロンプト + num_predict 8192
+# が num_ctx 16384 に収まる。収まらない設定は読み込みで拒否される（入力が黙って切り捨てられるのを防ぐため）。
+# kijun doctor の検査4で、この長さの入力の所要時間を測る。
+chunk_minutes = 12
+overlap_minutes = 1
+# 入力トークン数の概算の係数。既定値は Strata（Qwen3.8-Flash-Next）での実測1点からの推測で、
+# Ollama で使うモデルのトークナイザには当てはまらない。kijun doctor の検査4・5が実測値を出すので置き換える。
+# 従来は 1文字 1.5 トークンとしていたが、Strata での実測は概算 4,711 に対し実際は 1,646 トークンで約2.9倍の過大評価だった。
+# tokens_per_character: Strata での実測 1,646 ÷ 約3,141文字 ≒ 0.52 に少し余裕を持たせた値。
 # tokens_per_meeting_minute: 従来の 500 を 0.55/1.5 の比で換算して切り下げた値（500 × 0.55/1.5 ≒ 183）。
 tokens_per_character = 0.55
 tokens_per_meeting_minute = 180
 # extracted_requests.model_name に付ける印。設定を変えた2回の抽出を同じ会議の中に並べて残すために使う。
 # これが空だと、2回目の kijun extract が1回目の行を削除するので kijun compare が比較できない。
-# 例: reasoning_effort = "medium" で流すときに run_label = "medium" を入れ、
-#     もう一度 reasoning_effort = "xhigh" / run_label = "xhigh" で流してから
-#     kijun compare --conversation <ID> --model "<モデル>+medium" --model "<モデル>+xhigh" を実行する。
+# 例: think = false で流すときに run_label = "nothink" を入れ、
+#     もう一度 think = true / run_label = "think" で流してから
+#     kijun compare --conversation <ID> --model "<モデル>+nothink" --model "<モデル>+think" を実行する。
 # request_id にも入るので、英数字と . _ - だけ使える。
 run_label = ""
 
-[extract.strata]
-base_url = "http://localhost:8080"
-# OpenAI 互換のパス。Strata の版で異なる可能性があるため設定値にしてある。
-# kijun doctor で応答するパスを確認してから書き換える。
-chat_path = "/v1/chat/completions"
-model = "qwen3.8-flash-next"
-# 125B の MoE をオフロードして動かすため、応答に時間がかかる。
-# kijun doctor の実測値を見て詰める。
-timeout_sec = 3600
-# サーバーが JSON スキーマへの適合を保証するか。既定は false（保証しないという安全側の仮定）。
-# kijun doctor の手順3が (b) と出たら true にする。
-enforces_json_schema = false
-# 1リクエストの入力トークンの上限。0 は未確認を意味し、chunk_minutes の検査をしない。
-# kijun doctor の手順5の実測値を書く。
-max_input_tokens = 0
-# 1リクエストの出力トークン数の上限（推論トークンを含む）。0 は上限なし（リクエストに max_tokens を入れない）。
-# 実測（2026-11-03、2分5秒の音声1チャンク）:
-# - 出力 13,050 トークン、実時間 950 秒（うち生成が 932 秒）。finish_reason は stop。
-# - 本文の JSON は約 1,000 トークンしかない。残りの約 12,000 トークンは推論（reasoning_content）。
-#   推論は completion_tokens に合算され、reasoning_tokens という項目は返らない。
-#   だから「本文に必要な長さ」で max_tokens を決めてはいけない。
-# - 別の実測（doctor 検査4）では入力 1,646 トークンに対し出力 6,952 トークン。
-# max_tokens は2つのことを同時に決める。1チャンクの所要時間の上限と、推論に使える予算である。
-# Strata は max_tokens から答え用の分を取り置き、残りを推論の予算にする（2026-11-04 実機で確認）。
-#   取り置き = min(max(512, max_tokens // 4), max_tokens // 2)
-#   推論の予算 = max_tokens - 取り置き（≒ max_tokens の4分の3）
-# 予算に達すると推論は切られるのではなく、閉じられて答えが書かれる。壊れないが品質は落ちる。
-# 達したかどうかは API の応答には出ない。サーバーの標準出力の [strata] thinking: の行で見る。
-#
-# 20000 は既定の reasoning_effort（medium、推論 2,641）には十分である。
-# **ただし xhigh には足りない。** xhigh はこの入力に推論 21,201 トークンを要したが、
-# 20000 の予算は 15,000 なので閉じられる。上の表の3行目がその状態で、stated_reason と
-# pass_criterion が3つの設定の中で最も少なかった。reasoning_effort と一緒に決めること。
-#   - medium にする場合: 20000 で足りる（実測の推論 2,641）。1チャンク最悪 20000÷14.0 ≒ 1,429秒
-#   - xhigh のまま品質を取る場合: 32000 以上（予算 24,000）。1チャンク最悪 ≒ 2,286秒。
-#     2時間の会議（約6チャンク）で約3.8時間。23:30 開始なら 03:20 頃
-#
-# max_tokens を送らない（0 にする）と、推論の予算は文脈長から逆算されて 151,851 になる。
-# 実機では 2,604 秒の時点で 48,764 トークン推論してまだ終わらず、予算いっぱいで 8,077 秒
-# （2.24時間）の見込みだった。2分5秒の音声の1チャンクでこれである。抽出が遅い原因はこれだった。
-# 1024 未満にしてはいけない。取り置きの逆算が働かず、推論が本当に切られて JSON が出ない。
-# 設定の読み込みで拒否される。
-# 以前ここに書いていた「実測 13,050 に余裕を持たせた値」という根拠は取り消す。13,050 は
-# max_tokens を送らずに測った1点で、同じ入力でも 48,764 以上まで振れていた。
-max_tokens = 20000
-# 推論に使ってよいトークン数の上限。0 なら送らず、max_tokens からの逆算に任せる。
-# **明示しても、max_tokens からの取り置きで切り下げられる**（2026-11-04 実機で確認）。
-#   実効の予算 = min(reasoning_budget_tokens, max_tokens - 取り置き)
-# 例: max_tokens = 48000・reasoning_budget_tokens = 40000 なら、取り置き 12,000 で予算は
-# 36,000 に切り下がる。ログに「thinking capped at 36000 of max_tokens 48000 ...」と出る。
-# したがって、推論の予算を上げたいときは max_tokens も一緒に上げる必要がある。
-# 抽出の所要時間はほぼ推論の長さで決まる（xhigh の実測では出力 22,408 のうち 21,201 が推論）。
-reasoning_budget_tokens = 0
-# 推論の量。有効な値は none / low / medium / high / xhigh（2026-11-04 実機でソースを確認）。
-# - 不正な値への 400 のメッセージは「use none, low, medium or high」と列挙するが、検証を行う
-#   EFFORT 表には "xhigh" がある。メッセージの文字列だけが古い。
-# - high と xhigh は同一（どちらも内部の "xhigh" に写る）。
-# - 送らないことは xhigh を送ることと同じ（chat_template.jinja の既定が xhigh）。
-# **既定は "medium"（2026-11-04 ユーザーが決定）。** 下の実測を見て、所要時間を取る判断をした。
-# 明示して送るのは、送らないとテンプレートの既定（xhigh）になり、挙動が設定から読めなくなるため。
-#
-# 実測（2026-11-04、2分5秒の音声1チャンク。プロンプトは同一で、この値だけを変えた）:
-#
-# | 設定 | 推論トークン | 出力トークン | 所要 | stated_reason | applies_when | pass_criterion |
-# |---|---|---|---|---|---|---|
-# | xhigh（予算36,000） | 21,201 | 22,408 | 409秒 | 4/6 | 2/6 | 4/6 |
-# | medium（予算15,000） | 2,641 | 3,622 | 70秒 | 4/6 | 1/6 | 4/6 |
-# | xhigh（予算15,000＝下の max_tokens 20000 のまま） | 14,984で打ち切り | 15,892 | 298秒 | 3/6 | 2/6 | 3/6 |
-#
-# 抽出件数はどれも6件。文字起こしが壊れた発話（「感嘆符」が「簡単フォーイス」に化けた箇所）への
-# 推測の混入は、プロンプトを改訂した後はどの設定でも起きていない。
-# medium が落とした applies_when は「参加者が募りたい場合」で、文字起こしに実在する。
-# CLAUDE.md 1章が暗黙知の中身として挙げる2点のうちの1つなので、軽い損失ではない。
-# **max_tokens と一緒に決めること**（下の説明を参照）。
-reasoning_effort = "medium"
-# 文字起こしに VRAM を明け渡すための起動・停止コマンド。夜間バッチ（kijun batch run）が
-# Strata を使う手順（Discord の返信の読み取り、抽出、Discord への投稿）の前後で実行する。
-# Strata に Ollama の keep_alive: 0 に相当する手段があるか未確認のため、
-# プロセスごと止める手段を設定で持たせてある。空文字なら何もしない（Strata を手で起動・停止する運用）。
-# start_command を書くときは、Strata の「標準出力」をファイルに残すようにすること。サーバーは毎秒
-# 「[strata] thinking: <生成済み> of budget <予算> (max <上限>) tokens, <速度> tok/s, <経過> s」を
-# 出しており、夜間バッチがどこまで進んだか・推論が予算に達したかが後から分かる（2026-11-04 実機で確認）。
-# **推論が予算に達したかどうかは、API の応答には出ない。この行だけが手がかりである。**
-# また、この行は Strata の `--log` が指すログファイル（strata-iq3_xxs.log）には入らない。
-# そのファイルはエンジンの子プロセスに渡されるもので、[strata] の行はサーバープロセスが
-# 標準出力に print しているためである。PowerShell なら Start-Process の
-# -RedirectStandardOutput で落とせる。
-# start_command は、サーバーを起動したらすぐに戻るコマンド（バックグラウンドで起動するもの）を書く。
-# 戻らないコマンド（フォアグラウンドで動き続けるもの）を書くと、batch.strata_ready_timeout_sec で打ち切って失敗にする。
-# stop_command は、Strata の抽出が失敗しても必ず実行する。
-start_command = ""
-stop_command = ""
+[extract.ollama]
+# localhost ではなく数字で書く。Windows では localhost が IPv6 の ::1 に解決されることがあり、
+# サーバーが IPv4 だけで待ち受けていると接続拒否になる（CLAUDE.md 4-4 で踏んだ問題）。
+base_url = "http://127.0.0.1:11434"
+# 推奨・未確定（2026-11-05 設計者の初期値）。VRAM 12GB に収まる 9B〜14B の中から、
+# scripts/measure_extraction.py の測定でユーザーが決める。存在するかは `ollama list` で確認する。
+# モデル名には ':' が入る（モデル名:タグ）。extracted_requests.model_name にはそのまま入り、
+# request_id と extract_logs のファイル名では他の記号に置き換わる。
+model = "qwen3.5:9b"
+# 文脈長（入力 + 出力）。リクエストごとに options.num_ctx で送る。
+# 送らないと Ollama の既定になり、入力が黙って先頭から切り捨てられる。
+# 大きくすると KV キャッシュが増えて VRAM を使う。GPU に収まらなくなったかは doctor の検査3で見る。
+num_ctx = 16384
+# 出力の上限（推論を含む）。options.num_predict で送る。1024 未満は拒否される。
+# think を有効にしたモデルは答えの前に推論を書き、それも数える。小さすぎると推論の途中で切れて
+# JSON が1文字も出ない。1チャンクの所要時間の最悪値は num_predict ÷ 観測された最も遅い生成速度。
+num_predict = 8192
+# Qwen の推論モード。TOML には null が無いので、「書かない」ことで未指定（think を送らず、
+# モデルの既定に任せる）を表す。true / false を書くと、その値を送る。測定の対象:
+# scripts/variants.example.toml の *-think / *-nothink。
+# think = false
+# 応答のたびにモデルを VRAM に置いておく時間。"0" なら応答のたびに下ろす。
+# "0" にする理由は、faster-whisper・pyannote と LLM を同時に VRAM に載せないため
+# （docs/implementation-plan.md 原則2-2）。"5m" のような値にすると、文字起こしの手順の時点で
+# LLM が VRAM に残り得る。代わりに応答のたびにモデルの読み込みが入る。
+keep_alive = "0"
+# 1リクエストの打ち切り時間（秒）。モデルの読み込みを含む。
+# kijun doctor の推奨値で置き換える。
+timeout_sec = 1800
+# format にスキーマを渡すか。渡すと Ollama が出力をスキーマに適合させる。
+# 出力は必ず repair.py を通してから検証するので、true でも修復は働く。
+# kijun doctor の検査2が「読めない」と出たら false にする。
+enforces_json_schema = true
 
 [match]
 backend = "e5"
@@ -207,6 +151,15 @@ max_transcription_unclear_per_run = 5
 [batch]
 # 各手順の記録（<日時>.json）を置く場所。
 log_dir = "./data/batch_logs"
-# extract.strata.start_command を実行してから、Strata が応答するようになるまで待つ秒数。
-# 125B の MoE の読み込みには時間がかかる。待っても応答しなければ、その手順を失敗として扱う。
-strata_ready_timeout_sec = 1800
+# 夜間バッチの開始時刻（HH:MM）。kijun batch install-task が --time を省略されたときに使う。
+task_time = "23:30"
+# この中のどれかのプロセスが動いている間は、GPU を使う手順を始めない（ゲームとの競合を避けるため）。
+# 名前はタスクマネージャーの「詳細」タブに出る実行ファイル名（大文字小文字は区別しない）。
+# 推奨・未確定：ゲームを起動した状態で「詳細」タブを見て、自分の環境の実行ファイル名を書く。
+# 空なら検出を行わない。例（実際の名前は環境で確認すること）: ["LeagueClient.exe"]
+defer_if_running = []
+# 延期中に再確認する間隔（分）。
+defer_check_interval_min = 30
+# 延期する時間の上限（時間。バッチ全体の合計）。超えたら、その夜のバッチは GPU を使う手順を
+# 飛ばして終わる。飛ばした会議は翌晩に未処理として拾われる。0 なら待たずに飛ばす。
+defer_max_hours = 4
