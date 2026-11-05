@@ -133,3 +133,54 @@ def test_pyannote_の波形は複数ファイルをつなぐ(tmp_path):
     out = d._load_waveform([p1, p2])
     assert out["sample_rate"] == SAMPLE_RATE
     assert abs(out["waveform"][0] - 48000) <= 128
+
+
+def _fake_whisper(monkeypatch, seen_kwargs: list) -> None:
+    class FakeSeg:
+        start, end, text = 0.0, 0.5, "こんにちは"
+
+    class FakeModel:
+        def __init__(self, *a, **k):
+            pass
+
+        def transcribe(self, audio, **kw):
+            seen_kwargs.append(kw)
+            return iter([FakeSeg()]), types.SimpleNamespace(duration=1.0)
+
+    fake = types.ModuleType("faster_whisper")
+    fake.WhisperModel = FakeModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+
+def test_hotwords_は空白でつないだ1つの文字列として_transcribe_に渡す(tmp_path, monkeypatch):
+    seen: list[dict] = []
+    _fake_whisper(monkeypatch, seen)
+    from kijun.transcribe.faster_whisper_impl import FasterWhisperTranscriber
+
+    cfg = Config()
+    cfg.transcribe.hotwords = ["箇条書き", " 感嘆符 ", ""]  # 前後の空白と空の語は取り除く
+    p = tmp_path / "1.wav"
+    write_wav(p, 16000, 1, 1.0)
+    FasterWhisperTranscriber(cfg.transcribe).transcribe([p])
+    assert seen[0]["hotwords"] == "箇条書き 感嘆符"
+
+
+def test_hotwords_が空なら_None_を渡す(tmp_path, monkeypatch):
+    seen: list[dict] = []
+    _fake_whisper(monkeypatch, seen)
+    from kijun.transcribe.faster_whisper_impl import FasterWhisperTranscriber
+
+    assert Config().transcribe.hotwords == []
+    p = tmp_path / "1.wav"
+    write_wav(p, 16000, 1, 1.0)
+    FasterWhisperTranscriber(Config().transcribe).transcribe([p])
+    assert seen[0]["hotwords"] is None
+
+
+def test_hotwords_は実在する_faster_whisper_の引数名である():
+    # 偽のモデルでは引数名の綴り間違いを検出できないので、実物の署名で確かめる。
+    # faster-whisper が入っていない環境では飛ばす。
+    fw = pytest.importorskip("faster_whisper")
+    import inspect
+
+    assert "hotwords" in inspect.signature(fw.WhisperModel.transcribe).parameters

@@ -53,6 +53,11 @@ class TranscribeConfig(_Section):
     min_utterance_sec: float = 0.4
     # 結合した発話の長さの上限（秒）。0 は「上限なし」。
     max_utterance_sec: float = 30.0
+    # faster-whisper の hotwords に渡す語。空でなければ、空白でつないだ1つの文字列にして
+    # WhisperModel.transcribe(..., hotwords=...) に渡す。誤認識された頻出語を正しく取らせるための手段。
+    # 空のリストなら渡さない。効果は未検証で、その語を言っていない箇所に当てはめる副作用がある
+    # （CLAUDE.md 7章）。
+    hotwords: list[str] = Field(default_factory=list)
 
 
 class DiarizeConfig(_Section):

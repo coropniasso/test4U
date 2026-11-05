@@ -25,6 +25,8 @@ class FasterWhisperTranscriber:
         dll_dirs = register_nvidia_dll_directories()
         fw = import_optional("faster_whisper", "transcribe", "faster-whisper による文字起こし")
         self._cfg = cfg
+        # 空のリストなら None（hotwords を渡さない）。faster-whisper の hotwords は1つの文字列を取る。
+        self._hotwords: str | None = " ".join(w.strip() for w in cfg.hotwords if w.strip()) or None
         try:
             self._model = fw.WhisperModel(cfg.model, device=cfg.device, compute_type=cfg.compute_type)
         except Exception as e:
@@ -51,6 +53,7 @@ class FasterWhisperTranscriber:
                 language=self._cfg.language,
                 vad_filter=self._cfg.vad_filter,
                 word_timestamps=False,
+                hotwords=self._hotwords,
             )
             # segments は generator。モデルを解放した後に評価されて落ちないよう、ここで list にする。
             one_file = [
