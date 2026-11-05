@@ -215,15 +215,22 @@ def test_doctor_は_DB_が無くても実行でき_結果を保存する(tmp_pat
         def get(self, url, timeout_sec):
             from kijun.transport import HttpResponse
 
-            return HttpResponse(200, _json.dumps({"data": [{"id": "qwen3.8-flash-next"}]}), 0.1)
+            if url.endswith("/api/ps"):
+                body = {"models": [{"name": "qwen3.5:9b", "size": 8_000_000_000, "size_vram": 8_000_000_000}]}
+            else:
+                body = {"models": [{"name": "qwen3.5:9b"}]}
+            return HttpResponse(200, _json.dumps(body), 0.1)
 
         def post(self, url, payload, timeout_sec):
             from kijun.transport import HttpResponse
 
+            if url.endswith("/api/generate"):
+                return HttpResponse(200, "{}", 0.1)
             posts["n"] += 1
             body = _json.dumps(
-                {"choices": [{"message": {"content": '{"items": []}'}}],
-                 "usage": {"prompt_tokens": 100, "completion_tokens": 5}}
+                {"message": {"role": "assistant", "content": '{"items": []}'}, "done": True, "done_reason": "stop",
+                 "prompt_eval_count": 100, "eval_count": 5, "eval_duration": 500_000_000,
+                 "prompt_eval_duration": 100_000_000, "load_duration": 100_000_000, "total_duration": 800_000_000}
             )
             return HttpResponse(200, body, 1.0)
 
@@ -232,9 +239,9 @@ def test_doctor_は_DB_が無くても実行でき_結果を保存する(tmp_pat
     r = runner.invoke(app, [*base, "doctor"])
 
     assert r.exit_code == 0, r.output
-    assert "1. 接続確認" in r.output and "config.toml に書くべき推奨値" in r.output
+    assert "1. 接続とモデルの有無" in r.output and "config.toml に書くべき推奨値" in r.output
     assert posts["n"] > 0
-    saved = sorted((tmp_path / "data" / "doctor").glob("strata_*.json"))
+    saved = sorted((tmp_path / "data" / "doctor").glob("ollama_*.json"))
     assert len(saved) == 1
     data = _json.loads(saved[0].read_text(encoding="utf-8"))
     assert len(data["checks"]) == 5 and data["recommendations"]

@@ -1,4 +1,4 @@
-"""実機（GPU、Strata の推論サーバー、Hugging Face）でだけ動かす確認。
+"""実機（GPU、Ollama の推論サーバー、Hugging Face）でだけ動かす確認。
 
 `uv run pytest` の既定では実行しない（pyproject.toml の addopts で除外している）。
 実機で動かすには、例えば次のようにする。
@@ -7,7 +7,7 @@
     uv run pytest -m requires_gpu
     uv run pytest -m requires_network
 
-Strata の実測は、このテストよりも `uv run kijun doctor` の方が詳しい結果を出す。
+Ollama の実測は、このテストよりも `uv run kijun doctor` の方が詳しい結果を出す。
 こちらは「つながるか」だけを見る。
 """
 
@@ -53,7 +53,7 @@ def test_pyannote_で話者ラベルが取れる():
 
 
 @pytest.mark.requires_network
-def test_Strata_に接続できてモデルの一覧が取れる():
+def test_Ollama_に接続できてモデルの一覧が取れる():
     from kijun.doctor import check_models
     from kijun.transport import HttpxTransport
 
@@ -62,12 +62,23 @@ def test_Strata_に接続できてモデルの一覧が取れる():
 
 
 @pytest.mark.requires_network
-def test_Strata_で抽出が_JSON_として取れる():
-    from kijun.extract.strata_impl import StrataExtractor
+def test_Ollama_で抽出が_JSON_として取れる():
+    from kijun.extract.ollama_impl import OllamaExtractor
 
-    chunk = split_into_chunks(make_utterances(5), 25, 2)[0]
-    result = StrataExtractor(Config()).extract(chunk)
+    chunk = split_into_chunks(make_utterances(5), 12, 1)[0]
+    result = OllamaExtractor(Config()).extract(chunk)
     assert isinstance(result.items, list)
+
+
+@pytest.mark.requires_gpu
+def test_Ollama_のモデルが_GPU_に収まっている():
+    """メモリの問題(Strata で起きた RAM の圧迫)の再発を防ぐ確認。size_vram == size であること。"""
+    from kijun.doctor import STATUS_OK, run_doctor
+    from kijun.transport import HttpxTransport
+
+    report = run_doctor(HttpxTransport(), Config())
+    gpu = report.get("gpu")
+    assert gpu is not None and gpu.status == STATUS_OK, gpu.summary if gpu else "検査3が無い"
 
 
 @pytest.mark.requires_network
@@ -98,24 +109,24 @@ def test_discord_py_でチャンネルに投稿してリアクションと返信
 
 
 @pytest.mark.requires_network
-def test_Strata_で重要度の判定が取れる():
-    from kijun.review.importance import StrataImportanceJudge
-    from kijun.review.llm import StrataJsonChat
+def test_Ollama_で重要度の判定が取れる():
+    from kijun.review.importance import LlmImportanceJudge
+    from kijun.review.llm import OllamaJsonChat
 
-    verdict = StrataImportanceJudge(StrataJsonChat(Config())).judge(
+    verdict = LlmImportanceJudge(OllamaJsonChat(Config())).judge(
         "告知文の冒頭2行以内に、読み手にしてほしい行動が書かれているか", ["募集要項の最初に、何をしてほしいかを書いて"]
     )
     assert 1 <= verdict.importance <= 3 and verdict.rationale
 
 
 @pytest.mark.requires_network
-def test_Strata_で返信の振り分けが取れる():
+def test_Ollama_で返信の振り分けが取れる():
     from datetime import datetime
 
     from kijun.db.repo import KnowledgeItemRow
-    from kijun.review.llm import StrataJsonChat
-    from kijun.review.reply import StrataReplyRouter
+    from kijun.review.llm import OllamaJsonChat
+    from kijun.review.reply import LlmReplyRouter
 
     item = KnowledgeItemRow("item_0001", None, "冒頭に行動を書くか", None, None, None, None, None, "candidate", 1, datetime(2026, 11, 3))
-    routed = StrataReplyRouter(StrataJsonChat(Config())).route("読み飛ばされるから。ただし社内向けでは不要", item)
+    routed = LlmReplyRouter(OllamaJsonChat(Config())).route("読み飛ばされるから。ただし社内向けでは不要", item)
     assert {e.column for e in routed.items} <= {"reason", "applies_when", "not_applies_when", "check_text"}
