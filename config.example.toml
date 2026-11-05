@@ -102,8 +102,8 @@ run_label = ""
 # localhost ではなく数字で書く。Windows では localhost が IPv6 の ::1 に解決されることがあり、
 # サーバーが IPv4 だけで待ち受けていると接続拒否になる（CLAUDE.md 4-4 で踏んだ問題）。
 base_url = "http://127.0.0.1:11434"
-# 推奨・未確定（2026-11-05 設計者の初期値）。VRAM 12GB に収まる 9B〜14B の中から、
-# scripts/measure_extraction.py の測定でユーザーが決める。存在するかは `ollama list` で確認する。
+# 2026-11-05 にユーザーが決定（qwen3:14b と比べた測定は CLAUDE.md 7章・10章）。
+# 存在するかは `ollama list` で確認する。
 # モデル名には ':' が入る（モデル名:タグ）。extracted_requests.model_name にはそのまま入り、
 # request_id と extract_logs のファイル名では他の記号に置き換わる。
 model = "qwen3.5:9b"
@@ -118,7 +118,9 @@ num_predict = 8192
 # Qwen の推論モード。TOML には null が無いので、「書かない」ことで未指定（think を送らず、
 # モデルの既定に任せる）を表す。true / false を書くと、その値を送る。測定の対象:
 # scripts/variants.example.toml の *-think / *-nothink。
-# think = false
+# 2026-11-05 にユーザーが qwen3.5:9b・think = false に決めた（CLAUDE.md 10章）。qwen3.5:9b は think を
+# 書かないと推論し、num_predict 8192 を推論で使い切って JSON が出なかった。
+think = false
 # 応答のたびにモデルを VRAM に置いておく時間。"0" なら応答のたびに下ろす。
 # "0" にする理由は、faster-whisper・pyannote と LLM を同時に VRAM に載せないため
 # （docs/implementation-plan.md 原則2-2）。"5m" のような値にすると、文字起こしの手順の時点で
