@@ -70,9 +70,12 @@ def test_一部だけ確定していれば確定した側だけ人物になる()
     assert "（あなた→SPEAKER_01）" in text
 
 
-def test_言われた側が不明なら_不明_と出す():
+def test_言われた側が特定できなければ矢印ごと省く():
+    # 「→不明」は、相手の声が録音に入っていない回では毎回出る（読み上げの録音や、通話で相手の
+    # 音声が拾えなかった回）。読む側の情報にならないので出さない。
     text = fmt.format_new_candidate(item(), request(speaker_to_label=None), CONV, {"SPEAKER_00": "self"})
-    assert "（あなた→不明）" in text
+    assert "（あなた）" in text
+    assert "不明" not in text
 
 
 def test_重要度が判定できなかったときは_なし_と出す():
@@ -207,3 +210,32 @@ def test_会議が分からなければ場面は不明と書く():
         request(reusable=False, transcription_unclear=True), None, {}
     )
     assert "場面：不明" in text
+
+
+def test_引用に聞き取り誤りが残る新規候補には注意を1行入れる():
+    # 文字起こしが壊れていることと、チェック項目として使えることは独立している（2026-11-04 実機）。
+    # 壊れた語を含む発話からでも使えるチェック項目は作れるので、新規候補として出す。
+    # ただし引用に誤りが残っているので、そのことを伝え、文言の修正はスレッドに返信させる。
+    text = fmt.format_new_candidate(
+        item(), request(quote="過剰書きでいいんで見出しのすぐ下に書いて", transcription_unclear=True),
+        CONV, {},
+    )
+    assert "聞き取り誤りが含まれています" in text
+    assert "過剰書き" in text  # 引用は直さない
+    assert "チェック項目案" in text  # 項目としては使う
+
+
+def test_引用が読める新規候補には注意を入れない():
+    text = fmt.format_new_candidate(item(), request(), CONV, {})
+    assert "聞き取り誤り" not in text
+
+
+def test_読めなかった投稿は_記録する先が無いことを明示する():
+    # 「✅＝分かった」と読めると、分かった内容が記録されたと誤解する。
+    # この投稿は思い出す機会は渡すが、書く先を渡していない。そのことを書く。
+    text = fmt.format_transcription_unclear(
+        request(reusable=False, transcription_unclear=True), CONV, {}
+    )
+    assert "記録する先がありません" in text
+    assert "返信は読み取りません" in text
+    assert "見た印として ✅" in text

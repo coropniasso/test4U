@@ -295,3 +295,43 @@ def test_文字起こしが読めた抽出結果は投稿しない(con, cfg):
     run_post(con, cfg, client, None, NOW)
 
     assert unclear_messages(client) == []
+
+
+def test_チェック項目として使える行は_読めなかった側には投稿しない(con, cfg):
+    """二重投稿を止める（2026-11-04 実機で見つかった不具合）。
+
+    「文字起こしが壊れていること」と「チェック項目として使えること」は独立している。実機では、
+    「箇条書き」が「過剰書き」に化けた発話に対して、モデルが transcription_unclear = true と
+    judge したうえで、文脈から趣旨を取り pass_criterion まで作った（reusable = true）。
+    両方の経路に流すと、同じ発話が #review に2回出る。そして新規候補の文面には壊れた引用が
+    入っているので、利用者は既にそれを見てスレッドで直せる。この種別の投稿は何も足さない。
+    """
+    configure(cfg)
+    cfg.extract.ollama.model = "m"
+    setup_conversation(con)
+    add_request(
+        con, "r1", quote="過剰書きでいいんで見出しのすぐ下に書いて", model="m",
+        reusable=True, transcription_unclear=True,
+    )
+    client = FakeDiscordClient()
+
+    run_post(con, cfg, client, None, NOW)
+
+    assert unclear_messages(client) == []
+    assert repo.list_discord_posts(con, repo.POST_TRANSCRIPTION_UNCLEAR) == []
+
+
+def test_読めずチェック項目にもならない行だけを投稿する(con, cfg):
+    configure(cfg)
+    cfg.extract.ollama.model = "m"
+    setup_conversation(con)
+    add_request(con, "r1", quote="過剰書きで書いて", model="m",
+                reusable=True, transcription_unclear=True)   # 新規候補の側に出る
+    add_request(con, "r2", quote="3つ目簡単フォーイスなんか減らして", model="m",
+                reusable=False, transcription_unclear=True)  # こちらだけ
+    client = FakeDiscordClient()
+
+    run_post(con, cfg, client, None, NOW)
+
+    posted = unclear_messages(client)
+    assert len(posted) == 1 and "簡単フォーイス" in posted[0]

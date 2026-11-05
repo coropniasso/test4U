@@ -46,6 +46,18 @@ def speaker_display(label: str | None, speaker_map: dict[str, str]) -> str:
     return SELF_DISPLAY if person == "self" else person
 
 
+def who_display(request: RequestRow, speaker_map: dict[str, str]) -> str:
+    """発言の「（誰→誰）」。言われた側が特定できていなければ、矢印ごと省く。
+
+    「→不明」は、相手の声が録音に入っていない回では毎回出る（読み上げの録音や、通話で相手の
+    音声が拾えなかった回）。読む側の情報にならないので出さない（2026-11-04 実機での指摘）。
+    """
+    frm = speaker_display(request.speaker_from_label, speaker_map)
+    if request.speaker_to_label is None:
+        return f"（{frm}）"
+    return f"（{frm}→{speaker_display(request.speaker_to_label, speaker_map)}）"
+
+
 def scene(conversation: Conversation) -> str:
     kind = SETTING_KIND_JA.get(conversation.setting_kind, conversation.setting_kind)
     return f"{conversation.recorded_at.month}/{conversation.recorded_at.day} {kind}"
@@ -70,24 +82,25 @@ def format_new_candidate(
     importance = f"重要度案：{item.importance}" if item.importance else "重要度案：なし"
     head = f"【新規候補 #{item_number(item.item_id)}】{importance}"
     scene_line = f"場面：{scene(conversation)}" if conversation else "場面：不明"
-    tail = "\n".join(
-        [
-            f"チェック項目案：{item.check_text}",
-            f"理由：{_or_no_record(item.reason)}",
-            f"適用条件：{_or_no_record(item.applies_when)}",
-            REVIEW_GUIDE,
-        ]
-    )
+    lines = [
+        f"チェック項目案：{item.check_text}",
+        f"理由：{_or_no_record(item.reason)}",
+        f"適用条件：{_or_no_record(item.applies_when)}",
+    ]
+    # 文字起こしが壊れていることと、チェック項目として使えることは独立している（2026-11-04 実機）。
+    # 壊れた語を含む発話からでも使えるチェック項目は作れるので、この行は新規候補として出す。
+    # ただし引用に聞き取り誤りが残っているので、そのことを伝える。文言の修正はスレッドに返信する。
+    if request is not None and request.transcription_unclear:
+        lines.append(UNCLEAR_NOTE)
+    lines.append(REVIEW_GUIDE)
+    tail = "\n".join(lines)
 
     def build(quote_line: str) -> str:
         return "\n".join([head, scene_line, quote_line, tail])
 
     if request is None:
         return build("発言：記録なし")
-    who = (
-        f"（{speaker_display(request.speaker_from_label, speaker_map)}"
-        f"→{speaker_display(request.speaker_to_label, speaker_map)}）"
-    )
+    who = who_display(request, speaker_map)
 
     def quote_line(quote: str) -> str:
         return f"発言：「{quote}」{who}"
@@ -102,9 +115,16 @@ def format_new_candidate(
     return build(quote_line(shortened))
 
 
+# 新規候補の文面に入れる、引用に聞き取り誤りが残っていることの注意。
+UNCLEAR_NOTE = "注意：引用に文字起こしの聞き取り誤りが含まれています。文言の修正はスレッドに返信してください"
+
+# 読めなかった抽出結果の文面の末尾。**いまは訂正を記録する先が無い。**
+# 「✅＝分かった」と読めると、分かった内容が記録されたと誤解する。✅ が処理済みの印でしかない
+# ことを書く（2026-11-04 実機での指摘。この投稿は思い出す機会は渡すが、書く先を渡していない）。
 UNCLEAR_GUIDE = (
-    "→ 何と言ったか分かるなら ✅、直したいなら ❌ を付けてください。"
-    "この投稿への返信は読み取りません（返信を記録する先が無いため）"
+    "→ この発言は、文字起こしが読めないためチェック項目になっていません。"
+    "内容を思い出せても、いまはその場で記録する先がありません（この投稿への返信は読み取りません）。"
+    "見た印として ✅、あとで作り直したいものとして記録に残すなら ❌ を付けてください"
 )
 
 
@@ -128,10 +148,7 @@ def format_transcription_unclear(
             UNCLEAR_GUIDE,
         ]
     )
-    who = (
-        f"（{speaker_display(request.speaker_from_label, speaker_map)}"
-        f"→{speaker_display(request.speaker_to_label, speaker_map)}）"
-    )
+    who = who_display(request, speaker_map)
 
     def build(quote: str) -> str:
         return "\n".join([head, scene_line, f"発言：「{quote}」{who}", tail])

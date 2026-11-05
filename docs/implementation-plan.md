@@ -814,9 +814,10 @@ uv run kijun batch install-task [--time HH:MM] [--out <パス>]  # タスクス�
 | **Ollama のモデルが GPU（VRAM 12GB）に収まるか、速度、品質** | **未確認（2026-11-05 の移行で新しくなった最大の未確認事項）。** `extract.ollama` の既定（`qwen3.5:9b`、`num_ctx` 16384、`num_predict` 8192、`keep_alive` "0"、`chunk_minutes` 12）は設計者の初期値で、実測に基づかない。モデル名が存在するかも未確認 | `kijun doctor`（検査3が GPU に収まっているか）。`scripts/measure_extraction.py` で品質を比べる（8-2） |
 | **Ollama の `format` が出力をスキーマに適合させるか。`think` と同時に送ってよいか** | 未確認。版とモデルによっては、推論にも制約が掛かって壊れる報告がある | `doctor` の検査2。`think` を変えた測定（8-2） |
 | `prompt_eval_count` が返らないことがあるか | 未確認。返らなければ、入力の切り捨てを検出できない（6-6） | 実機の抽出の標準エラー（「確認できません」が出るか） |
-| **`hotwords` の効果と副作用** | 未検証。「箇条書き」「感嘆符」が正しく取れるかは分からない。その語を言っていない箇所に当てはめる副作用がある | 6-1 の手順で、同じ音声を `hotwords` あり・なしで文字起こしし直す |
+| ~~`hotwords` の効果と副作用~~ | **2026-11-05 測定。効果が無かった。** 対面の録音で、あり・なしとも「過剰書き」「簡単フォーイス」のまま。誤挿入も無かった（`CLAUDE.md` 7章） | 次の手段は `Transcriber` の背後に別のモデル（kotoba-whisper など）を足して比べること。未着手 |
 | `applies_when` の取りこぼし | Strata の `medium` は、文字起こしに実在する「参加者が募りたい場合」を落とした（`CLAUDE.md` 7章）。Ollama のモデルで起きるかは未確認。`applies_when` は `CLAUDE.md` 1章が暗黙知の中身として挙げる2点のうちの1つである | 8-2 の「人が確認する2点」。運用では、レビューでユーザーが `applies_when` を書き足した頻度 |
-| `transcription_unclear` の投稿への返信を受け付けるか | **未確定。** いまはリアクションだけを読み、返信は読まない。`review_log` が `item_id` NOT NULL で記録する先が無いためである。受け付ける形にするには `review_log` のスキーマ変更が要る | ❌ の頻度と、投稿の文面で「返信は読み取りません」と伝えたうえでユーザーが何を書くかを見る |
+| `transcription_unclear` の投稿への返信を受け付けるか | **2026-11-04 ユーザーが「まず現状で運用して測る」と決定。** いまはリアクションだけを読み、返信は読まない。`review_log` が `item_id` NOT NULL で記録する先が無いためである。**このため、この投稿は「思い出す機会」は渡すが「書く先」を渡していない。** ✅ を押しても、思い出した内容はどこにも残らない。7章の案Aの目的（本人が正しい項目を書ける機会を渡す）は、半分しか果たせていない | `paths.review_logs` に書き出す実行の記録から、✅ / ❌ / 無反応の件数を数える（数え方と閾値は `CLAUDE.md` 10章）。閾値を超えたら、`review_log.item_id` を NULL 許容にして `request_id` を足し（スキーマ v4）、返信を `knowledge_items` の新規行として起こす |
+| 読める語に化けた聞き取り誤りを検出できるか | **未確定。実機で1件見落とした。** 「新しい」が「明日らしい」に化けた箇所を、モデルは `transcription_unclear = false` と判定し、さらに `request_summary` に「明日のリンク」という発言に無い内容を書いた。`reusable = false` なので `knowledge_items` には入らないが、`transcription_unclear = false` なので新しい投稿種別にも出ない。**7章の案Aが塞ごうとした穴に、この発話はそのまま落ちる** | プロンプトに「語そのものは読めても文全体として求めている内容が成り立たないなら疑う」という指示を足した（例は別の作り物にしてある。「明日らしい」を書くと試験に使える語を答えとして教えることになる）。効くかは次の実録音で測る |
 | トークン数の概算の係数 | 日本語1文字あたり 0.55 トークン、会議1分あたり 180 トークン。**Strata での実測1点からの推測**で、Ollama のモデルには当てはまらない | `doctor` の検査4・5が `tokens_per_character` を実測して推奨する |
 | プロンプトキャッシュ | `usage.prompt_tokens_details.cached_tokens` が 0。同じ system プロンプトの連続リクエストでキャッシュが効いていない | 未対応。気づきとして記録 |
 | ゲームの実行ファイル名と、延期の動作 | ユーザーが `batch.defer_if_running` に書く名前が実際のプロセス名と一致するかは未確認。一致しなければゲームが動いていても延期されない | 手順5b。ゲームを起動した状態で `uv run kijun batch run` を試す |
@@ -843,6 +844,7 @@ uv run kijun batch install-task [--time HH:MM] [--out <パス>]  # タスクス�
 | ~~抽出の推論量を `medium` にしてよいか~~ | **2026-11-04 ユーザーが `medium` を採用。** 改訂プロンプトでは `medium` でも推測の混入は起きず、速度が約5.9倍。失うのは `applies_when` 1件。所要時間を取る判断をした。残った risk は上の表に移した |
 | ~~`max_tokens` の既定 20000 が `xhigh` に足りない~~ | **`medium` を採用したので解消。** medium の推論は 2,641 トークンで、20000 の予算 15,000 に収まる。`xhigh` に戻す場合は 32000 以上が必要で、その旨を設定のコメントに書いてある |
 | ~~文字起こしが壊れた発話から作られた項目をユーザーに見せるか~~ | **2026-11-04 ユーザーが案A を採用。実装済み（スキーマ v3）。** `transcription_unclear` 列を足し、Discord の投稿種別 `transcription_unclear` で `#review` に出す。詳細は 14-2 と `CLAUDE.md` 7章 |
+| ~~移行した DB と新規に作った DB でスキーマが食い違わないか~~ | **型・NOT NULL・DEFAULT は一致する。違うのは列の順序だけ**（2026-11-04 実機で実データの DB を移行して確認）。新規は `pass_criterion, transcription_unclear, source_type, ...`、移行は `..., extracted_at, transcription_unclear` になる。`ALTER ADD COLUMN` は末尾に足すので、この差は消えない。**無害である**ことを確認した。`repo.py` の INSERT はすべて列名を明示しており（`_REQUEST_COLUMNS` / `_POST_COLUMNS`）、`src/` に `SELECT *` は1件も無いので位置依存が無い。ただし今後 `INSERT INTO ... VALUES` を列名なしで書くと、新規 DB と移行 DB で別の列に入る |
 | ~~推論が予算に達したかをどこで確認するか~~ | **サーバープロセスの標準出力の `[strata] thinking:` の行だけ。** API の応答には出ない。Strata の `--log` が指すファイル（`strata-iq3_xxs.log`）にも入らない（そのファイルはエンジンの子プロセスに渡されるもので、`[strata]` の行はサーバープロセスが標準出力に print している）。PowerShell なら `Start-Process -RedirectStandardOutput` で落とす |
 
 第2弾（Discord でのレビューと夜間バッチ）で未解決のまま残ることは次のとおりである。

@@ -11,6 +11,7 @@ from kijun.cli import app
 from kijun.db import migrate, repo
 from kijun.discord import run as discord_run
 from kijun.review.reply import RoutedEntry
+from tests.fakes import FakeDiscordClient
 from tests.fakes import FakeDiscordClient, FakeReplyRouter
 from tests.review_helpers import CID, NOW, add_request, candidate, r, reply, setup_conversation, APPROVE
 
@@ -24,6 +25,13 @@ def write_config(tmp_path: Path, channels: bool = True) -> Path:
         f"""
 [paths]
 db = "{(tmp_path / 'data' / 'kijun.duckdb').as_posix()}"
+inbox = "{(tmp_path / 'inbox').as_posix()}"
+processed = "{(tmp_path / 'processed').as_posix()}"
+transcripts = "{(tmp_path / 'transcripts').as_posix()}"
+review_logs = "{(tmp_path / 'review_logs').as_posix()}"
+
+[batch]
+log_dir = "{(tmp_path / 'batch_logs').as_posix()}"
 {discord}
 """,
         encoding="utf-8",
@@ -186,3 +194,94 @@ def test_derive_direction_は引数をどちらか一方に限る(db):
     _con, cfg_path = db
     assert invoke(cfg_path, "derive-direction").exit_code == 1
     assert invoke(cfg_path, "derive-direction", "--all", "--conversation", "x").exit_code == 1
+
+
+# --- 実行の記録（7章の「運用して測る」に必要） ---------------------------------------------
+#
+# DB に残るのは「投稿したこと」と「処理済みになった時刻」だけで、どのリアクションが付いたかは
+# 残らない。✅ と ❌ のどちらが付いたかは、この記録から数える。
+
+
+def _read_logs(cfg):
+    import json
+
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(cfg.paths.review_logs.glob("*.json"))]
+
+
+def test_read_の実行記録に種別ごとの処理件数と却下の一覧が残る(con, cfg):
+    from datetime import datetime
+
+    from kijun.db import repo
+    from kijun.discord.run import read_command
+    from tests.review_helpers import CID, REJECT, r, setup_conversation
+
+    cfg.discord.review_channel_id = "111"
+    setup_conversation(con)
+    repo.insert_discord_post(
+        con,
+        repo.DiscordPostRow(
+            "m9", repo.POST_TRANSCRIPTION_UNCLEAR, None, CID,
+            datetime(2026, 11, 4, 1, 0), None, "111", None, "r1",
+        ),
+    )
+    client = FakeDiscordClient()
+    client.reactions["m9"] = r(REJECT)
+
+    read_command(con, cfg, client=client, llm=None, echo=lambda _: None, now=datetime(2026, 11, 4, 2, 0))
+
+    logs = _read_logs(cfg)
+    assert len(logs) == 1
+    log = logs[0]
+    assert log["kind"] == "read"
+    # ✅ の件数は「種別ごとの処理件数 − ❌ の件数」で求める。両方が残っている必要がある
+    assert log["processed_by_type"]["transcription_unclear"] == 1
+    assert log["unclear_to_fix"] == ["r1"]
+
+
+def test_post_の実行記録に種別ごとの投稿件数が残る(con, cfg):
+    from datetime import datetime
+
+    from kijun.discord.run import post_command
+    from tests.review_helpers import add_request, setup_conversation
+
+    cfg.discord.review_channel_id = "111"
+    cfg.extract.ollama.model = "m"
+    setup_conversation(con)
+    add_request(con, "r1", quote="3つ目簡単フォーイスなんか減らして", model="m",
+                reusable=False, transcription_unclear=True)
+
+    post_command(con, cfg, client=FakeDiscordClient(), llm=None, echo=lambda _: None,
+                 now=datetime(2026, 11, 4, 1, 0))
+
+    log = _read_logs(cfg)[0]
+    assert log["kind"] == "post"
+    assert log["posted"]["transcription_unclear"] == 1
+
+
+def test_チャンネルIDが空なら記録を書かない(con, cfg):
+    from kijun.discord.run import post_command, read_command
+
+    cfg.discord.review_channel_id = ""
+    cfg.discord.contradictions_channel_id = ""
+    post_command(con, cfg, echo=lambda _: None)
+    read_command(con, cfg, echo=lambda _: None)
+    assert not cfg.paths.review_logs.exists()
+
+
+def test_write_config_の_Path_設定はすべて_tmp_path_の下(tmp_path):
+    """CLI 経由のテストが、実際の ./data に書かないことを確かめる。
+
+    conftest の cfg フィクスチャには同じ検査があるが、この write_config は別の経路なので
+    そちらの検査では守られない。設定に Path の項目を足したときは、両方に足す必要がある。
+    実際に paths.review_logs を足したとき、ここが漏れて ./data/review_logs に書いていた。
+    """
+    from kijun.config import load_config
+    from tests.test_config import _path_settings
+
+    found = dict(_path_settings(load_config(write_config(tmp_path))))
+    # 列挙が空だと検査が素通りするので、既知の設定が見えていることを確かめる
+    assert {"paths.db", "paths.review_logs", "batch.log_dir"} <= set(found)
+    outside = {
+        k: str(v) for k, v in found.items() if not v.resolve().is_relative_to(tmp_path.resolve())
+    }
+    assert not outside, f"tmp_path の外を指している設定がある: {outside}"

@@ -6,6 +6,7 @@ faster_whisper は `uv sync --extra transcribe` で入る。モジュールの�
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 from kijun.config import TranscribeConfig
@@ -13,6 +14,55 @@ from kijun.deps import import_optional
 from kijun.transcribe.audio_decode import SAMPLE_RATE, decode_to_mono_16k
 from kijun.transcribe.base import TranscribedSegment, shift_items
 from kijun.transcribe.cuda_dlls import register_nvidia_dll_directories
+
+
+# faster-whisper の VadOptions の項目名と、こちらの設定名の対応。
+# 版によって項目が増減するので、実際に受け付ける名前だけを渡す（知らない名前で TypeError にしない）。
+VAD_PARAMETER_SOURCES = {
+    "threshold": "vad_threshold",
+    "min_silence_duration_ms": "vad_min_silence_duration_ms",
+    "speech_pad_ms": "vad_speech_pad_ms",
+    "max_speech_duration_s": "vad_max_speech_duration_sec",
+}
+
+
+def vad_option_names(fw) -> set[str] | None:
+    """その版の VadOptions が受け付ける項目名。見つからなければ None（絞り込まない）。"""
+    holder = getattr(fw, "vad", None)
+    options = getattr(holder, "VadOptions", None) if holder is not None else None
+    if options is None:
+        options = getattr(fw, "VadOptions", None)
+    if options is None:
+        return None
+    try:
+        return {f.name for f in dataclasses.fields(options)}
+    except TypeError:
+        return None
+
+
+def build_vad_parameters(cfg: TranscribeConfig, accepted: set[str] | None = None) -> dict:
+    """faster-whisper に渡す vad_parameters を作る。
+
+    既定のままでは区間が切れないことが実機で分かったので、設定から渡す（2026-11-04。34.2分の
+    通話で 564.8 秒の区間が1つ出て、中身は3文字だった）。faster-whisper は
+    max_speech_duration_s を既定で無制限にし、min_silence_duration_ms より短い無音では
+    区間を切らない。PC のスピーカー出力を iPhone で録る方法では室内の音が常に入るので、
+    2秒続く無音が現れず、区間が延々とつながる。
+
+    accepted には、その版の VadOptions が受け付ける項目名を渡す。その中にある名前だけを返す。
+    None なら絞り込まない。
+    vad_max_speech_duration_sec が 0（上限なし）のときは max_speech_duration_s を入れない。
+    """
+    values: dict = {
+        "threshold": cfg.vad_threshold,
+        "min_silence_duration_ms": cfg.vad_min_silence_duration_ms,
+        "speech_pad_ms": cfg.vad_speech_pad_ms,
+    }
+    if cfg.vad_max_speech_duration_sec > 0:
+        values["max_speech_duration_s"] = cfg.vad_max_speech_duration_sec
+    if accepted is None:
+        return values
+    return {k: v for k, v in values.items() if k in accepted}
 
 
 class FasterWhisperTranscriber:
@@ -27,6 +77,7 @@ class FasterWhisperTranscriber:
         self._cfg = cfg
         # 空のリストなら None（hotwords を渡さない）。faster-whisper の hotwords は1つの文字列を取る。
         self._hotwords: str | None = " ".join(w.strip() for w in cfg.hotwords if w.strip()) or None
+        self._vad_parameters = build_vad_parameters(cfg, vad_option_names(fw))
         try:
             self._model = fw.WhisperModel(cfg.model, device=cfg.device, compute_type=cfg.compute_type)
         except Exception as e:
@@ -49,17 +100,19 @@ class FasterWhisperTranscriber:
             # 自前でデコードした配列を渡す。np.ndarray なら faster-whisper は内部の decode_audio を呼ばない
             # （その関数は非公開で、PyAV の版との組み合わせで壊れたことがある）。
             audio = decode_to_mono_16k(path)
-            segments, _info = self._model.transcribe(
-                audio,
-                language=self._cfg.language,
-                vad_filter=self._cfg.vad_filter,
-                condition_on_previous_text=self._cfg.condition_on_previous_text,
+            kwargs: dict = {
+                "language": self._cfg.language,
+                "vad_filter": self._cfg.vad_filter,
+                "condition_on_previous_text": self._cfg.condition_on_previous_text,
                 # hallucination_silence_threshold は word_timestamps=True のときだけ働く（faster-whisper の仕様）
-                word_timestamps=halluc > 0,
-                hallucination_silence_threshold=halluc if halluc > 0 else None,
-                hotwords=self._hotwords,
-            )
-            # segments は generator。モデルを解放した後に評価されて落ちないよう、ここで list にする。
+                "word_timestamps": halluc > 0,
+                "hallucination_silence_threshold": halluc if halluc > 0 else None,
+                "hotwords": self._hotwords,
+            }
+            # vad_filter が false のときは渡さない（使われないうえ、版によっては検証される）。
+            if self._cfg.vad_filter and self._vad_parameters:
+                kwargs["vad_parameters"] = self._vad_parameters
+            segments, _info = self._model.transcribe(audio, **kwargs)            # segments は generator。モデルを解放した後に評価されて落ちないよう、ここで list にする。
             one_file = [
                 TranscribedSegment(
                     start_sec=s.start,

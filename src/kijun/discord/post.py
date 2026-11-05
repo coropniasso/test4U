@@ -173,7 +173,23 @@ def post_new_candidates(
 
 
 def pending_transcription_unclear(con: duckdb.DuckDBPyConnection, cfg: Config) -> list[repo.RequestRow]:
-    """文字起こしが読めなかった抽出結果のうち、まだ投稿していないもの。
+    """文字起こしが読めず、かつチェック項目にもならなかった抽出結果のうち、まだ投稿していないもの。
+
+    **reusable = true の行は投稿しない。** 2026-11-04 に実機で分かったことだが、
+    「文字起こしが壊れていること」と「チェック項目として使えること」は独立している。
+    実例: 「箇条書き」が「過剰書き」に化けた発話で、モデルは transcription_unclear = true と
+    judge したうえで、文脈から趣旨（見出しのすぐ下に書く）を取り、pass_criterion まで作った。
+    その判断は誤っていない。
+
+    この行を両方の経路に流すと、同じ発話が #review に2回出る（新規候補として1回、
+    この種別として1回）。そして新規候補の文面には `発言：「...」` で壊れた引用が入っている
+    （format_new_candidate 参照）ので、**利用者は既に壊れた引用を見ており、スレッドに返信して
+    文言を直せる。** つまり reusable = true の行に、この種別の投稿は何も足さない。
+
+    この種別が必要なのは reusable = false の行だけである。それらは照合（match/link.py）の
+    対象から外れるので knowledge_items にならず、投稿しなければ利用者の目に触れないまま消える。
+
+    文字起こしが壊れていることは、新規候補の文面の側に1行入れて伝える（format_new_candidate）。
 
     投稿済みかどうかは discord_posts.request_id で見る。この種別は knowledge_items に
     ならないので、item_id では記録できない（バージョン3で request_id を足した）。
@@ -182,17 +198,18 @@ def pending_transcription_unclear(con: duckdb.DuckDBPyConnection, cfg: Config) -
         p.request_id for p in repo.list_discord_posts(con, repo.POST_TRANSCRIPTION_UNCLEAR)
     }
     rows = repo.get_transcription_unclear_requests(con, cfg.extract.model_name())
-    return [r for r in rows if r.request_id not in posted]
+    return [r for r in rows if not r.reusable and r.request_id not in posted]
 
 
 def post_transcription_unclear(
     con, cfg: Config, client: DiscordClient, report: PostReport, now: datetime
 ) -> None:
-    """文字起こしが読めなかった抽出結果を、上限の件数まで #review に投稿する（CLAUDE.md 7章の案A）。
+    """文字起こしが読めず、チェック項目にもならなかった抽出結果を #review に投稿する（7章の案A）。
 
-    これらは reusable = FALSE なので照合の対象から外れ、knowledge_items にならない。投稿するのは、
-    発話したのが利用者本人であり、壊れた引用を見れば自分が何と言ったか分かるためである。
-    投稿しなければ、同じ発話が繰り返し失われ続ける（「箇条書き」「感嘆符」は頻出語である）。
+    対象は reusable = false の行だけである（理由は pending_transcription_unclear の説明）。
+    それらは照合の対象から外れて knowledge_items にならないので、投稿しなければ利用者の目に
+    触れないまま消える。投稿するのは、発話したのが利用者本人であり、壊れた引用を見れば自分が
+    何と言ったか分かるためである。
     """
     pending = pending_transcription_unclear(con, cfg)
     for request in pending[: cfg.discord.max_transcription_unclear_per_run]:

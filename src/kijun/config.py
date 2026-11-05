@@ -32,6 +32,12 @@ class PathsConfig(_Section):
     processed: Path = Path("./data/processed")
     transcripts: Path = Path("./data/transcripts")
     db: Path = Path("./data/kijun.duckdb")
+    # kijun discord post / read の実行記録（<種類>_<日時>.json）を置く場所。
+    # DB には「投稿したこと」と「処理済みになった時刻」しか残らず、どのリアクションが
+    # 付いたかは残らない。6章の指標（レビュー所要時間、修正せず承認した割合）と、
+    # 7章の「文字起こしが読めなかった投稿に ✅ と ❌ のどちらが付いたか」を後から数えるために、
+    # 実行ごとの報告をそのまま書き出す。
+    review_logs: Path = Path("./data/review_logs")
 
 
 class SettingsConfig(_Section):
@@ -72,13 +78,36 @@ class TranscribeConfig(_Section):
     # no_speech_prob は実発話でも 0.5〜0.8 になり使えなかったので使わない。
     drop_max_speaker_overlap: float = Field(default=0.3, ge=0, le=1)
     drop_max_avg_logprob: float = -0.5
+    # faster-whisper に渡す Silero VAD のパラメータ。vad_filter が true のときだけ使う
+    # （2026-11-05 以降の既定は vad_filter = false なので、既定では使われない）。
+    # **これを設定値にしたのは、既定のままでは区間が切れないことが実機で分かったためである**
+    # （2026-11-04。34.2分の通話で 564.8 秒の区間が1つ出て、中身は3文字だった）。
+    # faster-whisper は max_speech_duration_s を既定で無制限にする。そのうえ
+    # min_silence_duration_ms（既定2000）より短い無音では区間を切らない。PC のスピーカー出力を
+    # iPhone で録る方法では室内の音が常に入るので、2秒続く無音が現れず、区間が延々とつながる。
+    #
+    # vad_max_speech_duration_sec は、Silero が1つの発話区間として許す長さの上限。
+    # 0 は「上限なし」（faster-whisper の既定と同じ）。既定の 30.0 は max_utterance_sec に合わせた値で、
+    # 実測に基づくものではない。Silero は上限に達する前の最後の無音で切るので、文の途中で切るとは限らない。
+    # **区間の長さを抑えるのはこの設定であり、max_utterance_sec ではない**（下のコメント参照）。
+    vad_max_speech_duration_sec: float = 30.0
+    # 音声だと判定する確率の下限。上げると、小さい音や雑音を音声と見なさなくなる。
+    vad_threshold: float = 0.5
+    # 区間を切る無音の長さ（ミリ秒）。faster-whisper の既定は 2000。
+    vad_min_silence_duration_ms: int = 2000
+    # 区間の前後に付ける余白（ミリ秒）。faster-whisper の既定は 400。
+    vad_speech_pad_ms: int = 400
     # 同一話者の連続する区間を1つの発話に結合する間隔の上限（秒）。
     # 2.0 は設計者が 2 本の録音で測った値で、ユーザーが 2026-11-05 に承認した。word_timestamps=True
     # （hallucination_silence_threshold > 0 で有効になる）にすると、Whisper の各区間が最後の単語で
     # 終わるので、1人の話の中の間（ま）が 0.4〜2.6 秒の間隔として現れ、0.4 では細かく割れる。
     # 実測: 2分の独話が 0.4 で 23 発話、2.0 で 7 発話。36分の通話は 255 発話から 136 発話。
     min_utterance_sec: float = 2.0
-    # 結合した発話の長さの上限（秒）。0 は「上限なし」。
+    # 同一話者の連続する区間を**結合する**ときの、結合後の長さの上限（秒）。0 は「上限なし」。
+    # **1つの文字起こし区間そのものがこれより長い場合、分割はしない**（merge.py の説明を参照。
+    # 分割の手段は merge.py に無い）。vad_filter = true のときは、区間自体の長さを
+    # vad_max_speech_duration_sec で抑える。vad_filter = false のときは、Whisper が音声を 30 秒の窓で
+    # 処理するので区間は 30 秒を超えない（2026-11-05 の 36分の通話で最長 26.5 秒）。
     max_utterance_sec: float = 30.0
     # faster-whisper の hotwords に渡す語。空でなければ、空白でつないだ1つの文字列にして
     # WhisperModel.transcribe(..., hotwords=...) に渡す。誤認識された頻出語を正しく取らせるための手段。

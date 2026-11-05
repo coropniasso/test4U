@@ -1,9 +1,28 @@
 config.toml
 data/
+
+# 音声と文字起こし。CLAUDE.md 2章は「保存場所：自分のPCとiCloud Driveのみ」を参加者に
+# 約束しているので、git の履歴に入れてはいけない。既定の設定では inbox と processed は
+# data/ の下だが、設定値なので別の場所を指せる。実機では iCloudDrive 配下のクローンの
+# 直下に置かれており、data/ では守れなかった（2026-11-04 に発覚）。
+# 拡張子でも落としておく。フォルダ名を変えても効くようにするためである。
+inbox/
+processed/
+transcripts/
+review_logs/
+batch_logs/
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.ogg
+
 __pycache__/
 .venv/
 *.duckdb
 *.duckdb.wal
+*.duckdb.bak
+*.before-v3.bak
 .pytest_cache/
 *.egg-info/
 dist/

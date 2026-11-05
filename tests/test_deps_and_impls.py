@@ -508,3 +508,63 @@ def test_match_が使う_model_name_は_extract_が書くものと一致する()
     cfg.extract.run_label = "think"
     _p, model_name = _provider_model(cfg, Provider.ollama)
     assert model_name == OllamaExtractor(cfg, FakeOllamaTransport([])).model_name
+
+
+# --- faster-whisper の VAD パラメータ ---------------------------------------------------------
+#
+# 既定のままでは区間が切れないことが実機で分かった（2026-11-04。34.2分の通話で 564.8 秒の区間が
+# 1つ出て、中身は3文字だった）。max_utterance_sec は結合を抑えるだけで分割はしないので、
+# 区間の長さを抑えるのは VAD 側である。
+
+
+def test_VAD_パラメータは設定から作られる():
+    from kijun.transcribe.faster_whisper_impl import build_vad_parameters
+
+    cfg = Config().transcribe
+    got = build_vad_parameters(cfg)
+    assert got["threshold"] == cfg.vad_threshold
+    assert got["min_silence_duration_ms"] == cfg.vad_min_silence_duration_ms
+    assert got["speech_pad_ms"] == cfg.vad_speech_pad_ms
+    # 既定で上限が入ること。これが入らないと 564.8 秒の区間が再発する
+    assert got["max_speech_duration_s"] == 30.0
+
+
+def test_上限を_0_にすると_max_speech_duration_s_を渡さない():
+    from kijun.transcribe.faster_whisper_impl import build_vad_parameters
+
+    cfg = Config().transcribe
+    cfg.vad_max_speech_duration_sec = 0
+    assert "max_speech_duration_s" not in build_vad_parameters(cfg)
+
+
+def test_その版が受け付けない項目は渡さない():
+    # faster-whisper の VadOptions は版によって項目が増減する。知らない名前を渡すと TypeError。
+    from kijun.transcribe.faster_whisper_impl import build_vad_parameters
+
+    cfg = Config().transcribe
+    got = build_vad_parameters(cfg, accepted={"threshold", "speech_pad_ms"})
+    assert set(got) == {"threshold", "speech_pad_ms"}
+
+
+def test_VadOptions_の項目名を取り出す():
+    import dataclasses
+    import types
+
+    from kijun.transcribe.faster_whisper_impl import vad_option_names
+
+    @dataclasses.dataclass
+    class VadOptions:
+        threshold: float = 0.5
+        max_speech_duration_s: float = float("inf")
+
+    # faster_whisper.vad.VadOptions にある場合
+    fw = types.SimpleNamespace(vad=types.SimpleNamespace(VadOptions=VadOptions))
+    assert vad_option_names(fw) == {"threshold", "max_speech_duration_s"}
+    # faster_whisper.VadOptions にある場合
+    assert vad_option_names(types.SimpleNamespace(VadOptions=VadOptions)) == {
+        "threshold", "max_speech_duration_s"
+    }
+    # 見つからない場合は None（絞り込まない）
+    assert vad_option_names(types.SimpleNamespace()) is None
+    # データクラスでない場合も None
+    assert vad_option_names(types.SimpleNamespace(VadOptions=object)) is None
