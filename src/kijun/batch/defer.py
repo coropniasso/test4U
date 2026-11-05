@@ -1,6 +1,6 @@
-"""ゲームの実行中は、GPU を使う手順を延期する(CLAUDE.md 4-8、docs/implementation-plan.md 15-2)。
+"""ゲームの実行中は、GPU を使う手順を延期する(CLAUDE.md 4-8、docs/history/implementation-plan.md 15-2)。
 
-夜間バッチの GPU を使う手順(文字起こし、LLM、埋め込み)は VRAM を使う。同じ PC でゲームが動いていると
+夜間バッチの GPU を使う手順(文字起こし、LLM)は VRAM を使う。同じ PC でゲームが動いていると
 競合するので、設定 batch.defer_if_running に挙げた実行ファイルのどれかが動いている間は、その手順を
 始めずに待つ。
 

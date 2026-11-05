@@ -5,10 +5,8 @@ inbox      = "./data/inbox"
 processed  = "./data/processed"
 transcripts = "./data/transcripts"
 db         = "./data/kijun.duckdb"
-# kijun discord post / read の実行記録を置く場所。DB には「投稿したこと」と「処理済みになった
-# 時刻」しか残らず、どのリアクションが付いたかは残らない。6章の指標と、7章の「文字起こしが
-# 読めなかった投稿に ✅ と ❌ のどちらが付いたか」を後から数えるために書き出す。
-review_logs = "./data/review_logs"
+# 議事録（Markdown。<会議ID>.md）を置く場所。
+minutes = "./data/minutes"
 
 [settings]
 # ファイル名の <形式>。この2つ以外は解析を失敗させる。
@@ -94,103 +92,66 @@ device = "cuda"
 # 話者数が分かっている場合はその人数を書く。0 なら pyannote が推定する（TOML には null が無いため、0 を「指定なし」として扱う）。
 num_speakers = 0
 
-[extract]
-# 抽出の背面は Ollama のみ（2026-11-05 のユーザーの決定。それ以前の Strata は削除した）。
-provider = "ollama"
-# 1リクエストに入れる会議の長さ（分）。推奨・未確定（2026-11-05 設計者の初期値）。
-# Ollama は ollama.num_ctx の中に入力と出力を入れる。Strata のときの 25 分より小さくした。
-# 目安: 12 分 × tokens_per_meeting_minute 180 ≒ 2,160 トークン + システムプロンプト + num_predict 8192
-# が num_ctx 16384 に収まる。収まらない設定は読み込みで拒否される（入力が黙って切り捨てられるのを防ぐため）。
-# kijun doctor の検査4で、この長さの入力の所要時間を測る。
-chunk_minutes = 12
-overlap_minutes = 1
-# 入力トークン数の概算の係数。既定値は Strata（Qwen3.8-Flash-Next）での実測1点からの推測で、
-# Ollama で使うモデルのトークナイザには当てはまらない。kijun doctor の検査4・5が実測値を出すので置き換える。
-# 従来は 1文字 1.5 トークンとしていたが、Strata での実測は概算 4,711 に対し実際は 1,646 トークンで約2.9倍の過大評価だった。
-# tokens_per_character: Strata での実測 1,646 ÷ 約3,141文字 ≒ 0.52 に少し余裕を持たせた値。
-# tokens_per_meeting_minute: 従来の 500 を 0.55/1.5 の比で換算して切り下げた値（500 × 0.55/1.5 ≒ 183）。
-tokens_per_character = 0.55
-tokens_per_meeting_minute = 180
-# extracted_requests.model_name に付ける印。設定を変えた2回の抽出を同じ会議の中に並べて残すために使う。
-# これが空だと、2回目の kijun extract が1回目の行を削除するので kijun compare が比較できない。
-# 例: think = false で流すときに run_label = "nothink" を入れ、
-#     もう一度 think = true / run_label = "think" で流してから
-#     kijun compare --conversation <ID> --model "<モデル>+nothink" --model "<モデル>+think" を実行する。
-# request_id にも入るので、英数字と . _ - だけ使える。
-run_label = ""
-
-[extract.ollama]
+[llm]
+# 議事録の生成が使う Ollama(2026-11-05 に抽出の背面を Ollama にした設定を、2026-11-06 に [extract.ollama] から移した)。
 # localhost ではなく数字で書く。Windows では localhost が IPv6 の ::1 に解決されることがあり、
-# サーバーが IPv4 だけで待ち受けていると接続拒否になる（CLAUDE.md 4-4 で踏んだ問題）。
+# サーバーが IPv4 だけで待ち受けていると接続拒否になる(チェックリスト時代の CLAUDE.md 4-4 で踏んだ問題)。
 base_url = "http://127.0.0.1:11434"
-# 2026-11-05 にユーザーが決定（qwen3:14b と比べた測定は CLAUDE.md 7章・10章）。
-# 存在するかは `ollama list` で確認する。
-# モデル名には ':' が入る（モデル名:タグ）。extracted_requests.model_name にはそのまま入り、
-# request_id と extract_logs のファイル名では他の記号に置き換わる。
+# 2026-11-05 にユーザーが決定(qwen3:14b と比べた測定は docs/history/checklist-era-CLAUDE.md 7章・10章)。
+# 存在するかは `ollama list` で確認する。議事録の生成に適するかは未測定(CLAUDE.md 7章)。
 model = "qwen3.5:9b"
-# 文脈長（入力 + 出力）。リクエストごとに options.num_ctx で送る。
+# 文脈長(入力 + 出力)。リクエストごとに options.num_ctx で送る。
 # 送らないと Ollama の既定になり、入力が黙って先頭から切り捨てられる。
 # 大きくすると KV キャッシュが増えて VRAM を使う。GPU に収まらなくなったかは doctor の検査3で見る。
 num_ctx = 16384
-# 出力の上限（推論を含む）。options.num_predict で送る。1024 未満は拒否される。
+# 出力の上限(推論を含む)。options.num_predict で送る。1024 未満は拒否される。
 # think を有効にしたモデルは答えの前に推論を書き、それも数える。小さすぎると推論の途中で切れて
 # JSON が1文字も出ない。1チャンクの所要時間の最悪値は num_predict ÷ 観測された最も遅い生成速度。
 num_predict = 8192
-# Qwen の推論モード。TOML には null が無いので、「書かない」ことで未指定（think を送らず、
-# モデルの既定に任せる）を表す。true / false を書くと、その値を送る。測定の対象:
-# scripts/variants.example.toml の *-think / *-nothink。
+# Qwen の推論モード。TOML には null が無いので、「書かない」ことで未指定(think を送らず、
+# モデルの既定に任せる)を表す。true / false を書くと、その値を送る。
 # **qwen3.5:9b では下の行のコメントを外して think = false を書く。** 2026-11-05 にユーザーが
-# qwen3.5:9b・think = false に決めた（CLAUDE.md 10章）。qwen3.5:9b は think を書かないと推論し、
+# qwen3.5:9b・think = false に決めた。qwen3.5:9b は think を書かないと推論し、
 # num_predict 8192 を推論で使い切って JSON が出なかった。コードの既定を false にしないのは、think に
-# 対応しないモデル（HTTP 400 になる）で、「書かない」ことで think を送らない選択を残すため。
+# 対応しないモデル(HTTP 400 になる)で、「書かない」ことで think を送らない選択を残すため。
 # think = false
 # 応答のたびにモデルを VRAM に置いておく時間。"0" なら応答のたびに下ろす。
 # "0" にする理由は、faster-whisper・pyannote と LLM を同時に VRAM に載せないため
-# （docs/implementation-plan.md 原則2-2）。"5m" のような値にすると、文字起こしの手順の時点で
+# (docs/history/implementation-plan.md 原則2-2)。"5m" のような値にすると、文字起こしの手順の時点で
 # LLM が VRAM に残り得る。代わりに応答のたびにモデルの読み込みが入る。
 keep_alive = "0"
-# 1リクエストの打ち切り時間（秒）。モデルの読み込みを含む。
+# 1リクエストの打ち切り時間(秒)。モデルの読み込みを含む。
 # kijun doctor の推奨値で置き換える。
 timeout_sec = 1800
 # format にスキーマを渡すか。渡すと Ollama が出力をスキーマに適合させる。
-# 出力は必ず repair.py を通してから検証するので、true でも修復は働く。
+# 出力は必ず修復(llm/repair.py)を通してから検証するので、true でも修復は働く。
 # kijun doctor の検査2が「読めない」と出たら false にする。
 enforces_json_schema = true
 
-[match]
-backend = "e5"
-model = "intfloat/multilingual-e5-large"
-# e5 系のモデルは入力に接頭辞が必要。付け忘れると類似度の精度が落ちる。
-# ruri に差し替える場合は、ruri の規約に合わせてこの2つを書き換える。
-query_prefix = "query: "
-passage_prefix = "passage: "
-# CLAUDE.md 4-5 の閾値。これ以上なら既存項目の根拠として紐付け、未満なら新規候補。
-similarity_threshold = 0.85
-device = "cuda"
+[minutes]
+# 議事録の生成(CLAUDE.md「議事録の生成」)。発話を chunk_minutes 分ごと(重なり 0)に分けて Ollama に投げる。
+# 推奨・未確定(2026-11-06 設計者の初期値。実測に基づかない)。
+# 目安: 15 分 × tokens_per_meeting_minute 180 ≒ 2,700 トークン + システムプロンプト + num_predict 8192
+# が num_ctx 16384 に収まる。収まらない設定は読み込みで拒否される(入力が黙って切り捨てられるのを防ぐため)。
+# kijun doctor の検査4で、この長さの入力の所要時間を測る。
+chunk_minutes = 15
+# 入力トークン数の概算の係数。既定値は Strata(Qwen3.8-Flash-Next)での実測1点からの推測で、
+# Ollama で使うモデルのトークナイザには当てはまらない。kijun doctor の検査4・5が実測値を出すので置き換える。
+# tokens_per_character: Strata での実測 1,646 ÷ 約3,141文字 ≒ 0.52 に少し余裕を持たせた値。
+# tokens_per_meeting_minute: 1分の会議の文字起こしの入力トークン数の概算。
+tokens_per_character = 0.55
+tokens_per_meeting_minute = 180
 
 [retention]
 # 文字起こしが完了してからこの日数が経った音声を削除する（CLAUDE.md 2章）。
 audio_days = 30
 
 [discord]
-# Discord のチャンネルID（数字の文字列）。空文字なら post と read は何もせず、
-# 設定が必要であることを出して終わる。
-# チャンネルは、プロジェクトのサーバーではなくユーザー個人のサーバーに作る（CLAUDE.md 2章）。
-review_channel_id = ""
-contradictions_channel_id = ""
-# 1回の post で投稿する新規候補の上限（CLAUDE.md 6章のレビュー所要時間の調整用）。
-max_candidates_per_run = 20
-# 1回の post で投稿する矛盾の可能性がある組の上限。
-max_contradictions_per_run = 5
-# 矛盾の候補とみなす類似度の下限。上限は match.similarity_threshold（0.85）で、
-# それ以上は重複として扱う。この規則は設計者が考案したもので、運用して見直す。
-contradiction_min_similarity = 0.70
-# 話者の対応付けで投稿する発言サンプルの件数（CLAUDE.md 4-6 は3件）。
-speaker_sample_count = 3
-# 1回の post で投稿する「文字起こしが読めなかった抽出結果」の上限。
-# 新規候補と同じ #review に出るので、レビューの所要時間を押し上げないよう上限を置く。
-# 新規候補より小さいのは、こちらはチェック項目にならないもので、レビューの本筋ではないため。
-max_transcription_unclear_per_run = 5
+# 議事録を投稿するチャンネルのID(数字の文字列)。空文字なら `kijun discord post` は何も投稿せず、
+# 設定が必要であることを出して正常終了する。
+# チャンネルは、プロジェクトのサーバーではなくユーザー個人のサーバーに作る(CLAUDE.md 2章)。
+# bot のトークンは設定ファイルに書かず、環境変数 DISCORD_BOT_TOKEN で渡す。
+minutes_channel_id = ""
 
 [batch]
 # 各手順の記録（<日時>.json）を置く場所。

@@ -14,7 +14,6 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -32,12 +31,8 @@ class PathsConfig(_Section):
     processed: Path = Path("./data/processed")
     transcripts: Path = Path("./data/transcripts")
     db: Path = Path("./data/kijun.duckdb")
-    # kijun discord post / read の実行記録（<種類>_<日時>.json）を置く場所。
-    # DB には「投稿したこと」と「処理済みになった時刻」しか残らず、どのリアクションが
-    # 付いたかは残らない。6章の指標（レビュー所要時間、修正せず承認した割合）と、
-    # 7章の「文字起こしが読めなかった投稿に ✅ と ❌ のどちらが付いたか」を後から数えるために、
-    # 実行ごとの報告をそのまま書き出す。
-    review_logs: Path = Path("./data/review_logs")
+    # 議事録の Markdown（<会議ID>.md）を置く場所。
+    minutes: Path = Path("./data/minutes")
 
 
 class SettingsConfig(_Section):
@@ -125,12 +120,12 @@ class DiarizeConfig(_Section):
 
 
 class OllamaConfig(_Section):
-    """抽出と、抽出以外の LLM の用途（返信の振り分け・重要度の判定・話者の解釈）が使う Ollama の設定。
+    """議事録の生成が使う Ollama の設定（設定ファイルの [llm]）。
 
     すべて Ollama のネイティブ API（POST /api/chat）のリクエストごとに送る。OpenAI 互換の
     /v1/chat/completions を使わないのは、num_ctx と keep_alive をリクエストごとに渡せないためである。
     既定値は 2026-11-05 に設計者（Claude）が置いた初期値で、実測に基づかない（推奨・未確定）。
-    `uv run kijun doctor` と `scripts/measure_extraction.py` で測って置き換える。
+    `uv run kijun doctor` で測って置き換える。
     """
 
     # localhost ではなく数字で書く。Windows では localhost が IPv6 の ::1 に解決されることがあり、
@@ -153,12 +148,12 @@ class OllamaConfig(_Section):
     think: bool | None = None
     # 応答のたびにモデルを VRAM に置いておく時間。"0" なら応答のたびに下ろす。
     # "0" にする理由は、faster-whisper・pyannote と LLM を同時に VRAM に載せないためである
-    # （docs/implementation-plan.md 原則2-2）。"5m" のような値にすると、文字起こしの手順の時点で
+    # （docs/history/implementation-plan.md 原則2-2）。"5m" のような値にすると、文字起こしの手順の時点で
     # LLM が VRAM に残り得る。
     keep_alive: str = Field(default="0", min_length=1)
     timeout_sec: int = Field(default=1800, gt=0)
     # format にスキーマを渡すか。渡すと Ollama が出力をスキーマに適合させる。
-    # 出力は必ず repair.py を通してから検証するので、真でも修復は働く。
+    # 出力は必ず llm/repair.py を通してから検証するので、真でも修復は働く。
     # 適合するかは doctor の検査2で確認する。適合しなければ false にする。
     enforces_json_schema: bool = True
 
@@ -172,74 +167,21 @@ class OllamaConfig(_Section):
         return self
 
 
-class ExtractConfig(_Section):
-    # 値は1つだが Literal のままにする（将来背面を足すときの型の受け皿）。
-    provider: Literal["ollama"] = "ollama"
-    # 1リクエストに入れる会議の長さ（分）。推奨・未確定（2026-11-05 設計者の初期値）。
-    # Ollama は num_ctx（既定 16384）の中に入力と出力を入れるので、Strata のときの 25 分より小さくした。
-    # 目安: 12 分 × tokens_per_meeting_minute 180 ≒ 2,160 トークン + システムプロンプト + num_predict 8192
-    # が num_ctx に収まる。収まらない設定は読み込みで拒否する。
-    chunk_minutes: int = Field(default=12, gt=0)
-    overlap_minutes: int = Field(default=1, ge=0)
-    # 入力トークン数の概算に使う係数。既定値は Strata（Qwen3.8-Flash-Next）での実測1点からの推測であり、
-    # Ollama で使うモデルのトークナイザには当てはまらない。`uv run kijun doctor` の検査4・5の実測値で
-    # 置き換えるべきもの。
-    # tokens_per_character: Strata での実測 1,646 トークン ÷ 約3,141文字 ≒ 0.52 に少し余裕を持たせた値。
-    # tokens_per_meeting_minute: 従来の 500（係数 1.5 に対応）を 0.55/1.5 の比で換算して切り下げた値。
+class MinutesConfig(_Section):
+    """議事録の生成（minutes/）の設定。
+
+    発話を chunk_minutes 分ごとのチャンク（重なり 0）に分け、チャンクごとに Ollama へ投げる。
+    既定値は 2026-11-06 に設計者（Claude）が置いた初期値で、実測に基づかない（推奨・未確定）。
+    """
+
+    # 1リクエストに入れる会議の長さ（分）。Ollama は llm.num_ctx の中に入力と出力を入れるので、
+    # 入力（chunk_minutes × tokens_per_meeting_minute + システムプロンプト）と num_predict の合計が
+    # num_ctx に収まらない設定は、読み込みで拒否する（Config の検証）。
+    chunk_minutes: int = Field(default=15, gt=0)
+    # 入力トークン数の概算に使う係数。抽出のときに Strata で測った1点からの推測で、Ollama のモデルの
+    # トークナイザには当てはまらない。`uv run kijun doctor` の検査4・5が実測値を出すので置き換える。
     tokens_per_character: float = Field(default=0.55, gt=0)
     tokens_per_meeting_minute: int = Field(default=180, gt=0)
-    # extracted_requests.model_name に付ける印。設定を変えた2回の抽出を、同じ会議の中で
-    # 並べて残すために使う（CLAUDE.md 4-4 の「同じ背面の設定を変えた2回の実行の比較」）。
-    # これが無いと、2回目の kijun extract が1回目の行を削除してしまい、kijun compare が
-    # 比較できない（extract/run.py の delete_requests は (会議ID, model_name) で消すため）。
-    # 例: think = false で流すときに run_label = "nothink" を入れる。
-    # 空文字なら model_name は ollama.model のまま。request_id にも入るので英数字・._- に限る。
-    run_label: str = Field(default="", pattern=r"^[A-Za-z0-9._-]*$")
-    ollama: OllamaConfig = Field(default_factory=OllamaConfig)
-
-    @model_validator(mode="after")
-    def _分割と文脈長の整合(self) -> "ExtractConfig":
-        if self.chunk_minutes <= self.overlap_minutes:
-            raise ValueError(
-                f"chunk_minutes（{self.chunk_minutes}）は overlap_minutes（{self.overlap_minutes}）より"
-                "大きくしてください。そうでないとチャンクが進みません"
-            )
-        # 入力が num_ctx を超えると、Ollama はエラーを出さずに先頭を捨てる。捨てられた発話が抽出結果から
-        # 静かに消えるので、走らせる前に拒否する（docs/implementation-plan.md 原則2-4「失うより止める」）。
-        from kijun.extract.prompt import SYSTEM_PROMPT  # 循環 import を避けるため、使うときに読み込む
-
-        o = self.ollama
-        system = int(len(SYSTEM_PROMPT) * self.tokens_per_character)
-        user = self.chunk_minutes * self.tokens_per_meeting_minute
-        need = user + system + o.num_predict
-        if need > o.num_ctx:
-            raise ValueError(
-                f"入力が文脈長に収まりません。chunk_minutes {self.chunk_minutes} 分 × "
-                f"tokens_per_meeting_minute {self.tokens_per_meeting_minute} = 約{user} トークン、"
-                f"システムプロンプトの概算 約{system} トークン、出力の上限 num_predict {o.num_predict} の合計は"
-                f"{need} で、ollama.num_ctx（{o.num_ctx}）を超えます。"
-                "chunk_minutes か num_predict を下げるか、num_ctx を上げてください"
-            )
-        return self
-
-    def model_name(self) -> str:
-        """extracted_requests.model_name に入れる名前。run_label があれば + でつなぐ。
-
-        Ollama のモデル名には ':' が入る（qwen3.5:9b）。model_name は ':' を残したまま DB に入れる。
-        request_id には使える文字が決まっているので、そちらでは extract/run.py の request_id_model が
-        置き換える。
-        """
-        model = self.ollama.model
-        return f"{model}+{self.run_label}" if self.run_label else model
-
-
-class MatchConfig(_Section):
-    backend: str = "e5"
-    model: str = "intfloat/multilingual-e5-large"
-    query_prefix: str = "query: "
-    passage_prefix: str = "passage: "
-    similarity_threshold: float = 0.85
-    device: str = "cuda"
 
 
 class RetentionConfig(_Section):
@@ -247,23 +189,10 @@ class RetentionConfig(_Section):
 
 
 class DiscordConfig(_Section):
-    # Discord のチャンネルID（数字の文字列）。空文字なら post と read は何もせず、設定が必要であることを出して終わる。
-    review_channel_id: str = ""
-    contradictions_channel_id: str = ""
-    # 1回の post で投稿する新規候補の上限（CLAUDE.md 6章のレビュー所要時間の調整用）。
-    max_candidates_per_run: int = 20
-    # 1回の post で投稿する矛盾の可能性がある組の上限。
-    max_contradictions_per_run: int = 5
-    # 矛盾の候補とみなす類似度の下限。上限は match.similarity_threshold で、それ以上は重複として扱う。
-    # この規則は設計者（Claude）が考案したもので、運用して見直す。
-    contradiction_min_similarity: float = 0.70
-    # 話者の対応付けで投稿する発言サンプルの件数（CLAUDE.md 4-6 は3件）。
-    speaker_sample_count: int = 3
-    # 1回の post で投稿する「文字起こしが読めなかった抽出結果」の上限（CLAUDE.md 7章の案A）。
-    # 新規候補と同じ #review に出るので、レビューの所要時間（6章）を押し上げないよう上限を置く。
-    # 新規候補より小さくしてあるのは、こちらはチェック項目にならないものであり、
-    # レビューの本筋ではないためである。
-    max_transcription_unclear_per_run: int = 5
+    # 議事録を投稿するチャンネルのID（数字の文字列）。空文字なら `kijun discord post` は何もせず、
+    # 設定が必要であることを出して正常終了する。
+    # チャンネルは、プロジェクトのサーバーではなくユーザー個人のサーバーに作る（CLAUDE.md 2章）。
+    minutes_channel_id: str = ""
 
 
 _TASK_TIME = re.compile(r"(?:[01]?\d|2[0-3]):[0-5]\d")
@@ -306,11 +235,31 @@ class Config(_Section):
     bundle: BundleConfig = Field(default_factory=BundleConfig)
     transcribe: TranscribeConfig = Field(default_factory=TranscribeConfig)
     diarize: DiarizeConfig = Field(default_factory=DiarizeConfig)
-    extract: ExtractConfig = Field(default_factory=ExtractConfig)
-    match: MatchConfig = Field(default_factory=MatchConfig)
+    llm: OllamaConfig = Field(default_factory=OllamaConfig)
+    minutes: MinutesConfig = Field(default_factory=MinutesConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     batch: BatchConfig = Field(default_factory=BatchConfig)
+
+    @model_validator(mode="after")
+    def _チャンクが文脈長に収まること(self) -> "Config":
+        # 入力が num_ctx を超えると、Ollama はエラーを出さずに先頭を捨てる。捨てられた発話が議事録から
+        # 静かに消えるので、走らせる前に拒否する（docs/history/implementation-plan.md 原則2-4「失うより止める」）。
+        from kijun.minutes.prompt import CHUNK_SYSTEM_PROMPT  # 循環 import を避けるため、使うときに読み込む
+
+        m, o = self.minutes, self.llm
+        system = int(len(CHUNK_SYSTEM_PROMPT) * m.tokens_per_character)
+        user = m.chunk_minutes * m.tokens_per_meeting_minute
+        need = user + system + o.num_predict
+        if need > o.num_ctx:
+            raise ValueError(
+                f"入力が文脈長に収まりません。minutes.chunk_minutes {m.chunk_minutes} 分 × "
+                f"tokens_per_meeting_minute {m.tokens_per_meeting_minute} = 約{user} トークン、"
+                f"システムプロンプトの概算 約{system} トークン、出力の上限 llm.num_predict {o.num_predict} の合計は"
+                f"{need} で、llm.num_ctx（{o.num_ctx}）を超えます。"
+                "chunk_minutes か num_predict を下げるか、num_ctx を上げてください"
+            )
+        return self
 
 
 class ConfigError(Exception):

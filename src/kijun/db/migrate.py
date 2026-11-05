@@ -12,42 +12,21 @@ from pathlib import Path
 import duckdb
 
 # schema.sql を変更したら、この値を1つ上げ、差分を適用する処理を MIGRATIONS に足す。
-# バージョン2: discord_posts に channel_id と pair_item_id を足した（第2弾の Discord 連携）。
-# バージョン3: extracted_requests に transcription_unclear を、discord_posts に request_id を
-# 足した（CLAUDE.md 7章の案A。文字起こしが壊れた発話から作られた抽出結果を Discord に出す）。
-# バージョン4: extracted_requests に stated_reason_unverified と applies_when_unverified を足した
-# （stated_reason / applies_when を原文と照合し、一致しなかった元の値を残す。2026-11-05）。
-SCHEMA_VERSION = 4
+# バージョン2〜4: チェックリスト時代の列の追加（discord_posts の channel_id など、extracted_requests の
+#   transcription_unclear など）。2026-11-06 に目的を議事録に変えたとき、これらのテーブルを schema.sql から
+#   外したので、差分の文も削除した。履歴は docs/history/ にある。
+# バージョン5: minutes テーブルを足した（議事録。CREATE TABLE IF NOT EXISTS で作るので差分の文は無い）。
+SCHEMA_VERSION = 5
 
 # 移行先のバージョン -> 既存の DB に適用する文。
 # schema.sql は `CREATE TABLE IF NOT EXISTS` なので、既存のテーブルに列を足さない。
 # 列を足す変更は、新規の DB には schema.sql の CREATE で入り、既存の DB にはここで入る。
 # `ADD COLUMN IF NOT EXISTS` にしてあるのは、途中で失敗して再実行しても安全にするため。
+#
+# **古いテーブル（extracted_requests など）には何もしない。** バージョン4の DB を移行しても、それらの
+# テーブルとデータはそのまま残る（チェックリスト時代のデータを消さない方針）。
 MIGRATIONS: dict[int, list[str]] = {
-    2: [
-        "ALTER TABLE discord_posts ADD COLUMN IF NOT EXISTS channel_id VARCHAR",
-        "ALTER TABLE discord_posts ADD COLUMN IF NOT EXISTS pair_item_id VARCHAR",
-    ],
-    # 既存の行は FALSE になる。既存の抽出結果について、文字起こしが壊れていたかどうかは
-    # 後から判定できない（判定していたのは抽出のときのモデルである）。推測で埋めず FALSE にする。
-    # 既存の会議を見直したい場合は、その会議を再抽出する。
-    # DuckDB は ALTER ADD COLUMN に制約を付けられない（Parser Error: Adding columns with
-    # constraints not yet supported）。そのため、DEFAULT 付きで足してから NOT NULL にする2文に
-    # 分ける。既存の行には DEFAULT の FALSE が入るので、NOT NULL を付けても失敗しない。
-    # こうするのは、新規に作った DB（schema.sql の CREATE）と移行した DB のスキーマを
-    # 同じにするためである。食い違うと、片方では NULL を書けて片方では書けない状態になる。
-    # 2文目に IF NOT EXISTS は付けられないが、既に NOT NULL の列に対して実行しても通る。
-    3: [
-        "ALTER TABLE extracted_requests ADD COLUMN IF NOT EXISTS "
-        "transcription_unclear BOOLEAN DEFAULT FALSE",
-        "ALTER TABLE extracted_requests ALTER COLUMN transcription_unclear SET NOT NULL",
-        "ALTER TABLE discord_posts ADD COLUMN IF NOT EXISTS request_id VARCHAR",
-    ],
-    # 既存の行は NULL になる。これらの行は照合の前に保存されたので、「照合で外れた」とは言えない。
-    4: [
-        "ALTER TABLE extracted_requests ADD COLUMN IF NOT EXISTS stated_reason_unverified VARCHAR",
-        "ALTER TABLE extracted_requests ADD COLUMN IF NOT EXISTS applies_when_unverified VARCHAR",
-    ],
+    5: [],
 }
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
@@ -95,3 +74,16 @@ def apply_schema(con: duckdb.DuckDBPyConnection) -> int:
             [SCHEMA_VERSION, datetime.now()],
         )
     return SCHEMA_VERSION
+
+
+def ensure_current(con: duckdb.DuckDBPyConnection) -> int | None:
+    """スキーマが適用済みで古いバージョンなら、最新にして、そのバージョンを返す。未適用(schema_version が無い)なら None。
+
+    移行は列やテーブルを足すだけで、既存のデータを消さない(MIGRATIONS の説明を参照)。
+    `kijun db init` を実行し忘れた古い DB でも、夜間バッチや minutes が「テーブルが無い」で落ちないように、
+    DB を開く箇所(cli.py の _open_db、batch/pending.py)がこの関数を通す。
+    """
+    version = current_version(con)
+    if version is not None and version < SCHEMA_VERSION:
+        return apply_schema(con)
+    return version

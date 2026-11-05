@@ -1,7 +1,7 @@
 [project]
 name = "kijun"
 version = "0.1.0"
-description = "会話録音から判断基準を抽出し、チェックリスト化する仕組み"
+description = "会話の録音を文字起こしし、議事録にまとめる仕組み"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,7 +22,6 @@ transcribe = ["av", "faster-whisper>=1.0", "pyannote.audio>=3.3", "torch>=2.4", 
     "nvidia-cudnn-cu12>=9.27,<9.28; sys_platform == 'win32'",
 ]
 extract = ["httpx>=0.27"]
-match = ["sentence-transformers>=3.0"]
 discord = ["discord.py>=2.4"]
 
 [dependency-groups]

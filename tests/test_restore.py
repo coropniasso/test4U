@@ -284,7 +284,7 @@ def test_CLI_dry_run_と本実行_と_force(tmp_path):
     assert r.exit_code == 0 and "復元します（発話 3 件）" in r.output and "書いていません" in r.output
     r = runner.invoke(app, [*base, "restore-transcript", "--conversation", CID])
     assert r.exit_code == 0 and "復元しました（発話 3 件）" in r.output
-    assert "kijun extract" in r.output and "kijun match" in r.output  # やり直しが必要なことを出す
+    assert "kijun minutes" in r.output  # 議事録は復元されないことを出す
     r = runner.invoke(app, [*base, "restore-transcript", "--all"])
     assert "既にあるのでスキップ" in r.output
     r = runner.invoke(app, [*base, "restore-transcript", "--all", "--force"])

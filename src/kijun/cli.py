@@ -1,6 +1,6 @@
-"""kijun のサブコマンド（計画書 第12節）。
+"""kijun のサブコマンド。
 
-GPU・ネットワークに触る実装（faster-whisper、pyannote、Ollama、sentence-transformers）は、
+GPU・ネットワークに触る実装（faster-whisper、pyannote、Ollama、discord.py）は、
 サブコマンドの実行時に初めて import する。`kijun --help` は、これらが入っていなくても動く。
 """
 
@@ -11,7 +11,6 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
@@ -21,42 +20,29 @@ from kijun import ollama_api
 from kijun.config import Config, ConfigError, load_config
 from kijun.db import migrate, repo
 from kijun.deps import MissingDependencyError
-from kijun.table import format_table
 
 app = typer.Typer(
-    help="会話録音から判断基準を抽出し、チェックリスト化する仕組み。",
+    help="会話の録音から議事録を作る仕組み。",
     no_args_is_help=True,
     add_completion=False,
 )
 db_app = typer.Typer(help="DuckDB の操作。", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 discord_app = typer.Typer(
-    help="Discord でのレビュー(bot は常駐しない。夜間バッチが read と post を順に起動する)。",
+    help="Discord への議事録の投稿(bot は常駐しない。夜間バッチが post を起動する)。",
     no_args_is_help=True,
 )
 app.add_typer(discord_app, name="discord")
 batch_app = typer.Typer(
-    help="夜間バッチ(CLAUDE.md 4-8)。既存の CLI を別プロセスとして順に起動する。",
+    help="夜間バッチ(CLAUDE.md 夜間バッチ)。既存の CLI を別プロセスとして順に起動する。",
     no_args_is_help=True,
 )
 app.add_typer(batch_app, name="batch")
 
 
-class Provider(str, Enum):
-    """抽出の背面。2026-11-05 の決定で Ollama のみ。将来背面を足すときの受け皿として残す。"""
-
-    ollama = "ollama"
-
-
 ConversationOpt = Annotated[
     str, typer.Option("--conversation", help="会議ID（例: 20260920_1930_f2f_teirei）")
 ]
-ProviderOpt = Annotated[
-    Provider | None,
-    typer.Option("--provider", help="抽出に使うモデルの提供元。省略すると設定の extract.provider。"),
-]
-
-
 @app.callback()
 def main(
     ctx: typer.Context,
@@ -91,7 +77,7 @@ def _config(ctx: typer.Context) -> Config:
 def _open_db(cfg: Config):
     """DB に接続する。スキーマが未適用なら、`kijun db init` を促して終了する。"""
     con = repo.connect(cfg.paths.db)
-    if migrate.current_version(con) is None:
+    if migrate.ensure_current(con) is None:
         con.close()
         raise _fail("DB のスキーマが未適用です。先に `uv run kijun db init` を実行してください。")
     return con
@@ -111,29 +97,6 @@ def _build_diarizer(cfg: Config):
     from kijun.transcribe.pyannote_impl import PyannoteDiarizer
 
     return PyannoteDiarizer(cfg.diarize)
-
-
-def _build_extractor(cfg: Config, provider: Provider):
-    if provider != Provider.ollama:
-        raise _fail(f"未対応の extract.provider です: {provider.value}")
-    from kijun.extract.ollama_impl import OllamaExtractor
-
-    return OllamaExtractor(cfg)
-
-
-def _build_embedder(cfg: Config):
-    if cfg.match.backend != "e5":
-        raise _fail(f"未対応の match.backend です: {cfg.match.backend}")
-    from kijun.match.e5_impl import E5Embedder
-
-    return E5Embedder(cfg.match)
-
-
-def _provider_model(cfg: Config, provider: Provider | None) -> tuple[Provider, str]:
-    """背面と、その背面が extracted_requests.model_name に入れるモデル名を返す。"""
-    p = provider or Provider(cfg.extract.provider)
-    # extract が書く名前と同じものを返す。食い違うと match が「照合の対象がありません」になる。
-    return p, cfg.extract.model_name()
 
 
 # --- db ----------------------------------------------------------------------
@@ -313,54 +276,59 @@ def restore_transcript_cmd(
                 typer.echo(f"{label}: {o.message}", err=o.status == STATUS_ERROR)
         suffix = "（--dry-run のため、DB には書いていません）" if dry_run else ""
         typer.echo(f"\n復元 {done} 件 / 対象 {len(outcomes)} 件{suffix}。")
-        typer.echo(
-            "extracted_requests、knowledge_items、item_evidence は復元されません。"
-            "必要なら `kijun extract` と `kijun match` をやり直してください。"
-        )
+        typer.echo("minutes（議事録）は復元されません。必要なら `kijun minutes --conversation <ID>` をやり直してください。")
         if any(o.status == STATUS_ERROR for o in outcomes):
             raise typer.Exit(code=1)
 
 
-# --- extract -----------------------------------------------------------------
+# --- minutes -----------------------------------------------------------------
 
 
 @app.command()
-def extract(ctx: typer.Context, conversation: ConversationOpt, provider: ProviderOpt = None) -> None:
-    """発話から要求・指摘を抽出し、extracted_requests に書く。"""
-    from kijun.extract.run import run_extraction
+def minutes(
+    ctx: typer.Context,
+    conversation: Annotated[
+        str | None,
+        typer.Option("--conversation", help="議事録を作る（作り直す）会議ID。文字起こし済みであること。"),
+    ] = None,
+    pending: Annotated[
+        bool, typer.Option("--pending", help="議事録の無い、文字起こし済みの会議すべてについて作る。")
+    ] = False,
+) -> None:
+    """文字起こしから議事録（Markdown）を作り、minutes テーブルに記録する。"""
+    from kijun.llm.chat import OllamaJsonChat
+    from kijun.minutes.generate import MinutesError, generate_minutes
 
+    if (conversation is None) == (not pending):
+        raise _fail("--conversation と --pending のどちらか一方を指定してください。")
     with _errors():
         cfg = _config(ctx)
-        prov, _model = _provider_model(cfg, provider)
         con = _open_db(cfg)
-        extractor = _build_extractor(cfg, prov)
-        run = run_extraction(con, cfg, conversation, extractor)
-        con.close()
-        o = run.outcome
-        typer.echo(
-            f"{conversation}: モデル {run.model_name} で {run.saved_count} 件を保存しました"
-            f"（チャンク {run.chunk_count} 個、失敗 {len(run.failures)} 個）。"
-        )
-        typer.echo(
-            f"捨てた件数: 番号が範囲外 {o.invalid_count}、重複区間 {o.overlap_dropped_count}、"
-            f"quote の重複 {o.duplicate_count}"
-        )
-        typer.echo(
-            "原文と照合して外した値（NULL にし、元の値は *_unverified 列に残した）: "
-            f"stated_reason {run.rejected_count('stated_reason')} 件、"
-            f"applies_when {run.rejected_count('applies_when')} 件"
-        )
-        for r in run.verbatim_rejections:
-            typer.echo(f"  外した {r.field}: 「{r.value}」（引用: {r.quote[:40]}）")
-        if run.repair_events:
-            truncated = sum(r.truncated_items for r in run.repair_events)
-            typer.echo(
-                f"出力を修復したチャンク: {len(run.repair_events)} 個"
-                + (f"（末尾が切れて捨てた要素 {truncated} 件）" if truncated else "")
-                + "。内容は extract_logs の JSON を見てください。"
-            )
-        for f in run.failures:
-            typer.echo(f"失敗したチャンク: 発話 {f.seq_from}〜{f.seq_to}: {f.reason}", err=True)
+        try:
+            ids = [conversation] if conversation else [
+                c.conversation_id for c in repo.list_conversations_without_minutes(con)
+            ]
+            if not ids:
+                typer.echo("議事録を作る対象の会議がありません（文字起こし済みで、議事録の無い会議）。")
+                return
+            chat = OllamaJsonChat(cfg.llm)
+            failed = 0
+            for cid in ids:
+                started = time.monotonic()
+                try:
+                    run = generate_minutes(con, cfg, cid, chat)
+                except MinutesError as e:
+                    failed += 1
+                    typer.echo(f"{cid}: 議事録を作れませんでした: {e}", err=True)
+                    continue
+                typer.echo(
+                    f"{cid}: 議事録を保存しました: {run.path}"
+                    f"（モデル {run.model_name}、チャンク {run.chunk_count} 個、{time.monotonic() - started:.0f} 秒）"
+                )
+        finally:
+            con.close()
+        if failed:
+            raise typer.Exit(code=1)
 
 
 # --- doctor ------------------------------------------------------------------
@@ -391,98 +359,12 @@ def doctor(
             raise typer.Exit(code=1)
 
 
-# --- compare -----------------------------------------------------------------
-
-
-@app.command()
-def compare(
-    ctx: typer.Context,
-    conversation: ConversationOpt,
-    out: Annotated[Path | None, typer.Option("--out", help="Markdown の保存先。省略すると data/compare/<ID>.md。")] = None,
-    model: Annotated[
-        list[str] | None,
-        typer.Option("--model", help="比較するモデル名。2 回指定する。省略すると抽出結果のある全モデル。"),
-    ] = None,
-) -> None:
-    """同じ会議を2回抽出した結果の対照表（Markdown）を出す。"""
-    from kijun.compare.report import build_report
-
-    with _errors():
-        cfg = _config(ctx)
-        con = _open_db(cfg)
-        report = build_report(con, cfg, conversation, model)
-        con.close()
-        out_path = out or (cfg.paths.db.parent / "compare" / f"{conversation}.md")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(report, encoding="utf-8")
-        typer.echo(f"対照表を保存しました: {out_path}")
-
-
-# --- match -------------------------------------------------------------------
-
-
-@app.command()
-def match(
-    ctx: typer.Context,
-    conversation: ConversationOpt,
-    provider: ProviderOpt = None,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="DB に書かず、最類似の既存項目と類似度を表で出す。")
-    ] = False,
-) -> None:
-    """抽出結果を既存のチェック項目と照合する。"""
-    from kijun.match.link import link_requests
-
-    with _errors():
-        cfg = _config(ctx)
-        _prov, model_name = _provider_model(cfg, provider)
-        con = _open_db(cfg)
-        embedder = _build_embedder(cfg)
-        results = link_requests(con, cfg, conversation, embedder, model_name=model_name, dry_run=dry_run)
-        con.close()
-        if not results:
-            typer.echo("照合の対象がありません（reusable = true で、未紐付けの抽出結果が無い）。")
-            return
-        rows = [
-            [
-                r.request_id,
-                "-" if r.similarity is None else f"{r.similarity:.3f}",
-                r.best_item_id or "-",
-                "既存項目に紐付け" if r.action == "linked" else "新規候補",
-                r.request_summary,
-            ]
-            for r in results
-        ]
-        typer.echo(
-            format_table(["抽出結果", "類似度", "最類似の既存項目", "結果", "要約"], rows)
-        )
-        typer.echo(f"\n閾値: {cfg.match.similarity_threshold}")
-        if dry_run:
-            typer.echo("--dry-run のため、DB には書いていません。")
-
-
 # --- discord -----------------------------------------------------------------
-
-
-@discord_app.command("read")
-def discord_read(ctx: typer.Context) -> None:
-    """前回までに投稿したメッセージのリアクションと返信を読み取り、DB に反映する(夜間バッチの手順1)。"""
-    from kijun.discord.run import read_command
-
-    with _errors():
-        cfg = _config(ctx)
-        con = _open_db(cfg)
-        try:
-            code = read_command(con, cfg, echo=typer.echo)
-        finally:
-            con.close()
-        if code:
-            raise typer.Exit(code=code)
 
 
 @discord_app.command("post")
 def discord_post(ctx: typer.Context) -> None:
-    """新規候補・矛盾の可能性がある組・話者の対応付けの依頼・束ね結果を投稿する(夜間バッチの手順8)。"""
+    """未投稿の議事録を Discord に投稿する(夜間バッチの手順4)。"""
     from kijun.discord.run import post_command
 
     with _errors():
@@ -506,7 +388,7 @@ def batch_run(
         bool, typer.Option("--dry-run", help="実行する順序と各コマンドを表示するだけで、何も実行しない。")
     ] = False,
 ) -> None:
-    """夜間バッチを実行する(discord read -> ingest -> transcribe -> extract -> match -> discord post)。"""
+    """夜間バッチを実行する(ingest -> transcribe -> minutes -> discord post)。"""
     from kijun.batch.run import format_summary, plan_lines, run_batch, write_log
     from kijun.batch.runner import SubprocessRunner
 
@@ -518,7 +400,7 @@ def batch_run(
             typer.echo("\n--dry-run のため、何も実行していません。")
             return
         transport = None
-        if ollama_api.keeps_model_loaded(cfg.extract.ollama):
+        if ollama_api.keeps_model_loaded(cfg.llm):
             from kijun.transport import HttpxTransport
 
             transport = HttpxTransport()  # keep_alive が "0" 以外のとき、モデルを下ろす要求に使う
@@ -567,48 +449,6 @@ def batch_install_task(
         if uv == "uv":
             typer.echo("注意: uv のフルパスが見つからなかったので `uv` と書きました。タスクスケジューラの PATH に uv が無い場合は、XML の Command を uv.exe のフルパスに書き換えてください。")
         typer.echo("注意: ユーザーがログオンしている間(画面ロックを含む)に実行します。ログオフ中は実行されません。")
-
-
-# --- derive-direction --------------------------------------------------------
-
-
-@app.command("derive-direction")
-def derive_direction(
-    ctx: typer.Context,
-    conversation: Annotated[
-        str | None, typer.Option("--conversation", help="direction を導出する会議ID。")
-    ] = None,
-    all_: Annotated[
-        bool, typer.Option("--all", help="speaker_map がある会議すべてについて導出する。")
-    ] = False,
-) -> None:
-    """speaker_map から extracted_requests.direction を導出する(speaker_map を手で直した後にも使う)。"""
-    from kijun.review.direction import conversations_with_speaker_map, derive_directions
-
-    if (conversation is None) == (not all_):
-        raise _fail("--conversation と --all のどちらか一方を指定してください。")
-    with _errors():
-        cfg = _config(ctx)
-        con = _open_db(cfg)
-        try:
-            ids = [conversation] if conversation else conversations_with_speaker_map(con)
-            results = [derive_directions(con, i) for i in ids]
-        finally:
-            con.close()
-        if not results:
-            typer.echo("speaker_map のある会議がありません。")
-            return
-        rows = [
-            [
-                r.conversation_id,
-                "導出した" if r.derived else "導出しない",
-                str(r.total), str(r.self_to_other), str(r.other_to_self), str(r.undetermined), r.note,
-            ]
-            for r in results
-        ]
-        typer.echo(
-            format_table(["会議ID", "結果", "抽出件数", "自分→相手", "相手→自分", "未確定(NULL)", "備考"], rows)
-        )
 
 
 # --- purge-audio -------------------------------------------------------------

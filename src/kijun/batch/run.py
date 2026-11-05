@@ -1,31 +1,25 @@
-"""夜間バッチの本体(仕様 3-1、3-2、CLAUDE.md 4-8)。
+"""夜間バッチの本体(CLAUDE.md 夜間バッチ)。
 
 既存の CLI を subprocess で別プロセスとして順に起動する。ここには処理の中身を書かない
 (原則2-2。1つの Python プロセスの中で全部を呼ぶと faster-whisper と LLM が同時に VRAM を使う危険が出る)。
 
 | 手順 | 実行するもの | 失敗したとき |
 |---|---|---|
-| 1 | kijun discord read | 続ける |
-| 2 | kijun ingest | **止める** |
-| 3-4 | kijun transcribe --conversation <ID>(会議ごと) | その会議だけ飛ばす |
-| 5 | (手順3-4のプロセスの終了。OS が GPU メモリを解放する) | - |
-| 6 | kijun extract --conversation <ID>(会議ごと) | その会議だけ飛ばす |
-| 7 | kijun match --conversation <ID>(会議ごと) | その会議だけ飛ばす |
-| 8 | kijun discord post | 続ける |
-| 9 | (処理済み音声の移動は transcribe が既に行う) | - |
+| 1 | kijun ingest | **止める** |
+| 2 | kijun transcribe --conversation <ID>(会議ごと。話者分離を含む) | その会議だけ飛ばす |
+| 3 | kijun minutes --conversation <ID>(会議ごと) | その会議だけ飛ばす |
+| 4 | kijun discord post | 続ける(最後の手順) |
 
-LLM は Ollama で、設定 extract.ollama.keep_alive が "0" なら応答のたびに VRAM から下ろされる。
-したがって手順3-4の時点で LLM は VRAM に載っておらず、バッチは LLM の起動も停止もしない
-(2026-11-05 に Strata から移った。以前は start_command と stop_command で挟んでいた)。
-keep_alive を "0" 以外にした場合は、手順1の後と手順6の後に、モデルを下ろす要求
-(POST /api/generate、keep_alive 0)を送る。そうしないと、文字起こしの手順の時点で LLM が VRAM に残り得る
-(docs/implementation-plan.md 15-2)。
+処理済み音声の processed への移動は、手順2の transcribe が行う。手順2のプロセスが終了すると OS が
+GPU メモリを解放するので、手順3の LLM と VRAM を取り合わない。
 
-GPU を使う手順(手順1の返信の振り分け、3-4、6、7、8の重要度の判定)の直前には、ゲームが動いていないかを
-確認する(batch/defer.py)。動いていれば待ち、待った時間が batch.defer_max_hours を超えたら、残りの
-GPU を使う手順をすべて飛ばして終える。飛ばした会議は、翌晩に batch/pending.py が未処理として拾う。
-手順1と8は LLM が使えなくても動く(返信は原文だけ記録して未処理に残り、重要度は NULL で投稿される)。
-LLM が要るとき(未処理の投稿がある・重要度が未判定の候補がある)だけ、ゲームの確認を挟む。
+LLM は Ollama で、設定 llm.keep_alive が "0" なら応答のたびに VRAM から下ろされる。したがって手順2の時点で
+LLM は VRAM に載っておらず、バッチは LLM の起動も停止もしない。keep_alive を "0" 以外にした場合は、
+手順3の後に、モデルを下ろす要求(POST /api/generate、keep_alive 0)を送る。
+
+GPU を使う手順(2、3)の直前には、ゲームが動いていないかを確認する(batch/defer.py)。動いていれば待ち、
+待った時間が batch.defer_max_hours を超えたら、残りの GPU を使う手順をすべて飛ばして終える。
+飛ばした会議は、翌晩に batch/pending.py が未処理として拾う。手順4(Discord への投稿)は GPU を使わない。
 """
 
 from __future__ import annotations
@@ -39,14 +33,10 @@ from datetime import datetime
 from pathlib import Path
 
 from kijun.batch.defer import GameDeferrer, GateResult, ProcessLister
-from kijun.batch.pending import (
-    open_db_if_ready, pending_extraction, pending_match, pending_transcription,
-)
+from kijun.batch.pending import open_db_if_ready, pending_minutes, pending_transcription
 from kijun.batch.runner import CommandRunner
 from kijun import ollama_api
 from kijun.config import Config
-from kijun.discord.post import count_candidates_needing_importance
-from kijun.discord.read import count_unprocessed
 from kijun.table import format_table
 from kijun.transport import HttpTransport, HttpxTransport
 
@@ -134,26 +124,21 @@ def plan_lines(cfg: Config, config_path: Path | None) -> list[str]:
     return [
         f"開始時刻  {cfg.batch.task_time}(kijun batch install-task の --time を省略したときの値)",
         f"ゲーム    {gate}",
-        f"手順1    {d('discord', 'read')}",
-        "         失敗しても続ける。未処理の投稿があるときは、実行の前にゲームの確認を挟む(返信の振り分けに LLM を使うため)",
-        f"手順2    {d('ingest')}",
+        f"手順1    {d('ingest')}",
         "         失敗したら止める(会議が登録できなければ以降が何もできない)",
-        f"手順3-4  {d('transcribe', '--conversation', '<ID>')}",
-        "         文字起こし前の会議ごとに、ゲームの確認を挟んで実行する。失敗した会議だけ飛ばして次に進む",
-        "手順5    (手順3-4のプロセスの終了で OS が GPU メモリを解放する)",
-        f"手順6    {d('extract', '--conversation', '<ID>')}",
-        "         抽出前の会議ごとに、ゲームの確認を挟んで実行する。失敗した会議だけ飛ばす。"
-        f"LLM は Ollama(keep_alive = {cfg.extract.ollama.keep_alive!r})で、バッチは起動も停止もしない"
+        f"手順2    {d('transcribe', '--conversation', '<ID>')}",
+        "         文字起こし前の会議ごとに、ゲームの確認を挟んで実行する(話者分離を含む)。失敗した会議だけ飛ばして次に進む。"
+        "処理済みの音声の processed への移動もこの手順が行う。プロセスの終了で OS が GPU メモリを解放する",
+        f"手順3    {d('minutes', '--conversation', '<ID>')}",
+        "         議事録の無い、文字起こし済みの会議ごとに、ゲームの確認を挟んで実行する。失敗した会議だけ飛ばす。"
+        f"LLM は Ollama(keep_alive = {cfg.llm.keep_alive!r})で、バッチは起動も停止もしない"
         + (
-            '。keep_alive が "0" ではないので、手順1と手順6の後にモデルを下ろす要求を送る'
-            if ollama_api.keeps_model_loaded(cfg.extract.ollama)
+            '。keep_alive が "0" ではないので、手順3の後にモデルを下ろす要求を送る'
+            if ollama_api.keeps_model_loaded(cfg.llm)
             else "。応答のたびに VRAM から下りるので、アンロードの要求は送らない"
         ),
-        f"手順7    {d('match', '--conversation', '<ID>')}",
-        "         未紐付けの抽出結果がある会議ごとに、ゲームの確認を挟んで実行する。失敗した会議だけ飛ばす",
-        f"手順8    {d('discord', 'post')}",
-        "         失敗しても続ける。重要度が未判定の候補があるときは、実行の前にゲームの確認を挟む(重要度の判定に LLM を使うため)",
-        "手順9    (処理済み音声を processed へ移す処理は、手順3-4の transcribe が既に行う)",
+        f"手順4    {d('discord', 'post')}",
+        "         未投稿の議事録を Discord に投稿する。失敗しても、記録して終わる(GPU を使わないので、ゲームの確認は挟まない)",
     ]
 
 
@@ -203,7 +188,7 @@ class _Batch:
         "0" なら Ollama が応答のたびに下ろすので、何もしない。下ろせなくても処理は止めない
         (失敗として記録する。Ollama が動いていなければ、そもそも読み込まれていない)。
         """
-        ollama = self.cfg.extract.ollama
+        ollama = self.cfg.llm
         if not ollama_api.keeps_model_loaded(ollama):
             return
         transport = self.transport or HttpxTransport()
@@ -240,70 +225,43 @@ class _Batch:
         return result.proceed
 
     # --- 手順 ---
-    def step1_read(self) -> None:
-        with open_db_if_ready(self.cfg) as con:
-            needs_llm = con is not None and count_unprocessed(con) > 0
-        if needs_llm and not self._gate("1", "Discord の読み取り"):
-            return
-        self._run_kijun("1", "Discord の読み取り", "discord", "read")
-        self._unload_llm("1")
+    def step1_ingest(self) -> bool:
+        return self._run_kijun("1", "inbox の取り込み", "ingest")
 
-    def step2_ingest(self) -> bool:
-        return self._run_kijun("2", "inbox の取り込み", "ingest")
-
-    def step3_transcribe(self) -> None:
+    def step2_transcribe(self) -> None:
         with open_db_if_ready(self.cfg) as con:
             targets = pending_transcription(con) if con else []
         if not targets:
-            self._skip("3-4", "文字起こし", "文字起こし前の会議がありません")
+            self._skip("2", "文字起こし", "文字起こし前の会議がありません")
         for cid in targets:
-            if self._gate("3-4", f"文字起こし {cid}"):
-                self._run_kijun("3-4", f"文字起こし {cid}", "transcribe", "--conversation", cid)
-        # 手順5: transcribe のプロセスが終了した時点で、OS が GPU メモリを解放している
+            if self._gate("2", f"文字起こし {cid}"):
+                self._run_kijun("2", f"文字起こし {cid}", "transcribe", "--conversation", cid)
+        # transcribe のプロセスが終了した時点で、OS が GPU メモリを解放している
 
-    def step6_extract(self) -> None:
+    def step3_minutes(self) -> None:
         with open_db_if_ready(self.cfg) as con:
-            targets = pending_extraction(con, self.cfg) if con else []
+            targets = pending_minutes(con) if con else []
         if not targets:
-            self._skip("6", "抽出", "抽出前の会議がありません")
+            self._skip("3", "議事録", "議事録の無い、文字起こし済みの会議がありません")
         for cid in targets:
-            if self._gate("6", f"抽出 {cid}"):
-                self._run_kijun("6", f"抽出 {cid}", "extract", "--conversation", cid)
+            if self._gate("3", f"議事録 {cid}"):
+                self._run_kijun("3", f"議事録 {cid}", "minutes", "--conversation", cid)
         if targets:
-            self._unload_llm("6")
+            self._unload_llm("3")
 
-    def step7_match(self) -> None:
-        with open_db_if_ready(self.cfg) as con:
-            targets = pending_match(con, self.cfg) if con else []
-        if not targets:
-            self._skip("7", "照合", "照合する抽出結果がありません")
-        for cid in targets:
-            if self._gate("7", f"照合 {cid}"):
-                self._run_kijun("7", f"照合 {cid}", "match", "--conversation", cid)
-
-    def step8_post(self) -> None:
-        with open_db_if_ready(self.cfg) as con:
-            needs_llm = (
-                con is not None
-                and bool(self.cfg.discord.review_channel_id)
-                and count_candidates_needing_importance(con) > 0
-            )
-        if needs_llm and not self._gate("8", "Discord への投稿"):
-            return
-        self._run_kijun("8", "Discord への投稿", "discord", "post")
+    def step4_post(self) -> None:
+        self._run_kijun("4", "Discord への投稿", "discord", "post")
 
     def run(self) -> BatchResult:
         try:
-            self.step1_read()
-            if not self.step2_ingest():
+            if not self.step1_ingest():
                 # 会議が登録できなければ、以降は何もできない
-                for step, name in (("3-4", "文字起こし"), ("6", "抽出"), ("7", "照合"), ("8", "Discord への投稿")):
-                    self._skip(step, name, "手順2(ingest)が失敗したため止めました")
+                for step, name in (("2", "文字起こし"), ("3", "議事録"), ("4", "Discord への投稿")):
+                    self._skip(step, name, "手順1(ingest)が失敗したため止めました")
                 return self.result
-            self.step3_transcribe()
-            self.step6_extract()
-            self.step7_match()
-            self.step8_post()
+            self.step2_transcribe()
+            self.step3_minutes()
+            self.step4_post()
             return self.result
         finally:
             self.result.ended_at = self.clock()
@@ -319,11 +277,11 @@ def run_batch(
     echo: Callable[[str], None] = print,
     transport: HttpTransport | None = None,
 ) -> BatchResult:
-    """バッチを実行する。1つの会議の失敗では止めず、手順2が失敗したときだけ止める。
+    """バッチを実行する。1つの会議の失敗では止めず、手順1が失敗したときだけ止める。
 
     lister はゲームの検出(batch.defer_if_running が空なら使われない)。sleep は延期中の待機で、
     テストでは実時間を待たない関数を渡す。transport はモデルを下ろす要求に使い、
-    extract.ollama.keep_alive が "0" なら使われない。
+    llm.keep_alive が "0" なら使われない。
     """
     deferrer = GameDeferrer(cfg.batch, lister, sleep, clock, warn=echo)
     return _Batch(cfg, config_path, runner, deferrer, clock, echo, transport).run()

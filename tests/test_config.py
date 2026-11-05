@@ -24,17 +24,13 @@ def test_計画書の主な既定値():
     c = Config()
     assert c.bundle.gap_minutes == 30
     assert c.bundle.require_same_setting is True
-    assert c.match.similarity_threshold == 0.85
     assert c.retention.audio_days == 30
     assert c.settings.formats == ["f2f", "call"]
 
 
 def test_Ollama_の既定値():
     # 2026-11-05 に設計者が置いた初期値(推奨・未確定)。実測で置き換える。
-    c = Config()
-    assert c.extract.provider == "ollama"
-    assert c.extract.chunk_minutes == 12 and c.extract.overlap_minutes == 1
-    o = c.extract.ollama
+    o = Config().llm
     # localhost ではなく数字(Windows で ::1 に解決される問題を避ける)
     assert o.base_url == "http://127.0.0.1:11434"
     assert o.model == "qwen3.5:9b"
@@ -45,27 +41,29 @@ def test_Ollama_の既定値():
     assert o.enforces_json_schema is True
 
 
-def test_Strata_の設定は無い():
-    # 2026-11-05 に削除した。古い [extract.strata] が残った設定は、綴り間違いと同じく拒否する。
-    assert not hasattr(Config().extract, "strata")
-    with pytest.raises(ValidationError):
-        Config.model_validate({"extract": {"strata": {"model": "x"}}})
-    with pytest.raises(ValidationError):
-        Config.model_validate({"extract": {"provider": "strata"}})
-    with pytest.raises(ValidationError):
-        Config.model_validate({"batch": {"strata_ready_timeout_sec": 1800}})
-
-
-def test_第2弾の設定の既定値():
+def test_議事録の既定値():
+    # 2026-11-06 に設計者が置いた初期値(推奨・未確定)
     c = Config()
-    assert c.discord.review_channel_id == "" and c.discord.contradictions_channel_id == ""
-    assert c.discord.max_candidates_per_run == 20
-    assert c.discord.max_contradictions_per_run == 5
-    assert c.discord.contradiction_min_similarity == 0.70
-    assert c.discord.speaker_sample_count == 3
+    assert c.minutes.chunk_minutes == 15
+    assert c.paths.minutes == Path("./data/minutes")
+    assert c.discord.minutes_channel_id == ""
     assert c.batch.log_dir == Path("./data/batch_logs")
-    # 矛盾の下限は、重複として統合される閾値より小さくなければ範囲が空になる
-    assert c.discord.contradiction_min_similarity < c.match.similarity_threshold
+
+
+def test_チェックリスト時代の設定は拒否する():
+    # 2026-11-06 に削除した。古い設定が残った config.toml は、綴り間違いと同じく読み込みで拒否する。
+    for raw in [
+        {"extract": {"chunk_minutes": 15}},
+        {"extract": {"ollama": {"model": "x"}}},
+        {"match": {"model": "x"}},
+        {"discord": {"review_channel_id": "1"}},
+        {"discord": {"contradictions_channel_id": "1"}},
+        {"paths": {"review_logs": "./x"}},
+    ]:
+        with pytest.raises(ValidationError):
+            Config.model_validate(raw)
+    c = Config()
+    assert not hasattr(c, "extract") and not hasattr(c, "match")
 
 
 def test_config_toml_が無ければ既定値(tmp_path, monkeypatch):
@@ -85,7 +83,7 @@ def test_書いた項目だけが上書きされる(tmp_path):
     assert c.bundle.gap_minutes == 10
     assert c.bundle.require_same_setting is True  # 書かなかった項目は既定値
     assert c.paths.inbox == Path("C:/x/inbox")
-    assert c.extract.chunk_minutes == 12
+    assert c.minutes.chunk_minutes == 15
 
 
 def test_綴り間違いのキーは拒否する(tmp_path):
@@ -97,7 +95,7 @@ def test_綴り間違いのキーは拒否する(tmp_path):
 
 def test_不正な値は拒否する(tmp_path):
     p = tmp_path / "config.toml"
-    p.write_text('[extract]\nprovider = "gpt"\n', encoding="utf-8")
+    p.write_text('[llm]\nnum_ctx = "大きい"\n', encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(p)
 
@@ -131,63 +129,47 @@ def test_cfg_フィクスチャの_Path_設定はすべて_tmp_path_の下(cfg, 
     assert outside == {}, f"一時ディレクトリの外を指す設定がある（テストが利用者のデータを汚す）: {outside}"
 
 
-def test_run_label_は英数字と記号3種だけ許す(tmp_path):
-    # request_id（"<会議ID>#<model_name>#<番号>"）とログのファイル名に入るため。
-    import pytest
-    from pydantic import ValidationError
-
-    from kijun.config import Config
-
-    assert Config.model_validate({"extract": {"run_label": "q35-9b-nothink.1"}})
-    for bad in ["medium 1", "日本語", "a/b", "a#b", "a+b"]:
-        with pytest.raises(ValidationError):
-            Config.model_validate({"extract": {"run_label": bad}})
-
-
-def test_モデル名の_run_label_と_コロン():
-    c = Config.model_validate({"extract": {"run_label": "think"}})
-    assert c.extract.model_name() == "qwen3.5:9b+think"
-    assert Config().extract.model_name() == "qwen3.5:9b"  # ':' は残す
-
-
 def test_num_predict_は_1024_以上でなければ拒否する():
     # 推論(think)も数えるので、小さすぎると推論の途中で切れて JSON が1文字も出ない。
     for ok in [1024, 8192]:
-        assert Config.model_validate({"extract": {"ollama": {"num_predict": ok}}})
+        assert Config.model_validate({"llm": {"num_predict": ok}})
     for bad in [1, 512, 1023]:
         with pytest.raises(ValidationError, match="1024"):
-            Config.model_validate({"extract": {"ollama": {"num_predict": bad}}})
+            Config.model_validate({"llm": {"num_predict": bad}})
 
 
 def test_num_predict_は_num_ctx_より小さくなければ拒否する():
     with pytest.raises(ValidationError, match="num_predict"):
-        Config.model_validate({"extract": {"ollama": {"num_ctx": 4096, "num_predict": 4096}}})
+        Config.model_validate({"llm": {"num_ctx": 4096, "num_predict": 4096}})
 
 
-def test_chunk_minutes_は_overlap_minutes_より大きくなければ拒否する():
-    for chunk, overlap in [(5, 5), (3, 4)]:
-        with pytest.raises(ValidationError, match="chunk_minutes"):
-            Config.model_validate({"extract": {"chunk_minutes": chunk, "overlap_minutes": overlap}})
-    assert Config.model_validate({"extract": {"chunk_minutes": 6, "overlap_minutes": 5}})
+def test_chunk_minutes_は_1_以上():
+    for bad in [0, -1]:
+        with pytest.raises(ValidationError):
+            Config.model_validate({"minutes": {"chunk_minutes": bad}})
 
 
 def test_入力が文脈長に収まらない設定は拒否する():
     # Ollama は入力が num_ctx を超えると、エラーを出さずに先頭を捨てる。走らせる前に拒否する。
     with pytest.raises(ValidationError, match="収まりません") as e:
-        Config.model_validate({"extract": {"chunk_minutes": 60}})  # 60 × 180 + system + 8192 > 16384
+        Config.model_validate({"minutes": {"chunk_minutes": 60}})  # 60 × 180 + system + 8192 > 16384
     assert "num_ctx" in str(e.value)
     # num_ctx を上げれば通る
-    assert Config.model_validate({"extract": {"chunk_minutes": 60, "ollama": {"num_ctx": 32768}}})
+    assert Config.model_validate({"minutes": {"chunk_minutes": 60}, "llm": {"num_ctx": 32768}})
     # num_predict を下げても通る
-    assert Config.model_validate({"extract": {"chunk_minutes": 60, "ollama": {"num_predict": 2048}}})
+    assert Config.model_validate({"minutes": {"chunk_minutes": 60}, "llm": {"num_predict": 2048}})
 
 
 def test_既定の設定は文脈長にある程度の余裕を持って収まる():
-    from kijun.extract.prompt import SYSTEM_PROMPT
+    from kijun.minutes.prompt import CHUNK_SYSTEM_PROMPT
 
-    e = Config().extract
-    need = e.chunk_minutes * e.tokens_per_meeting_minute + int(len(SYSTEM_PROMPT) * e.tokens_per_character) + e.ollama.num_predict
-    assert need <= e.ollama.num_ctx
+    c = Config()
+    need = (
+        c.minutes.chunk_minutes * c.minutes.tokens_per_meeting_minute
+        + int(len(CHUNK_SYSTEM_PROMPT) * c.minutes.tokens_per_character)
+        + c.llm.num_predict
+    )
+    assert need <= c.llm.num_ctx
 
 
 def test_batch_の既定値とゲーム検出の設定():

@@ -4,16 +4,9 @@ import random
 
 import pytest
 
-from kijun.extract.chunk import (
-    Chunk,
-    merge_chunk_results,
-    normalize_quote,
-    restore_global_seq,
-    split_into_chunks,
-)
+from kijun.minutes.chunk import Chunk, split_into_chunks
 from kijun.models import Utterance
 from tests.conftest import make_utterances
-from tests.fakes import make_item
 
 
 def seqs(chunk: Chunk) -> list[int]:
@@ -132,161 +125,22 @@ def test_先頭が長い独話でも進む():
     assert {s for c in chunks for s in seqs(c)} == set(range(6))
 
 
-# --- 発話番号の復元 -------------------------------------------------------------------
+# --- 議事録の分け方(重なり 0) ----------------------------------------------------------
 
 
-def make_chunk(seq_from: int, size: int, index: int = 1) -> Chunk:
-    utterances = make_utterances(seq_from + size)[seq_from:]
-    return Chunk(index=index, seq_from=seq_from, seq_to=seq_from + size - 1, utterances=utterances)
+def test_重なり0で60分の会議を15分ごとに4つに分ける_発話は重複も欠落もしない():
+    chunks = split_into_chunks(make_utterances(60), 15, 0)
+    assert [seqs(c) for c in chunks] == [list(range(0, 15)), list(range(15, 30)), list(range(30, 45)), list(range(45, 60))]
 
 
-def test_チャンク内の番号をグローバルな_seq_に復元する():
-    chunk = make_chunk(seq_from=23, size=25)
-    restored = restore_global_seq(make_item(0, 3), chunk)
-    assert (restored.seq_from, restored.seq_to) == (23, 26)
-    restored = restore_global_seq(make_item(24), chunk)
-    assert (restored.seq_from, restored.seq_to) == (47, 47)
-
-
-def test_先頭のチャンクでは番号が変わらない():
-    chunk = make_chunk(seq_from=0, size=10, index=0)
-    assert restore_global_seq(make_item(4, 5), chunk).seq_from == 4
-
-
-def test_範囲外や逆順の番号は_None():
-    chunk = make_chunk(seq_from=23, size=25)
-    assert restore_global_seq(make_item(25), chunk) is None  # 25 件目（0〜24 の外）
-    assert restore_global_seq(make_item(-1), chunk) is None
-    assert restore_global_seq(make_item(3, 2), chunk) is None
-    # 元のオブジェクトは変更されない
-    original = make_item(1)
-    restore_global_seq(original, chunk)
-    assert original.seq_from == 1
-
-
-# --- 重複排除 -------------------------------------------------------------------------
-
-
-def two_chunks():
-    """チャンク0 = seq 0〜24、チャンク1 = seq 23〜47（重複区間は seq 23〜24）。"""
-    chunks = split_into_chunks(make_utterances(100), 25, 2)
-    return chunks[0], chunks[1], chunks[2]
-
-
-def test_重複区間をまたぐ抽出結果が1件に落ちる():
-    c0, c1, _ = two_chunks()
-    # 同じ指摘（グローバルな seq 23）が、チャンク0 では番号 23、チャンク1 では番号 0 として2回出る
-    outcome = merge_chunk_results(
-        [
-            (c0, [make_item(23, quote="結論を先に書いて")]),
-            (c1, [make_item(0, quote="結論を先に書いて")]),
-        ]
-    )
-    assert len(outcome.items) == 1
-    assert outcome.items[0].seq_from == 23
-    assert outcome.overlap_dropped_count == 1
-
-
-def test_重複区間では後続チャンクの結果を捨て_前のチャンクの結果を残す():
-    c0, c1, _ = two_chunks()
-    outcome = merge_chunk_results(
-        [
-            (c0, [make_item(24, quote="前のチャンクの文言")]),
-            (c1, [make_item(1, quote="後のチャンクの文言")]),  # グローバル seq 24（重複区間）
-        ]
-    )
-    assert [i.quote for i in outcome.items] == ["前のチャンクの文言"]
-
-
-def test_重複区間の外の結果は両方残る():
-    c0, c1, _ = two_chunks()
-    outcome = merge_chunk_results(
-        [
-            (c0, [make_item(5, quote="a")]),
-            (c1, [make_item(10, quote="b")]),  # グローバル seq 33
-        ]
-    )
-    assert [(i.seq_from, i.quote) for i in outcome.items] == [(5, "a"), (33, "b")]
-    assert outcome.overlap_dropped_count == 0
-
-
-def test_seq_from_と_seq_to_が全チャンクでグローバルな番号になる():
-    c0, c1, c2 = two_chunks()
-    outcome = merge_chunk_results(
-        [
-            (c0, [make_item(2, 4, quote="q0")]),
-            (c1, [make_item(5, 7, quote="q1")]),  # 23 + 5 = 28, 30
-            (c2, [make_item(5, 7, quote="q2")]),  # チャンク2 の先頭は重複区間なので、その外の番号を使う
-        ]
-    )
-    got = [(i.quote, i.seq_from, i.seq_to) for i in outcome.items]
-    assert got[0] == ("q0", 2, 4)
-    assert got[1] == ("q1", 28, 30)
-    assert got[2][0] == "q2" and got[2][1] == c2.seq_from + 5 and got[2][2] == c2.seq_from + 7
-    # 発話の本文と突き合わせて、番号が正しい発話を指していることを確かめる
-    all_utterances = {u.seq: u for u in make_utterances(100)}
-    assert all_utterances[got[1][1]].text == "発話28"
-
-
-def test_結果は_seq_from_の昇順に並ぶ():
-    c0, c1, _ = two_chunks()
-    outcome = merge_chunk_results(
-        [(c0, [make_item(9, quote="b"), make_item(3, quote="a")]), (c1, [make_item(20, quote="c")])]
-    )
-    assert [i.seq_from for i in outcome.items] == [3, 9, 43]
-
-
-def test_保険の重複判定_quote_が一致し_seq_from_の差が2以内なら同一とみなす():
-    c0, c1, _ = two_chunks()
-    # チャンク1 の番号 3 = グローバル 26。重複区間（23〜24）の外だが、チャンク0 の 24 と quote が同じで差が 2
-    outcome = merge_chunk_results(
-        [
-            (c0, [make_item(24, quote="結論を、先に書いて。")]),
-            (c1, [make_item(3, quote="結論を先に書いて")]),  # 句読点と空白の違いは無視する
-        ]
-    )
-    assert len(outcome.items) == 1
-    assert outcome.duplicate_count == 1
-
-
-def test_保険の重複判定_seq_from_の差が3以上なら別の指摘():
-    c0, c1, _ = two_chunks()
-    outcome = merge_chunk_results(
-        [
-            (c0, [make_item(24, quote="同じ文言")]),
-            (c1, [make_item(4, quote="同じ文言")]),  # グローバル 27、差 3
-        ]
-    )
-    assert len(outcome.items) == 2
-
-
-def test_保険の重複判定_quote_が違えば別の指摘():
-    c0, c1, _ = two_chunks()
-    outcome = merge_chunk_results(
-        [(c0, [make_item(24, quote="文言A")]), (c1, [make_item(3, quote="文言B")])]
-    )
-    assert len(outcome.items) == 2
-
-
-def test_直前のチャンクの抽出が失敗していたら重複区間の結果を捨てない():
-    c0, c1, _ = two_chunks()
-    outcome = merge_chunk_results([(c0, None), (c1, [make_item(0, quote="q")])])  # グローバル seq 23
-    assert [i.seq_from for i in outcome.items] == [23]
-    assert outcome.overlap_dropped_count == 0
-
-
-def test_範囲外の番号は捨てて件数を数える():
-    c0, _, _ = two_chunks()
-    outcome = merge_chunk_results([(c0, [make_item(99, quote="q"), make_item(1, quote="r")])])
-    assert [i.quote for i in outcome.items] == ["r"]
-    assert outcome.invalid_count == 1
-
-
-def test_すべて失敗なら空():
-    c0, c1, _ = two_chunks()
-    assert merge_chunk_results([(c0, None), (c1, None)]).items == []
-
-
-def test_normalize_quote():
-    assert normalize_quote("結論を、先に 書いて。") == "結論を先に書いて"
-    assert normalize_quote("A b！") == "Ab"
+def test_重なり0ではランダムな長さの発話でも全発話がちょうど1回ずつ入る():
+    rng = random.Random(7)
+    t = 0.0
+    utterances = []
+    for i in range(300):
+        length = rng.uniform(1, 90)
+        utterances.append(Utterance(i, "SPEAKER_00", t, t + length, "x"))
+        t += length + rng.uniform(0, 3)
+    chunks = split_into_chunks(utterances, 15, 0)
+    flat = [s for c in chunks for s in seqs(c)]
+    assert flat == list(range(300))

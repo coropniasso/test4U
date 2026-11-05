@@ -1,266 +1,94 @@
-"""スキーマの移行（仕様 2-10、テスト 8）と、第2弾で足した repo 関数の検査。"""
+"""スキーマの移行。バージョン4(チェックリスト時代)の DB を、データを消さずに議事録の版へ移す。"""
 
 from __future__ import annotations
 
 from datetime import datetime
 
 import duckdb
-import pytest
 
 from kijun.db import migrate, repo
 
-# バージョン1の discord_posts（channel_id と pair_item_id が無い形）
-V1_DISCORD_POSTS = """
-CREATE TABLE discord_posts (
-    message_id      VARCHAR PRIMARY KEY,
-    post_type       VARCHAR NOT NULL,
-    item_id         VARCHAR,
-    conversation_id VARCHAR,
-    posted_at       TIMESTAMP NOT NULL,
-    processed_at    TIMESTAMP
-)
+# バージョン4の DB にあった、議事録の版では作らないテーブルとビューの見本(列は一部だけ)。
+V4_ONLY = """
+CREATE TABLE extracted_requests (request_id VARCHAR PRIMARY KEY, conversation_id VARCHAR NOT NULL, quote VARCHAR NOT NULL);
+CREATE TABLE knowledge_items (item_id VARCHAR PRIMARY KEY, check_text VARCHAR NOT NULL);
+CREATE TABLE discord_posts (message_id VARCHAR PRIMARY KEY, post_type VARCHAR NOT NULL);
+CREATE VIEW v_weekly_metrics AS SELECT conversation_id, count(*) AS requests FROM extracted_requests GROUP BY 1;
 """
 
 
-def columns(con, table: str) -> list[str]:
-    return [
-        r[0]
-        for r in con.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = ? "
-            "ORDER BY ordinal_position",
-            [table],
-        ).fetchall()
-    ]
+def tables(con) -> set[str]:
+    return {r[0] for r in con.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE'"
+    ).fetchall()}
 
 
-def make_v1_db(path):
-    """バージョン1のスキーマで作った DB。discord_posts に行が1つ入っている。"""
+def make_v4_db(path):
     con = duckdb.connect(str(path))
     con.execute(migrate.read_schema_sql())
-    con.execute("DROP TABLE discord_posts")
-    con.execute(V1_DISCORD_POSTS)
+    con.execute("DROP TABLE minutes")
+    for statement in V4_ONLY.strip().split(";\n"):
+        con.execute(statement)
     con.execute("DELETE FROM schema_version")
-    con.execute("INSERT INTO schema_version VALUES (1, ?)", [datetime(2026, 10, 4)])
-    con.execute(
-        "INSERT INTO discord_posts VALUES ('m1', 'new_candidate', 'item_0001', NULL, ?, NULL)",
-        [datetime(2026, 11, 1, 23, 30)],
-    )
+    con.execute("INSERT INTO schema_version VALUES (4, ?)", [datetime(2026, 11, 5)])
+    con.execute("INSERT INTO extracted_requests VALUES ('r1', 'c1', '結論を先に書いて')")
+    con.execute("INSERT INTO knowledge_items VALUES ('item_0001', '冒頭に行動を書くか')")
+    con.execute("INSERT INTO discord_posts VALUES ('m1', 'new_candidate')")
     return con
 
 
-def test_バージョン1のDBにALTER_TABLEで列が足され_既存の行が残る(tmp_path):
-    con = make_v1_db(tmp_path / "v1.duckdb")
-    assert "channel_id" not in columns(con, "discord_posts")
-    assert migrate.current_version(con) == 1
+def test_バージョン4のDBに_minutes_が足され_古いテーブルとデータはそのまま残る(tmp_path):
+    con = make_v4_db(tmp_path / "v4.duckdb")
+    assert "minutes" not in tables(con) and migrate.current_version(con) == 4
 
-    assert migrate.apply_schema(con) == 4
+    assert migrate.apply_schema(con) == 5
 
-    assert columns(con, "discord_posts")[-3:] == ["channel_id", "pair_item_id", "request_id"]
-    rows = con.execute("SELECT message_id, post_type, item_id, channel_id, pair_item_id FROM discord_posts").fetchall()
-    assert rows == [("m1", "new_candidate", "item_0001", None, None)]  # 既存の行が残り、新しい列は NULL
-    assert migrate.current_version(con) == 4
-    assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 2  # 1 と 4 の履歴
+    assert {"minutes", "extracted_requests", "knowledge_items", "discord_posts"} <= tables(con)
+    assert con.execute("SELECT quote FROM extracted_requests").fetchall() == [("結論を先に書いて",)]
+    assert con.execute("SELECT check_text FROM knowledge_items").fetchall() == [("冒頭に行動を書くか",)]
+    assert con.execute("SELECT post_type FROM discord_posts").fetchall() == [("new_candidate",)]
+    # 古いテーブルに依存するビューも残り、使える
+    assert con.execute("SELECT requests FROM v_weekly_metrics").fetchall() == [(1,)]
+    assert migrate.current_version(con) == 5
+    assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 2  # 4 と 5 の履歴
 
 
-def test_移行後の表に新しい列を使って書き込める(tmp_path):
-    con = make_v1_db(tmp_path / "v1.duckdb")
+def test_移行後の_minutes_に書き込める(tmp_path):
+    con = make_v4_db(tmp_path / "v4.duckdb")
     migrate.apply_schema(con)
-    repo.insert_discord_post(
-        con,
-        repo.DiscordPostRow("m2", repo.POST_CONTRADICTION, "item_0001", None, datetime(2026, 11, 2), None, "999", "item_0002"),
-    )
-    got = {p.message_id: p for p in repo.list_discord_posts(con)}
-    assert got["m2"].channel_id == "999" and got["m2"].pair_item_id == "item_0002"
-    assert got["m1"].channel_id is None
+    repo.upsert_minutes(con, "c1", "c1.md", "qwen3.5:9b", datetime(2026, 11, 6))
+    assert repo.get_minutes(con, "c1").path == "c1.md"
 
 
 def test_移行は何度実行しても安全(tmp_path):
-    con = make_v1_db(tmp_path / "v1.duckdb")
+    con = make_v4_db(tmp_path / "v4.duckdb")
     migrate.apply_schema(con)
     migrate.apply_schema(con)
-    assert columns(con, "discord_posts").count("channel_id") == 1
     assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 2
+    assert con.execute("SELECT count(*) FROM extracted_requests").fetchone()[0] == 1
 
 
-def test_新規のDBは移行を経ずに最新の形で作られる(con):
-    assert columns(con, "discord_posts") == [
-        "message_id", "post_type", "item_id", "conversation_id", "posted_at",
-        "processed_at", "channel_id", "pair_item_id", "request_id",
-    ]
+def test_新規のDBは古いテーブルを作らない(con):
+    assert tables(con) == {"schema_version", "conversations", "utterances", "minutes"}
     assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 1
 
 
-def test_review_log_の_action_は定数に無い値を拒否する(con):
-    with pytest.raises(ValueError, match="未定義"):
-        repo.insert_review_log(con, "i1", "approve", None, None, datetime.now())
-    assert len(set(repo.REVIEW_LOG_ACTIONS)) == 7
-    repo.insert_review_log(con, "i1", repo.ACTION_STATUS_CHANGED, "candidate", "approved", datetime(2026, 11, 3))
-    rows = repo.list_review_log(con, "i1")
-    assert [(r.action, r.before, r.after) for r in rows] == [("status_changed", "candidate", "approved")]
+def test_ensure_current_は古い_DB_を最新にし_未適用の_DB_には何もしない(tmp_path):
+    con = make_v4_db(tmp_path / "v4.duckdb")
+    assert migrate.ensure_current(con) == 5
+    assert "minutes" in tables(con) and con.execute("SELECT count(*) FROM extracted_requests").fetchone()[0] == 1
+    assert migrate.ensure_current(con) == 5  # 最新なら何もしない
+    assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 2
+
+    empty = duckdb.connect(str(tmp_path / "empty.duckdb"))
+    assert migrate.ensure_current(empty) is None
+    assert tables(empty) == set()  # 未適用の DB には何も作らない(db init を促す)
 
 
-def test_項目の欄の更新は_version_を上げ_許可した列だけ(con):
-    item = repo.KnowledgeItemRow("i1", None, "文言", None, None, None, None, None, "candidate", 1, datetime(2026, 11, 1))
-    repo.insert_knowledge_item(con, item)
-    repo.update_item_fields(con, "i1", {"reason": "理由"}, datetime(2026, 11, 3))
-    got = repo.get_knowledge_item(con, "i1")
-    assert got.reason == "理由" and got.version == 2 and got.updated_at == datetime(2026, 11, 3)
-    with pytest.raises(ValueError):
-        repo.update_item_fields(con, "i1", {"status": "approved"}, datetime.now())
+def test_batch_の_open_db_if_ready_は古い_DB_を移行する(cfg, tmp_path):
+    from kijun.batch.pending import open_db_if_ready, pending_minutes
 
-
-# --- バージョン2 から 3 への移行 -------------------------------------------------------
-#
-# 上の make_v1_db は、いまの schema.sql で作った DB から discord_posts だけを古い形に差し替える
-# ものなので、extracted_requests には最初から transcription_unclear がある。つまり移行3の
-# 「列を足す」部分を試していない。ここでは列を落として、本当にバージョン2の形から始める。
-
-
-def make_v2_db(path):
-    """バージョン2のスキーマで作った DB。extracted_requests に行が1つ入っている。"""
-    con = duckdb.connect(str(path))
-    con.execute(migrate.read_schema_sql())
-    con.execute("ALTER TABLE extracted_requests DROP COLUMN transcription_unclear")
-    con.execute("ALTER TABLE discord_posts DROP COLUMN request_id")
-    con.execute("DELETE FROM schema_version")
-    con.execute("INSERT INTO schema_version VALUES (2, ?)", [datetime(2026, 11, 3)])
-    con.execute(
-        "INSERT INTO conversations (conversation_id, recorded_at, setting_format, setting_kind, "
-        "source_files, created_at) VALUES ('c1', ?, 'f2f', 'teirei', '[]', ?)",
-        [datetime(2026, 11, 3, 19, 30), datetime(2026, 11, 3)],
-    )
-    con.execute(
-        "INSERT INTO extracted_requests (request_id, conversation_id, seq_from, seq_to, quote, "
-        "request_summary, reusable, source_type, model_name, extracted_at) "
-        "VALUES ('c1#m#0', 'c1', 0, 0, '結論を先に書いて', '結論を先に書くことを求めた', TRUE, "
-        "'live_conversation', 'm', ?)",
-        [datetime(2026, 11, 3)],
-    )
-    return con
-
-
-def test_バージョン2のDBに_transcription_unclear_が足され_既存の行は_FALSE_になる(tmp_path):
-    con = make_v2_db(tmp_path / "v2.duckdb")
-    assert "transcription_unclear" not in columns(con, "extracted_requests")
-    assert migrate.current_version(con) == 2
-
-    assert migrate.apply_schema(con) == 4
-
-    assert "transcription_unclear" in columns(con, "extracted_requests")
-    assert columns(con, "discord_posts")[-1] == "request_id"
-    # 既存の行は NULL ではなく FALSE になる。文字起こしが壊れていたかは後から判定できないので
-    # 推測で埋めず、「読めた」側の FALSE にする。
-    assert con.execute("SELECT transcription_unclear FROM extracted_requests").fetchall() == [(False,)]
-
-
-def test_バージョン2から移行した表は新規のDBと同じく_NOT_NULL(tmp_path):
-    # 新規の DB（schema.sql の CREATE）と移行した DB でスキーマが食い違うと、片方では NULL を
-    # 書けて片方では書けない状態になる。DuckDB は ALTER ADD COLUMN に制約を付けられないので、
-    # DEFAULT で足してから SET NOT NULL する2文に分けている。それが効いているかを確かめる。
-    con = make_v2_db(tmp_path / "v2.duckdb")
-    migrate.apply_schema(con)
-    notnull = {
-        r[1]: r[3]
-        for r in con.execute("PRAGMA table_info('extracted_requests')").fetchall()
-    }
-    assert notnull["transcription_unclear"] is True
-
-
-def test_バージョン2からの移行後に新しい列を使って読み書きできる(tmp_path):
-    con = make_v2_db(tmp_path / "v2.duckdb")
-    migrate.apply_schema(con)
-    repo.insert_requests(
-        con,
-        [
-            repo.RequestRow(
-                request_id="c1#m#1", conversation_id="c1", seq_from=1, seq_to=1,
-                speaker_from_label="SPEAKER_00", speaker_to_label=None, direction=None,
-                counterpart_role=None, artifact_type=None, quote="3つ目簡単フォーイスなんか減らしてください",
-                request_summary="「簡単フォーイス」を減らすことを求めた", stated_reason=None,
-                applies_when=None, reusable=False, pass_criterion=None,
-                source_type=repo.SOURCE_LIVE_CONVERSATION, model_name="m",
-                extracted_at=datetime(2026, 11, 4), transcription_unclear=True,
-            )
-        ],
-    )
-    got = {r.request_id: r for r in repo.get_requests(con, "c1")}
-    assert got["c1#m#1"].transcription_unclear is True
-    assert got["c1#m#0"].transcription_unclear is False
-
-    repo.insert_discord_post(
-        con,
-        repo.DiscordPostRow(
-            message_id="m9", post_type=repo.POST_TRANSCRIPTION_UNCLEAR, item_id=None,
-            conversation_id="c1", posted_at=datetime(2026, 11, 4), processed_at=None,
-            channel_id="123", pair_item_id=None, request_id="c1#m#1",
-        ),
-    )
-    posts = {p.message_id: p for p in repo.list_discord_posts(con)}
-    assert posts["m9"].request_id == "c1#m#1" and posts["m9"].item_id is None
-
-
-# --- バージョン3 から 4 への移行 -------------------------------------------------------
-
-
-def make_v3_db(path):
-    """バージョン3のスキーマで作った DB。extracted_requests に行が1つ入っている。"""
-    con = duckdb.connect(str(path))
-    con.execute(migrate.read_schema_sql())
-    con.execute("ALTER TABLE extracted_requests DROP COLUMN stated_reason_unverified")
-    con.execute("ALTER TABLE extracted_requests DROP COLUMN applies_when_unverified")
-    con.execute("DELETE FROM schema_version")
-    con.execute("INSERT INTO schema_version VALUES (3, ?)", [datetime(2026, 11, 3)])
-    con.execute(
-        "INSERT INTO conversations (conversation_id, recorded_at, setting_format, setting_kind, "
-        "source_files, created_at) VALUES ('c1', ?, 'f2f', 'teirei', '[]', ?)",
-        [datetime(2026, 11, 3, 19, 30), datetime(2026, 11, 3)],
-    )
-    con.execute(
-        "INSERT INTO extracted_requests (request_id, conversation_id, seq_from, seq_to, quote, "
-        "request_summary, stated_reason, reusable, source_type, model_name, extracted_at) "
-        "VALUES ('c1#m#0', 'c1', 0, 0, '結論を先に書いて', '結論を先に書くことを求めた', '理由', TRUE, "
-        "'live_conversation', 'm', ?)",
-        [datetime(2026, 11, 3)],
-    )
-    return con
-
-
-def test_バージョン3のDBに_unverified_の2列が足され_既存の行は残って_NULL_になる(tmp_path):
-    con = make_v3_db(tmp_path / "v3.duckdb")
-    assert "stated_reason_unverified" not in columns(con, "extracted_requests")
-
-    assert migrate.apply_schema(con) == 4
-
-    assert columns(con, "extracted_requests")[-2:] == ["stated_reason_unverified", "applies_when_unverified"]
-    rows = repo.get_requests(con, "c1")
-    assert len(rows) == 1
-    assert rows[0].stated_reason == "理由"  # 既存の値は変えない
-    assert rows[0].stated_reason_unverified is None and rows[0].applies_when_unverified is None
-    assert migrate.current_version(con) == 4
-
-
-def test_バージョン3から移行した表に_unverified_を書いて読める(tmp_path):
-    con = make_v3_db(tmp_path / "v3.duckdb")
-    migrate.apply_schema(con)
-    repo.insert_requests(
-        con,
-        [
-            repo.RequestRow(
-                request_id="c1#m#1", conversation_id="c1", seq_from=1, seq_to=1,
-                speaker_from_label=None, speaker_to_label=None, direction=None,
-                counterpart_role=None, artifact_type=None, quote="q", request_summary="s",
-                stated_reason=None, applies_when=None, reusable=True, pass_criterion=None,
-                source_type="live_conversation", model_name="m", extracted_at=datetime(2026, 11, 5),
-                stated_reason_unverified="読む人は忙しいから",
-            )
-        ],
-    )
-    got = [r for r in repo.get_requests(con, "c1") if r.request_id == "c1#m#1"][0]
-    assert got.stated_reason is None and got.stated_reason_unverified == "読む人は忙しいから"
-
-
-def test_バージョン4への移行は2回実行しても安全(tmp_path):
-    con = make_v3_db(tmp_path / "v3.duckdb")
-    migrate.apply_schema(con)
-    migrate.apply_schema(con)
-    assert migrate.current_version(con) == 4
+    make_v4_db(cfg.paths.db).close()
+    with open_db_if_ready(cfg) as con:
+        assert con is not None
+        assert pending_minutes(con) == []  # minutes テーブルが無くて落ちない

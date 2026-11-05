@@ -111,13 +111,13 @@ db = "{(tmp_path / 'data' / 'kijun.duckdb').as_posix()}"
 def test_kijun_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("db", "ingest", "transcribe", "restore-transcript", "doctor", "extract", "compare", "match", "purge-audio"):
+    for cmd in ("db", "ingest", "transcribe", "restore-transcript", "minutes", "doctor", "discord", "batch", "purge-audio"):
         assert cmd in result.output
 
 
 @pytest.mark.parametrize(
     "args",
-    [["db"], ["db", "init"], ["ingest"], ["transcribe"], ["restore-transcript"], ["doctor"], ["extract"], ["compare"], ["match"], ["purge-audio"]],
+    [["db"], ["db", "init"], ["ingest"], ["transcribe"], ["restore-transcript"], ["minutes"], ["doctor"], ["discord"], ["discord", "post"], ["batch"], ["purge-audio"]],
 )
 def test_各サブコマンドの_help(args):
     result = runner.invoke(app, [*args, "--help"])
@@ -130,7 +130,7 @@ def test_db_init_と_ingest_dry_run(tmp_path):
     base = ["--config", str(cfg_path)]
 
     r = runner.invoke(app, [*base, "db", "init"])
-    assert r.exit_code == 0 and "テーブル 10 個" in r.output
+    assert r.exit_code == 0 and "テーブル 4 個" in r.output
     assert (tmp_path / "data" / "kijun.duckdb").exists()
 
     r = runner.invoke(app, [*base, "ingest", "--dry-run"])
@@ -148,7 +148,7 @@ def test_db_init_と_ingest_dry_run(tmp_path):
 
 def test_スキーマ未適用なら_db_init_を促す(tmp_path):
     cfg_path = write_config(tmp_path)
-    r = runner.invoke(app, ["--config", str(cfg_path), "extract", "--conversation", "x"])
+    r = runner.invoke(app, ["--config", str(cfg_path), "minutes", "--conversation", "x"])
     assert r.exit_code == 1 and "db init" in r.output
 
 
@@ -271,3 +271,27 @@ def test_doctor_は_httpx_が無ければ入れ方を示す(tmp_path, monkeypatc
     monkeypatch.setitem(sys.modules, "httpx", None)
     r = runner.invoke(app, ["--config", str(write_config(tmp_path)), "doctor"])
     assert r.exit_code == 1 and "uv sync --extra extract" in r.output
+
+
+def test_チェックリスト時代のコマンドは無い():
+    result = runner.invoke(app, ["--help"])
+    for cmd in ("extract", "compare", "match", "derive-direction"):
+        assert f"  {cmd} " not in result.output
+    assert runner.invoke(app, ["extract", "--help"]).exit_code != 0
+    assert runner.invoke(app, ["discord", "read", "--help"]).exit_code != 0
+
+
+def test_minutes_は_conversation_か_pending_のどちらか一方を要求する(tmp_path):
+    base = ["--config", str(write_config(tmp_path))]
+    assert runner.invoke(app, [*base, "db", "init"]).exit_code == 0
+    both = runner.invoke(app, [*base, "minutes", "--conversation", "x", "--pending"])
+    neither = runner.invoke(app, [*base, "minutes"])
+    assert both.exit_code == 1 and neither.exit_code == 1
+    assert "どちらか一方" in both.output and "どちらか一方" in neither.output
+
+
+def test_minutes_pending_は対象が無ければ何もせず正常終了する(tmp_path):
+    base = ["--config", str(write_config(tmp_path))]
+    assert runner.invoke(app, [*base, "db", "init"]).exit_code == 0
+    r = runner.invoke(app, [*base, "minutes", "--pending"])
+    assert r.exit_code == 0 and "対象の会議がありません" in r.output

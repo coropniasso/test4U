@@ -1,12 +1,11 @@
 """Ollama のネイティブ API（POST /api/chat）のリクエストの組み立てと、応答の読み取り。
 
-抽出（extract/ollama_impl.py）、抽出以外の LLM の用途（review/llm.py）、doctor.py、
-scripts/measure_extraction.py が共有する。リクエストの形をここ1か所に置くのは、
-doctor と測定スクリプトが測るものと、抽出が実際に送るものを食い違わせないためである。
+議事録の生成（llm/chat.py）と doctor.py が共有する。リクエストの形をここ1か所に置くのは、
+doctor が測るものと、議事録の生成が実際に送るものを食い違わせないためである。
 
 OpenAI 互換の /v1/chat/completions を使わない理由は、num_ctx と keep_alive をリクエストごとに
 渡せないためである。num_ctx を送らないと Ollama の既定の文脈長になり、入力が長いと
-**エラーを出さずに先頭から切り捨てられる**。切り捨てられた発話は抽出結果から静かに消える。
+**エラーを出さずに先頭から切り捨てられる**。切り捨てられた発話は議事録から静かに消える。
 その検出も、このモジュールが持つ（input_was_truncated）。
 """
 
@@ -36,11 +35,10 @@ def url_of(cfg: OllamaConfig, path: str) -> str:
 def require_all_properties(schema: dict) -> dict:
     """スキーマの中のすべてのオブジェクトで、properties の全項目を required にした写しを返す。
 
-    pydantic は既定値のある項目（例: ExtractedRequest.transcription_unclear）を required に入れない。
+    pydantic は既定値のある項目を required に入れない。
     Ollama はスキーマに従って出力を制約するので、required でない項目は出さなくてよいことになる。
-    2026-11-06 の実測で、qwen3.5:9b は transcription_unclear を一度も出さなかった（f2f 5件・call 14件の
-    すべてで欠けていた）。欠けると既定値の false で読まれ、文字起こしが壊れた発話の投稿（CLAUDE.md 7章の案A）が
-    一度も出ない。必須にすると、f2f の「過剰書き」の発話に true を付けた。
+    抽出の時代の 2026-11-06 の実測で、qwen3.5:9b は required でない項目を一度も出さなかった
+    （docs/history/checklist-era-CLAUDE.md 7章）。欠けると既定値で読まれ、内容が黙って空になる。
 
     受け取る側（pydantic の検証）は変えない。既定値はそのまま残るので、項目の無い古い JSON も読める。
     """
@@ -121,10 +119,6 @@ class ChatReply:
             return self.eval_count / self.eval_sec
         return None
 
-    @property
-    def usage(self) -> dict:
-        """extract/run.py が表示に使う形（Extractor.last_usage）。"""
-        return {"prompt_tokens": self.prompt_eval_count, "completion_tokens": self.eval_count}
 
 
 def _count(body: dict, key: str) -> int | None:
@@ -150,7 +144,7 @@ def parse_chat_reply(response: HttpResponse) -> ChatReply:
         keys = list(body) if isinstance(body, dict) else type(body).__name__
         raise OllamaError(
             "応答が Ollama の /api/chat の形（message.content）ではありません"
-            f"（最上位のキー: {keys}）。extract.ollama.base_url が Ollama を指しているかを "
+            f"（最上位のキー: {keys}）。llm.base_url が Ollama を指しているかを "
             "`uv run kijun doctor` で確認してください。"
         )
     # 推論の途中で num_predict に達すると content が空になり得る。空文字にして後段の修復に任せる
@@ -180,7 +174,7 @@ def input_limit(cfg: OllamaConfig) -> int:
 def input_was_truncated(cfg: OllamaConfig, reply: ChatReply) -> bool:
     """入力が文脈長を超えて切り捨てられた疑いがあるか。
 
-    Ollama は入力が num_ctx を超えると、エラーを出さずに先頭を捨てる。捨てられた入力から抽出すると、
+    Ollama は入力が num_ctx を超えると、エラーを出さずに先頭を捨てる。捨てられた入力から議事録を作ると、
     捨てられた発話が静かに消える。出力の上限 num_predict の分を引いた値に達していたら、疑う。
     prompt_eval_count が返らなかったときは判定できないので False を返す（呼び出し側が注意を出す）。
     """
@@ -192,7 +186,7 @@ def truncation_message(cfg: OllamaConfig, reply: ChatReply) -> str:
         f"入力が {reply.prompt_eval_count} トークンで、上限（num_ctx {cfg.num_ctx} - num_predict "
         f"{cfg.num_predict} = {input_limit(cfg)}）に達しました。Ollama は入力が文脈長を超えると、"
         "エラーを出さずに先頭を捨てるため、捨てられた発話が結果から消えます。"
-        "`extract.chunk_minutes` を下げるか、`extract.ollama.num_ctx` を上げてください"
+        "`minutes.chunk_minutes` を下げるか、`llm.num_ctx` を上げてください"
     )
 
 

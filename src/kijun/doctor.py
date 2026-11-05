@@ -8,8 +8,8 @@
 次の5つを実測して「config.toml に書くべき値」を出す。
 
 1. 接続とモデルの有無: GET /api/tags に設定のモデルがあるか。
-2. スキーマへの適合   : 抽出と同じ形のリクエストを format にスキーマを付けて送り、
-                        repair を通さずに ExtractionResult として読めるか。
+2. スキーマへの適合   : 議事録のチャンクと同じ形のリクエストを format にスキーマを付けて送り、
+                        repair を通さずに ChunkMinutes として読めるか。
 3. GPU に収まっているか: 検査2の直後に GET /api/ps を読み、size_vram と size を比べる。
 4. 速度               : chunk_minutes 相当の長さの入力を送り、tokens/s と所要時間を出す。
                         2時間の会議の所要時間の見込みを、最も遅い測定値で計算して出す。
@@ -35,12 +35,11 @@ from pathlib import Path
 
 from kijun import ollama_api
 from kijun.config import Config
-from kijun.extract.chunk import Chunk
-from kijun.extract.models import ExtractionResult
-from kijun.extract.ollama_impl import build_payload
-from kijun.extract.prompt import build_messages
-from kijun.extract.repair import UnrepairableJsonError, parse_with_repair, repair_json_text
-from kijun.extract.tokens import estimate_messages_tokens, tokens_for_minutes
+from kijun.llm.repair import UnrepairableJsonError, parse_model_with_repair, repair_json_text
+from kijun.llm.tokens import estimate_messages_tokens, tokens_for_minutes
+from kijun.minutes.chunk import Chunk
+from kijun.minutes.models import ChunkMinutes
+from kijun.minutes.prompt import build_chunk_messages
 from kijun.models import Utterance
 from kijun.table import format_table
 from kijun.transport import HttpResponse, HttpTransport, TransportError
@@ -74,16 +73,16 @@ MIN_EVAL_TOKENS_FOR_SPEED = 50
 # 2時間の会議の所要時間を見込むときの会議の長さ（分）
 WHOLE_MEETING_MINUTES = 120
 
-# 入力を引き伸ばすための固定の日本語の文（音声が無くても実行できるようにするため）
-STRETCH_SENTENCE = "告知文の冒頭では、読み手にしてほしい行動を先に書いてください。"
+# 入力を引き伸ばすための固定の日本語の文(音声が無くても実行できるようにするため)
+STRETCH_SENTENCE = "来週の定例の日程を決めたいので、水曜日の午後で空いている人を教えてください。"
 # 引き伸ばすときの1発話あたりの文字数
 STRETCH_CHARS_PER_UTTERANCE = 120
 
 # 検査2で使う固定の短い発話3件
 SAMPLE_UTTERANCES = [
-    Utterance(0, "SPEAKER_00", 0.0, 4.0, "この告知文、募集要項の最初に何をしてほしいかを書いてください。"),
-    Utterance(1, "SPEAKER_01", 4.0, 6.0, "はい、直します。"),
-    Utterance(2, "SPEAKER_00", 6.0, 10.0, "あと、グラフには単位と出典を必ず付けてください。"),
+    Utterance(0, "SPEAKER_00", 0.0, 4.0, "来週の定例は水曜日の午後にしましょう。"),
+    Utterance(1, "SPEAKER_01", 4.0, 8.0, "はい、大丈夫です。資料は私が金曜日までに用意します。"),
+    Utterance(2, "SPEAKER_00", 8.0, 12.0, "お願いします。会場をどうするかは、まだ決まっていません。"),
 ]
 
 
@@ -152,7 +151,7 @@ def stretched_chunk(cfg: Config, target_user_tokens: int) -> Chunk:
     システムプロンプトの分はこの長さに含まれない（文字起こしの長さだけを指定する）。
     入力全体の概算は estimate_messages_tokens で別に求める。
     """
-    target_chars = max(1, int(target_user_tokens / cfg.extract.tokens_per_character))
+    target_chars = max(1, int(target_user_tokens / cfg.minutes.tokens_per_character))
     count = max(1, target_chars // STRETCH_CHARS_PER_UTTERANCE)
     repeated = STRETCH_SENTENCE * (STRETCH_CHARS_PER_UTTERANCE // len(STRETCH_SENTENCE) + 2)
     text = repeated[:STRETCH_CHARS_PER_UTTERANCE]
@@ -170,15 +169,18 @@ def stretched_chunk(cfg: Config, target_user_tokens: int) -> Chunk:
 
 
 def doctor_payload(cfg: Config, chunk: Chunk, with_schema: bool) -> dict:
-    """抽出が実際に送るのと同じ形のリクエストを作る。ただし keep_alive は "2m" にする。
+    """議事録の生成が実際に送るのと同じ形のリクエストを作る。ただし keep_alive は "2m" にする。
 
-    extract.ollama_impl.build_payload をそのまま使うのは、doctor が測るものと extract が
-    送るものを食い違わせないためである。with_schema は format の有無だけを揃える
-    （検査2は設定によらず付けて、スキーマに適合するかを測る）。
+    llm/chat.py の OllamaJsonChat.build_payload と同じ関数（ollama_api.build_chat_payload）で作るのは、
+    doctor が測るものと議事録の生成が送るものを食い違わせないためである。with_schema は format の有無だけを
+    揃える（検査2は設定によらず付けて、スキーマに適合するかを測る）。
     """
-    payload = copy.deepcopy(build_payload(cfg, chunk))
+    system, user = build_chunk_messages(chunk)
+    payload = copy.deepcopy(
+        ollama_api.build_chat_payload(cfg.llm, system, user, ChunkMinutes.model_json_schema())
+    )
     if with_schema:
-        payload["format"] = ollama_api.require_all_properties(ExtractionResult.model_json_schema())
+        payload["format"] = ollama_api.require_all_properties(ChunkMinutes.model_json_schema())
     else:
         payload.pop("format", None)
     payload["keep_alive"] = DOCTOR_KEEP_ALIVE
@@ -192,10 +194,10 @@ def classify_output(text: str) -> tuple[str, list[str], str]:
     """
     bare = repair_json_text(text)
     try:
-        parse_with_repair(text)
+        parse_model_with_repair(text, ChunkMinutes)
     except UnrepairableJsonError as e:
         return OUTPUT_UNREADABLE, list(bare.actions), str(e)[:300]
-    if not bare.actions and not bare.truncated_items:
+    if not bare.actions:
         return OUTPUT_DIRECT_JSON, [], "出力はそのまま JSON として読めた"
     return (
         OUTPUT_REPAIRED,
@@ -206,9 +208,9 @@ def classify_output(text: str) -> tuple[str, list[str], str]:
 
 def _post(transport: HttpTransport, cfg: Config, payload: dict) -> tuple[HttpResponse | None, str | None]:
     """/api/chat に1回投げて (応答, 失敗の理由) を返す。"""
-    url = ollama_api.url_of(cfg.extract.ollama, ollama_api.CHAT_PATH)
+    url = ollama_api.url_of(cfg.llm, ollama_api.CHAT_PATH)
     try:
-        return transport.post(url, payload, cfg.extract.ollama.timeout_sec), None
+        return transport.post(url, payload, cfg.llm.timeout_sec), None
     except TransportError as e:
         return None, f"{url} に要求を送れませんでした: {e}"
 
@@ -244,8 +246,8 @@ def _has_model(names: list[str], model: str) -> bool:
 def check_models(transport: HttpTransport, cfg: Config) -> CheckResult:
     """検査1: GET /api/tags に設定のモデルがあるか。"""
     title = "1. 接続とモデルの有無"
-    url = ollama_api.url_of(cfg.extract.ollama, ollama_api.TAGS_PATH)
-    model = cfg.extract.ollama.model
+    url = ollama_api.url_of(cfg.llm, ollama_api.TAGS_PATH)
+    model = cfg.llm.model
     try:
         response = transport.get(url, timeout_sec=30)
     except TransportError as e:
@@ -287,7 +289,7 @@ def check_models(transport: HttpTransport, cfg: Config) -> CheckResult:
 
 
 def check_schema_enforcement(transport: HttpTransport, cfg: Config) -> CheckResult:
-    """検査2: format にスキーマを付けて送り、repair を通さずに ExtractionResult として読めるか。"""
+    """検査2: format にスキーマを付けて送り、repair を通さずに ChunkMinutes として読めるか。"""
     title = "2. スキーマへの適合（format あり）"
     response, error = _post(transport, cfg, doctor_payload(cfg, sample_chunk(), with_schema=True))
     if error is not None:
@@ -352,8 +354,8 @@ def check_gpu(transport: HttpTransport, cfg: Config) -> CheckResult:
     等しければ全部が GPU に載っている。小さければ、差の分がメインメモリに溢れていて、遅くなる。
     """
     title = "3. GPU に収まっているか"
-    url = ollama_api.url_of(cfg.extract.ollama, ollama_api.PS_PATH)
-    model = cfg.extract.ollama.model
+    url = ollama_api.url_of(cfg.llm, ollama_api.PS_PATH)
+    model = cfg.llm.model
     try:
         response = transport.get(url, timeout_sec=30)
     except TransportError as e:
@@ -386,7 +388,7 @@ def check_gpu(transport: HttpTransport, cfg: Config) -> CheckResult:
         "size_vram_bytes": size_vram,
         "vram_ratio": round(size_vram / size, 4),
         "context_length": entry.get("context_length"),
-        "configured_num_ctx": cfg.extract.ollama.num_ctx,
+        "configured_num_ctx": cfg.llm.num_ctx,
     }
     if size_vram >= size:
         return CheckResult(
@@ -398,7 +400,7 @@ def check_gpu(transport: HttpTransport, cfg: Config) -> CheckResult:
         "gpu", title, STATUS_ERROR,
         f"一部がメインメモリに溢れています（全体 {size / gib:.1f} GiB のうち VRAM は {size_vram / gib:.1f} GiB、"
         f"溢れ {spilled / gib:.1f} GiB。VRAM の割合 {size_vram / size:.0%}）。"
-        "`extract.ollama.num_ctx` を下げるか、小さいモデルにしてください。"
+        "`llm.num_ctx` を下げるか、小さいモデルにしてください。"
         "このまま使うと遅くなり、Strata で起きたメモリの圧迫が再発します",
         detail,
     )
@@ -408,17 +410,17 @@ def check_gpu(transport: HttpTransport, cfg: Config) -> CheckResult:
 
 
 def _measure(transport: HttpTransport, cfg: Config, chunk: Chunk, label: str) -> dict:
-    """抽出と同じ形で1回投げて、入力・出力のトークン数と所要時間を測る。"""
-    system, user = build_messages(chunk, cfg)
+    """議事録のチャンクと同じ形で1回投げて、入力・出力のトークン数と所要時間を測る。"""
+    system, user = build_chunk_messages(chunk)
     record: dict = {
         "label": label,
         "utterances": len(chunk.utterances),
-        "estimated_input_tokens": estimate_messages_tokens(system, user, cfg.extract.tokens_per_character),
+        "estimated_input_tokens": estimate_messages_tokens(system, user, cfg.minutes.tokens_per_character),
         # 送った文字数。tokens_per_character の実測（prompt_eval_count ÷ この値）に使う。
         "input_chars": len(system) + len(user),
     }
     response, error = _post(
-        transport, cfg, doctor_payload(cfg, chunk, with_schema=cfg.extract.ollama.enforces_json_schema)
+        transport, cfg, doctor_payload(cfg, chunk, with_schema=cfg.llm.enforces_json_schema)
     )
     if error is not None:
         record["error"] = error
@@ -453,10 +455,10 @@ def _measure(transport: HttpTransport, cfg: Config, chunk: Chunk, label: str) ->
 def check_speed(transport: HttpTransport, cfg: Config) -> CheckResult:
     """検査4: chunk_minutes 相当の長さで投げ、tokens/s と所要時間を出す。結果を出すだけで、合否は付けない。"""
     title = "4. 速度"
-    chunk_tokens = tokens_for_minutes(cfg.extract.chunk_minutes, cfg.extract.tokens_per_meeting_minute)
+    chunk_tokens = tokens_for_minutes(cfg.minutes.chunk_minutes, cfg.minutes.tokens_per_meeting_minute)
     measurement = _measure(
         transport, cfg, stretched_chunk(cfg, chunk_tokens),
-        f"chunk_minutes={cfg.extract.chunk_minutes} 相当（約{chunk_tokens}トークン）",
+        f"chunk_minutes={cfg.minutes.chunk_minutes} 相当（約{chunk_tokens}トークン）",
     )
     detail = {"measurements": [measurement]}
     if "error" in measurement:
@@ -480,7 +482,7 @@ def check_speed(transport: HttpTransport, cfg: Config) -> CheckResult:
 def check_truncation(cfg: Config, speed: CheckResult | None) -> CheckResult:
     """検査5: 検査4の prompt_eval_count が num_ctx - num_predict に達していないか。"""
     title = "5. 入力が切り捨てられていないか"
-    o = cfg.extract.ollama
+    o = cfg.llm
     measurement = (speed.detail.get("measurements") or [None])[0] if speed is not None else None
     if measurement is None or "error" in measurement:
         return CheckResult("truncation", title, STATUS_SKIPPED, "検査4が実行できなかったため確認していません", {})
@@ -504,7 +506,7 @@ def check_truncation(cfg: Config, speed: CheckResult | None) -> CheckResult:
     note = (
         f"入力 {count} トークン（上限 num_ctx {o.num_ctx} - num_predict {o.num_predict} = {limit}）。"
         f"概算は {measurement.get('estimated_input_tokens')} トークンで、実測は {ratio}"
-        f"（設定の tokens_per_character = {cfg.extract.tokens_per_character}）"
+        f"（設定の tokens_per_character = {cfg.minutes.tokens_per_character}）"
     )
     if count >= limit:
         return CheckResult(
@@ -530,21 +532,23 @@ def estimate_whole_meeting(cfg: Config, measurement: dict, extra: list[dict]) ->
     keep_alive が "0" のときは、チャンクごとにモデルの読み込みが入るので、検査2で観測した
     読み込みの時間(load_sec)を足す。
     """
-    e = cfg.extract
-    stride = e.chunk_minutes - e.overlap_minutes
-    chunks = max(1, math.ceil((WHOLE_MEETING_MINUTES - e.overlap_minutes) / stride))
-    reload_each = cfg.extract.ollama.keep_alive.strip() == "0"
+    chunks = max(1, math.ceil(WHOLE_MEETING_MINUTES / cfg.minutes.chunk_minutes))
+    # 議事録の生成は、チャンクごとの呼び出しに加えて、概要のために1回呼ぶ。概要の入力はチャンクより小さいので、
+    # 見込みでは1チャンクと同じ時間とみなす(安全側)。
+    calls = chunks + 1
+    reload_each = cfg.llm.keep_alive.strip() == "0"
     loads = [m.get("load_sec") for m in extra if m.get("load_sec")]
     load = max(loads) if (reload_each and loads) else 0.0
     out: dict = {
         "meeting_minutes": WHOLE_MEETING_MINUTES,
         "chunks": chunks,
+        "calls": calls,
         "reload_each_chunk": reload_each,
         "load_sec_assumed": round(load, 1),
     }
     elapsed = measurement.get("elapsed_sec")
     if elapsed:
-        out["measured_sec"] = round(chunks * (elapsed + load))
+        out["measured_sec"] = round(calls * (elapsed + load))
     speeds = [
         m["output_tokens"] / m["eval_sec"]
         for m in [measurement, *extra]
@@ -552,10 +556,10 @@ def estimate_whole_meeting(cfg: Config, measurement: dict, extra: list[dict]) ->
     ]
     if speeds and measurement.get("prompt_eval_sec") is not None:
         slowest = min(speeds)
-        per_chunk = load + measurement["prompt_eval_sec"] + cfg.extract.ollama.num_predict / slowest
+        per_chunk = load + measurement["prompt_eval_sec"] + cfg.llm.num_predict / slowest
         out["slowest_tokens_per_sec"] = round(slowest, 1)
         out["worst_per_chunk_sec"] = round(per_chunk)
-        out["worst_sec"] = round(chunks * per_chunk)
+        out["worst_sec"] = round(calls * per_chunk)
     return out if ("measured_sec" in out or "worst_sec" in out) else None
 
 
@@ -565,7 +569,7 @@ def _hours(sec: float) -> str:
 
 def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
     """実測の結果から、config.toml に書くべき値を出す。測れなかった項目は現在の値のままにする。"""
-    o = cfg.extract.ollama
+    o = cfg.llm
     rec: dict = {}
 
     schema = report.get("schema")
@@ -627,7 +631,7 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
     truncation = report.get("truncation")
     if truncation is not None and truncation.status == STATUS_ERROR:
         rec["chunk_minutes"] = {
-            "value": max(1, cfg.extract.chunk_minutes // 2),
+            "value": max(1, cfg.minutes.chunk_minutes // 2),
             "reason": "検査5で入力が上限に達したため、半分にした。再度 doctor を実行して確かめること",
         }
     return rec
@@ -638,15 +642,15 @@ def build_recommendations(cfg: Config, report: DoctorReport) -> dict:
 
 def unload_model(transport: HttpTransport, cfg: Config) -> dict:
     """モデルを VRAM から下ろす（POST /api/generate、keep_alive 0）。結果を {"ok", "detail"} で返す。"""
-    ok, detail = ollama_api.unload_model(transport, cfg.extract.ollama)
+    ok, detail = ollama_api.unload_model(transport, cfg.llm)
     return {"ok": ok, "detail": detail}
 
 
 def run_doctor(transport: HttpTransport, cfg: Config, now: datetime | None = None) -> DoctorReport:
     """検査1から5を順に実行する。検査1が失敗したときは残りを実行しない。最後にモデルを下ろす。"""
     report = DoctorReport(
-        base_url=cfg.extract.ollama.base_url,
-        model=cfg.extract.ollama.model,
+        base_url=cfg.llm.base_url,
+        model=cfg.llm.model,
         started_at=now or datetime.now(),
     )
     models = check_models(transport, cfg)
@@ -703,7 +707,7 @@ def format_report(report: DoctorReport) -> str:
         lines.append("")
     whole = report.whole_meeting
     if whole:
-        lines.append(f"{whole['meeting_minutes']} 分の会議の所要時間の見込み（{whole['chunks']} チャンク）:")
+        lines.append(f"{whole['meeting_minutes']} 分の会議の所要時間の見込み（{whole['chunks']} チャンク + 概要1回）:")
         if "measured_sec" in whole:
             lines.append(
                 f"  検査4の実測から: 約{_hours(whole['measured_sec'])}"
@@ -736,8 +740,8 @@ def format_report(report: DoctorReport) -> str:
         lines.append(f"  {value['reason']}")
         lines.append("")
     lines.append(
-        "[extract] の chunk_minutes・tokens_per_character、"
-        "[extract.ollama] の enforces_json_schema・timeout_sec に書いてください。"
+        "[minutes] の chunk_minutes・tokens_per_character、"
+        "[llm] の enforces_json_schema・timeout_sec に書いてください。"
     )
     return "\n".join(lines)
 

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from kijun.config import Config
-from kijun.extract.chunk import split_into_chunks
+from kijun.minutes.chunk import split_into_chunks
 from tests.conftest import make_utterances
 
 
@@ -62,12 +62,16 @@ def test_Ollama_に接続できてモデルの一覧が取れる():
 
 
 @pytest.mark.requires_network
-def test_Ollama_で抽出が_JSON_として取れる():
-    from kijun.extract.ollama_impl import OllamaExtractor
+def test_Ollama_で議事録の材料が_JSON_として取れる():
+    from kijun.llm.chat import OllamaJsonChat
+    from kijun.minutes.models import ChunkMinutes
+    from kijun.minutes.prompt import build_chunk_messages
 
-    chunk = split_into_chunks(make_utterances(5), 12, 1)[0]
-    result = OllamaExtractor(Config()).extract(chunk)
-    assert isinstance(result.items, list)
+    cfg = Config()
+    chunk = split_into_chunks(make_utterances(5), cfg.minutes.chunk_minutes, 0)[0]
+    system, user = build_chunk_messages(chunk)
+    result = OllamaJsonChat(cfg.llm).ask(system, user, ChunkMinutes, "試験")
+    assert isinstance(result.topics, list)
 
 
 @pytest.mark.requires_gpu
@@ -82,51 +86,15 @@ def test_Ollama_のモデルが_GPU_に収まっている():
 
 
 @pytest.mark.requires_network
-def test_e5_で埋め込みが取れる():
-    from kijun.match.e5_impl import E5Embedder
-
-    e = E5Embedder(Config().match)
-    assert e.encode_queries(["告知文の冒頭に行動を書く"]).shape == (1, e.dim)
-
-
-@pytest.mark.requires_network
-def test_discord_py_でチャンネルに投稿してリアクションと返信を読める():
-    """実機でだけ動かす。DISCORD_BOT_TOKEN と、投稿してよい試験用チャンネルの ID(KIJUN_TEST_DISCORD_CHANNEL)が要る。
-
-    Message Content Intent が無効だと、返信の読み取りで DiscordError になる(それも確認の対象)。
-    """
+def test_discord_py_でチャンネルに本文とファイルを投稿できる():
+    """実機でだけ動かす。DISCORD_BOT_TOKEN と、投稿してよい試験用チャンネルの ID(KIJUN_TEST_DISCORD_CHANNEL)が要る。"""
     token = os.environ.get("DISCORD_BOT_TOKEN")
     channel = os.environ.get("KIJUN_TEST_DISCORD_CHANNEL")
     if not token or not channel:
         pytest.skip("環境変数 DISCORD_BOT_TOKEN と KIJUN_TEST_DISCORD_CHANNEL を設定してください")
     from kijun.discord.impl import DiscordPyClient
 
-    client = DiscordPyClient(token)
-    message_id = client.post(channel, "kijun の接続確認です。このメッセージは削除して構いません。")
-    assert message_id.isdigit()
-    assert message_id in client.fetch_reactions(channel, [message_id])
-    assert message_id in client.fetch_thread_replies(channel, [message_id])
-
-
-@pytest.mark.requires_network
-def test_Ollama_で重要度の判定が取れる():
-    from kijun.review.importance import LlmImportanceJudge
-    from kijun.review.llm import OllamaJsonChat
-
-    verdict = LlmImportanceJudge(OllamaJsonChat(Config())).judge(
-        "告知文の冒頭2行以内に、読み手にしてほしい行動が書かれているか", ["募集要項の最初に、何をしてほしいかを書いて"]
+    message_id = DiscordPyClient(token).post_file(
+        channel, "kijun の接続確認です。このメッセージは削除して構いません。", "test.md", "# 試験\n".encode("utf-8")
     )
-    assert 1 <= verdict.importance <= 3 and verdict.rationale
-
-
-@pytest.mark.requires_network
-def test_Ollama_で返信の振り分けが取れる():
-    from datetime import datetime
-
-    from kijun.db.repo import KnowledgeItemRow
-    from kijun.review.llm import OllamaJsonChat
-    from kijun.review.reply import LlmReplyRouter
-
-    item = KnowledgeItemRow("item_0001", None, "冒頭に行動を書くか", None, None, None, None, None, "candidate", 1, datetime(2026, 11, 3))
-    routed = LlmReplyRouter(OllamaJsonChat(Config())).route("読み飛ばされるから。ただし社内向けでは不要", item)
-    assert {e.column for e in routed.items} <= {"reason", "applies_when", "not_applies_when", "check_text"}
+    assert message_id.isdigit()

@@ -22,7 +22,7 @@ def cfg(tmp_path: Path) -> Config:
     c.paths.processed = tmp_path / "processed"
     c.paths.transcripts = tmp_path / "transcripts"
     c.paths.db = tmp_path / "kijun.duckdb"
-    c.paths.review_logs = tmp_path / "review_logs"
+    c.paths.minutes = tmp_path / "minutes"
     c.batch.log_dir = tmp_path / "batch_logs"
     return c
 

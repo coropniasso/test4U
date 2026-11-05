@@ -1,268 +1,136 @@
-"""Discord への4種類の投稿(仕様 2-1、CLAUDE.md 4-6、4-8 の手順8)。
+"""議事録の Discord への投稿。
 
-- 新規候補(#review): 1件1メッセージ。1回の投稿件数に上限を置く(discord.max_candidates_per_run)。
-- 矛盾の可能性がある組(#contradictions): 検出規則は review/contradiction.py。
-- 話者の対応付けの依頼: 会議ごとに各話者の発言サンプル。
-- 束ね結果: 複数のファイルを束ねた会議。
+本文は 2000 文字以内(Discord の上限)に収め、Markdown 全体を添付ファイルにする。
+本文の構成: 見出し行(会議ID・日時) + 概要 + 決定事項 + ToDo。Discord は Markdown の表を表示しないので、
+ToDo は箇条書きに直す。超えたときは末尾を切って「(続きは添付ファイル)」と書く。
 
-投稿するたびに、その場で discord_posts に記録する(途中で落ちても、投稿済みのものを再投稿しないため)。
-1件の投稿の失敗では全体を止めない。失敗は報告に残し、終了コードで知らせる。
+投稿済み(minutes.posted_at が非 NULL)は再投稿しない。1件の投稿に失敗しても、残りの投稿は続ける。
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 import duckdb
 
 from kijun.config import Config
 from kijun.db import repo
-from kijun.db.repo import KnowledgeItemRow
-from kijun.discord import format as fmt
 from kijun.discord.base import DiscordClient, DiscordError
-from kijun.review.contradiction import find_contradictions
-from kijun.review.importance import ImportanceJudge, propose_importance
+from kijun.minutes.render import (
+    EMPTY,
+    SECTION_DECISIONS,
+    SECTION_OVERVIEW,
+    SECTION_TODOS,
+    parse_sections,
+    todo_rows,
+)
+
+# Discord の本文の上限(文字数)
+DISCORD_LIMIT = 2000
+CONTINUED_NOTICE = "\n（続きは添付ファイル）"
+
+
+def _todo_lines(body: str) -> list[str]:
+    rows = todo_rows(body)
+    if not rows:
+        return [EMPTY]
+    lines = []
+    for task, owner, due in rows:
+        lines.append(f"- {task}（担当: {owner}、期限: {due}）")
+    return lines
+
+
+def _title_line(markdown: str, conversation_id: str) -> str:
+    """見出し行。日時は Markdown の「- 日時: 」の行から読む(無ければ会議IDだけ)。"""
+    head, _ = parse_sections(markdown)
+    when = ""
+    for line in head.splitlines():
+        if line.startswith("- 日時:"):
+            when = line.split(":", 1)[1].strip()
+            break
+    return f"**議事録 {conversation_id}**" + (f"（{when}）" if when else "")
+
+
+def build_post_text(markdown: str, conversation_id: str, limit: int = DISCORD_LIMIT) -> str:
+    """Discord に投稿する本文を作る。limit 文字を超えるときは切り詰めて、続きが添付にあると書く。"""
+    _, sections = parse_sections(markdown)
+    overview = sections.get(SECTION_OVERVIEW, EMPTY) or EMPTY
+    decisions = sections.get(SECTION_DECISIONS, EMPTY) or EMPTY
+    todos = "\n".join(_todo_lines(sections.get(SECTION_TODOS, "")))
+    text = "\n\n".join(
+        [
+            _title_line(markdown, conversation_id),
+            f"**{SECTION_OVERVIEW}**\n{overview}",
+            f"**{SECTION_DECISIONS}**\n{decisions}",
+            f"**{SECTION_TODOS}**\n{todos}",
+        ]
+    )
+    if len(text) <= limit:
+        return text
+    keep = limit - len(CONTINUED_NOTICE)
+    cut = text[:keep]
+    # 行の途中で切れるのを避ける。ただし、残りが半分未満になるほど戻らない。
+    newline = cut.rfind("\n")
+    if newline >= keep // 2:
+        cut = cut[:newline]
+    return cut.rstrip() + CONTINUED_NOTICE
 
 
 @dataclass
 class PostReport:
-    posted: dict[str, int] = field(default_factory=dict)  # post_type -> 投稿した件数
-    not_posted_candidates: int = 0  # 上限を超えて、次回に回した新規候補の件数
-    failures: list[str] = field(default_factory=list)  # 投稿できなかったものの理由
+    posted: list[str] = field(default_factory=list)  # 投稿した会議ID
+    failures: list[str] = field(default_factory=list)  # 「会議ID: 理由」
+    skipped_for_config: bool = False
     messages: list[str] = field(default_factory=list)
-    skipped_for_config: bool = False  # チャンネルIDが空で何もしなかった
 
     @property
     def failed(self) -> bool:
         return bool(self.failures)
 
 
-def pending_candidates(con: duckdb.DuckDBPyConnection) -> list[KnowledgeItemRow]:
-    """status が candidate で、まだ new_candidate として投稿していない項目。"""
-    posted = {p.item_id for p in repo.list_discord_posts(con, repo.POST_NEW_CANDIDATE)}
-    return [i for i in repo.list_knowledge_items(con, [repo.STATUS_CANDIDATE]) if i.item_id not in posted]
-
-
-def count_candidates_needing_importance(con: duckdb.DuckDBPyConnection) -> int:
-    """投稿前に重要度の判定(LLM)が要る項目の件数。夜間バッチが、LLM を使う手順を始める前にゲームの実行を確かめるかの判断に使う。"""
-    return sum(1 for i in pending_candidates(con) if i.importance is None)
-
-
-def _first_linked_at(con: duckdb.DuckDBPyConnection) -> dict[str, datetime]:
-    rows = con.execute("SELECT item_id, min(linked_at) FROM item_evidence GROUP BY item_id").fetchall()
-    return {item_id: linked_at for item_id, linked_at in rows}
-
-
-def order_candidates(
-    items: list[KnowledgeItemRow], linked_at: dict[str, datetime]
-) -> list[KnowledgeItemRow]:
-    """重要度の降順、同じ重要度なら新しい順(仕様 1-4)。
-
-    レビューの時間が足りないときに、重要なものが先に目に入るようにするため。
-    重要度が NULL のものは最後に置く。「新しい」は、根拠の抽出結果を最初に紐付けた時刻(候補ができた時刻)で決め、
-    同じ時刻なら item_id の大きい方を新しいとする。
-    """
-    ordered = sorted(items, key=lambda i: i.item_id, reverse=True)
-    ordered = sorted(ordered, key=lambda i: linked_at.get(i.item_id, datetime.min), reverse=True)
-    return sorted(ordered, key=lambda i: i.importance or 0, reverse=True)
-
-
-def _send(
-    con: duckdb.DuckDBPyConnection,
-    client: DiscordClient,
-    report: PostReport,
-    channel_id: str,
-    text: str,
-    post_type: str,
-    now: datetime,
-    *,
-    label: str,
-    item_id: str | None = None,
-    conversation_id: str | None = None,
-    pair_item_id: str | None = None,
-    request_id: str | None = None,
-) -> bool:
-    """1件投稿して discord_posts に記録する。投稿できたら True。"""
-    if len(text) > fmt.DISCORD_MESSAGE_LIMIT:
-        # 黙って切り詰めると、レビューの対象(チェック項目案など)が見えなくなる
-        report.failures.append(
-            f"{label}: 文面が {len(text)} 文字で、Discord の上限 {fmt.DISCORD_MESSAGE_LIMIT} 文字を超えるため投稿しません"
-        )
-        return False
-    try:
-        message_id = client.post(channel_id, text)
-    except DiscordError as e:
-        report.failures.append(f"{label}: 投稿できませんでした: {e}")
-        return False
-    repo.insert_discord_post(
-        con,
-        repo.DiscordPostRow(
-            message_id=message_id, post_type=post_type, item_id=item_id,
-            conversation_id=conversation_id, posted_at=now, processed_at=None,
-            channel_id=channel_id, pair_item_id=pair_item_id, request_id=request_id,
-        ),
-    )
-    report.posted[post_type] = report.posted.get(post_type, 0) + 1
-    return True
-
-
-def post_bundle_results(con, cfg: Config, client: DiscordClient, report: PostReport, now: datetime) -> None:
-    """複数のファイルを束ねた会議のうち、まだ投稿していないものを投稿する。"""
-    done = {p.conversation_id for p in repo.list_discord_posts(con, repo.POST_BUNDLE_RESULT)}
-    for conv in repo.list_conversations(con):
-        if len(conv.source_files) < 2 or conv.conversation_id in done:
-            continue
-        _send(
-            con, client, report, cfg.discord.review_channel_id, fmt.format_bundle_result(conv),
-            repo.POST_BUNDLE_RESULT, now, label=f"束ね結果 {conv.conversation_id}",
-            conversation_id=conv.conversation_id,
-        )
-
-
-def post_speaker_samples(con, cfg: Config, client: DiscordClient, report: PostReport, now: datetime) -> None:
-    """話者の対応付けの依頼を、まだ投稿していない・self が決まっていない会議について投稿する。"""
-    done = {p.conversation_id for p in repo.list_discord_posts(con, repo.POST_SPEAKER_SAMPLE)}
-    for conv in repo.list_conversations(con):
-        if conv.conversation_id in done:
-            continue
-        if repo.PERSON_SELF in repo.get_speaker_map(con, conv.conversation_id).values():
-            continue
-        utterances = repo.get_utterances(con, conv.conversation_id)
-        samples = fmt.pick_speaker_samples(
-            [(u.speaker_label, u.text) for u in utterances], cfg.discord.speaker_sample_count
-        )
-        if not samples:
-            continue  # 文字起こし前、または話者分離が失敗した会議
-        _send(
-            con, client, report, cfg.discord.review_channel_id,
-            fmt.format_speaker_sample(conv.conversation_id, samples),
-            repo.POST_SPEAKER_SAMPLE, now, label=f"話者の対応付け {conv.conversation_id}",
-            conversation_id=conv.conversation_id,
-        )
-
-
-def post_new_candidates(
-    con, cfg: Config, client: DiscordClient, judge: ImportanceJudge | None, report: PostReport, now: datetime
-) -> None:
-    """新規候補を、重要度の降順・新しい順に、上限の件数まで投稿する。
-
-    重要度の降順に並べるには、投稿しない分も含めて判定が要る。判定は項目に保存するので、
-    次回以降は再判定しない。判定に失敗した項目は重要度が NULL のまま(「重要度案：なし」)投稿する。
-    """
-    pending = pending_candidates(con)
-    for item in pending:
-        if item.importance is None:
-            propose_importance(con, judge, item, now)
-    pending = pending_candidates(con)  # 判定結果を読み直す
-    ordered = order_candidates(pending, _first_linked_at(con))
-    limit = cfg.discord.max_candidates_per_run
-    for item in ordered[:limit]:
-        evidence = repo.get_item_evidence_requests(con, item.item_id, 1)
-        request = evidence[0] if evidence else None
-        conv = repo.get_conversation(con, request.conversation_id) if request else None
-        speaker_map = repo.get_speaker_map(con, request.conversation_id) if request else {}
-        _send(
-            con, client, report, cfg.discord.review_channel_id,
-            fmt.format_new_candidate(item, request, conv, speaker_map),
-            repo.POST_NEW_CANDIDATE, now, label=f"新規候補 {item.item_id}", item_id=item.item_id,
-            conversation_id=request.conversation_id if request else None,
-        )
-    # 上限で回した分と、投稿に失敗した分を合わせた、まだ投稿していない件数
-    report.not_posted_candidates = len(pending_candidates(con))
-
-
-def pending_transcription_unclear(con: duckdb.DuckDBPyConnection, cfg: Config) -> list[repo.RequestRow]:
-    """文字起こしが読めず、かつチェック項目にもならなかった抽出結果のうち、まだ投稿していないもの。
-
-    **reusable = true の行は投稿しない。** 2026-11-04 に実機で分かったことだが、
-    「文字起こしが壊れていること」と「チェック項目として使えること」は独立している。
-    実例: 「箇条書き」が「過剰書き」に化けた発話で、モデルは transcription_unclear = true と
-    judge したうえで、文脈から趣旨（見出しのすぐ下に書く）を取り、pass_criterion まで作った。
-    その判断は誤っていない。
-
-    この行を両方の経路に流すと、同じ発話が #review に2回出る（新規候補として1回、
-    この種別として1回）。そして新規候補の文面には `発言：「...」` で壊れた引用が入っている
-    （format_new_candidate 参照）ので、**利用者は既に壊れた引用を見ており、スレッドに返信して
-    文言を直せる。** つまり reusable = true の行に、この種別の投稿は何も足さない。
-
-    この種別が必要なのは reusable = false の行だけである。それらは照合（match/link.py）の
-    対象から外れるので knowledge_items にならず、投稿しなければ利用者の目に触れないまま消える。
-
-    文字起こしが壊れていることは、新規候補の文面の側に1行入れて伝える（format_new_candidate）。
-
-    投稿済みかどうかは discord_posts.request_id で見る。この種別は knowledge_items に
-    ならないので、item_id では記録できない（バージョン3で request_id を足した）。
-    """
-    posted = {
-        p.request_id for p in repo.list_discord_posts(con, repo.POST_TRANSCRIPTION_UNCLEAR)
-    }
-    rows = repo.get_transcription_unclear_requests(con, cfg.extract.model_name())
-    return [r for r in rows if not r.reusable and r.request_id not in posted]
-
-
-def post_transcription_unclear(
-    con, cfg: Config, client: DiscordClient, report: PostReport, now: datetime
-) -> None:
-    """文字起こしが読めず、チェック項目にもならなかった抽出結果を #review に投稿する（7章の案A）。
-
-    対象は reusable = false の行だけである（理由は pending_transcription_unclear の説明）。
-    それらは照合の対象から外れて knowledge_items にならないので、投稿しなければ利用者の目に
-    触れないまま消える。投稿するのは、発話したのが利用者本人であり、壊れた引用を見れば自分が
-    何と言ったか分かるためである。
-    """
-    pending = pending_transcription_unclear(con, cfg)
-    for request in pending[: cfg.discord.max_transcription_unclear_per_run]:
-        conv = repo.get_conversation(con, request.conversation_id)
-        speaker_map = repo.get_speaker_map(con, request.conversation_id)
-        _send(
-            con, client, report, cfg.discord.review_channel_id,
-            fmt.format_transcription_unclear(request, conv, speaker_map),
-            repo.POST_TRANSCRIPTION_UNCLEAR, now,
-            label=f"文字起こしが読めなかった抽出結果 {request.request_id}",
-            conversation_id=request.conversation_id, request_id=request.request_id,
-        )
-
-
-def post_contradictions(con, cfg: Config, client: DiscordClient, report: PostReport, now: datetime) -> None:
-    for pair in find_contradictions(con, cfg)[: cfg.discord.max_contradictions_per_run]:
-        _send(
-            con, client, report, cfg.discord.contradictions_channel_id,
-            fmt.format_contradiction(pair.a, pair.b, pair.similarity),
-            repo.POST_CONTRADICTION, now, label=f"矛盾 {pair.a.item_id}/{pair.b.item_id}",
-            item_id=pair.a.item_id, pair_item_id=pair.b.item_id,
-        )
-
-
 def run_post(
     con: duckdb.DuckDBPyConnection,
     cfg: Config,
     client: DiscordClient,
-    judge: ImportanceJudge | None,
     now: datetime | None = None,
 ) -> PostReport:
-    """5種類を投稿する。チャンネルIDが空の種類は、設定が必要であることを報告して飛ばす。"""
-    now = now or datetime.now()
+    """未投稿の議事録をすべて投稿する。設定 discord.minutes_channel_id が空なら何もしない。"""
     report = PostReport()
-    review, contra = cfg.discord.review_channel_id, cfg.discord.contradictions_channel_id
-    if not review and not contra:
+    channel = cfg.discord.minutes_channel_id
+    if not channel:
         report.skipped_for_config = True
         report.messages.append(
-            "設定が必要です: config.toml の [discord] review_channel_id と contradictions_channel_id を書いてください。"
+            "設定 discord.minutes_channel_id が空のため、何も投稿しませんでした。"
+            "Discord のチャンネルIDを config.toml の [discord] に書いてください。"
         )
         return report
-    if review:
-        post_bundle_results(con, cfg, client, report, now)
-        post_speaker_samples(con, cfg, client, report, now)
-        post_new_candidates(con, cfg, client, judge, report, now)
-        post_transcription_unclear(con, cfg, client, report, now)
-    else:
-        report.messages.append(
-            "review_channel_id が空のため、新規候補・話者の対応付け・束ね結果・"
-            "文字起こしが読めなかった抽出結果は投稿しません。"
-        )
-    if contra:
-        post_contradictions(con, cfg, client, report, now)
-    else:
-        report.messages.append("contradictions_channel_id が空のため、矛盾の可能性がある組は投稿しません。")
+    for row in repo.list_unposted_minutes(con):
+        path = Path(row.path)
+        try:
+            markdown = path.read_text(encoding="utf-8")
+        except OSError as e:
+            report.failures.append(f"{row.conversation_id}: 議事録のファイルを読めません({path}): {e}")
+            continue
+        text = build_post_text(markdown, row.conversation_id)
+        try:
+            message_id = client.post_file(channel, text, f"{row.conversation_id}.md", markdown.encode("utf-8"))
+        except DiscordError as e:
+            report.failures.append(f"{row.conversation_id}: {e}")
+            continue
+        repo.mark_minutes_posted(con, row.conversation_id, message_id, now or datetime.now())
+        report.posted.append(row.conversation_id)
     return report
+
+
+def print_post_report(report: PostReport, echo: Callable[[str], None]) -> None:
+    for line in report.messages:
+        echo(line)
+    for line in report.failures:
+        echo(f"失敗: {line}")
+    if report.skipped_for_config:
+        return
+    posted = "、".join(report.posted) or "なし"
+    echo(f"投稿: {len(report.posted)} 件（{posted}）")

@@ -1,337 +1,242 @@
-"""Discord への投稿(仕様 1-4、2-3、テスト 7)。"""
+"""Discord への議事録の投稿。DiscordClient は tests/fakes.py の FakeDiscordClient で差し替える。"""
 
 from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+from typer.testing import CliRunner
+
 from kijun.db import repo
-from kijun.discord.post import count_candidates_needing_importance, run_post
-from tests.conftest import make_conversation
-from tests.fakes import FakeDiscordClient, FakeImportanceJudge
-from tests.review_helpers import CID, NOW, add_item, add_request, candidate, setup_conversation
+from kijun.discord.base import DiscordError
+from kijun.discord.post import CONTINUED_NOTICE, DISCORD_LIMIT, build_post_text, run_post
+from kijun.discord.run import TOKEN_ENV, post_command
+from kijun.minutes.generate import generate_minutes
+from kijun.minutes.models import ChunkMinutes, Overview, Todo, Topic
+from tests.conftest import make_conversation, make_utterances
+from tests.fakes import FakeDiscordClient, FakeJsonChat
+
+NOW = datetime(2026, 11, 6, 9, 0)
+CID = "20260920_1930_f2f_teirei"
 
 
-def configure(cfg, review="111", contra="222", max_candidates=20):
-    cfg.discord.review_channel_id = review
-    cfg.discord.contradictions_channel_id = contra
-    cfg.discord.max_candidates_per_run = max_candidates
-    return cfg
-
-
-def candidate_messages(client: FakeDiscordClient) -> list[str]:
-    return [c for c in client.contents() if c.startswith("【新規候補 #")]
-
-
-def numbers(client: FakeDiscordClient) -> list[str]:
-    """投稿した新規候補の項目番号を、投稿順に返す。"""
-    out = []
-    for c in client.contents():
-        if c.startswith("【新規候補 #"):
-            out.append(c.split("#")[1].split("】")[0])
-    return out
-
-
-def test_重要度の降順_同じ重要度なら新しい順に投稿する(con, cfg):
-    configure(cfg)
-    base = datetime(2026, 11, 3, 12, 0)
-    candidate(con, 1, importance=1, linked_at=base)
-    candidate(con, 2, importance=3, linked_at=base)
-    candidate(con, 3, importance=3, linked_at=datetime(2026, 11, 3, 13, 0))  # 重要度3のうち新しい
-    candidate(con, 4, importance=2, linked_at=base)
-    client = FakeDiscordClient()
-
-    run_post(con, cfg, client, None, NOW)
-
-    assert numbers(client) == ["0003", "0002", "0004", "0001"]
-
-
-def test_上限を超えた分は投稿されず_次回に回る(con, cfg):
-    configure(cfg, max_candidates=2)
-    for n, imp in [(1, 1), (2, 3), (3, 2), (4, 3)]:
-        candidate(con, n, importance=imp)
-    client = FakeDiscordClient()
-
-    first = run_post(con, cfg, client, None, NOW)
-
-    assert len(numbers(client)) == 2
-    assert set(numbers(client)) == {"0002", "0004"}  # 重要度の高い2件が先に出る
-    assert first.not_posted_candidates == 2  # 投稿していない件数を報告する
-    assert {p.item_id for p in repo.list_discord_posts(con, "new_candidate")} == {"item_0002", "item_0004"}
-
-    second = run_post(con, cfg, client, None, NOW)  # 次回に残りが出る。投稿済みは再投稿しない
-    assert set(numbers(client)) == {"0001", "0002", "0003", "0004"} and len(numbers(client)) == 4
-    assert second.not_posted_candidates == 0
-
-    third = run_post(con, cfg, client, None, NOW)
-    assert len(numbers(client)) == 4 and third.posted == {}
-
-
-def test_投稿の記録にチャンネルIDが残る(con, cfg):
-    configure(cfg, review="111", contra="222")
-    candidate(con, 1, importance=2)
-    run_post(con, cfg, FakeDiscordClient(), None, NOW)
-    post = repo.list_discord_posts(con, "new_candidate")[0]
-    assert post.channel_id == "111" and post.item_id == "item_0001" and post.processed_at is None
-    assert post.message_id.startswith("m") and post.conversation_id == CID
-
-
-def test_重要度が未判定の候補はLLMで判定して保存し_根拠を_review_log_に残す(con, cfg):
-    configure(cfg)
-    candidate(con, 1, importance=None, check_text="項目A")
-    candidate(con, 2, importance=3, check_text="項目B")  # 判定済みは再判定しない
-    judge = FakeImportanceJudge(importance=2)
-    assert count_candidates_needing_importance(con) == 1
-
-    run_post(con, cfg, FakeDiscordClient(), judge, NOW)
-
-    assert [c[0] for c in judge.calls] == ["項目A"]
-    assert judge.calls[0][1] == ["発言1"]  # 根拠の発言を渡す
-    assert repo.get_knowledge_item(con, "item_0001").importance == 2
-    log = repo.list_review_log(con, "item_0001", "importance_proposed")
-    assert [(r.before, r.after) for r in log] == [(None, "根拠:項目A")]
-    assert count_candidates_needing_importance(con) == 0
-
-
-def test_重要度の判定に失敗しても投稿し_重要度案はなしと出る(con, cfg):
-    configure(cfg)
-    candidate(con, 1, importance=None, check_text="項目A")
-    client = FakeDiscordClient()
-
-    report = run_post(con, cfg, client, FakeImportanceJudge(fail_for={"項目A"}), NOW)
-
-    assert "重要度案：なし" in candidate_messages(client)[0]
-    assert repo.get_knowledge_item(con, "item_0001").importance is None
-    assert not report.failed  # 判定の失敗は投稿の失敗ではない
-
-
-def test_LLMを使えないときも投稿できる(con, cfg):
-    configure(cfg)
-    candidate(con, 1, importance=None)
-    client = FakeDiscordClient()
-    run_post(con, cfg, client, None, NOW)
-    assert "重要度案：なし" in candidate_messages(client)[0]
-
-
-def test_status_が候補でない項目は投稿しない(con, cfg):
-    configure(cfg)
-    candidate(con, 1, importance=2, status="approved")
-    candidate(con, 2, importance=2, status="rejected")
-    client = FakeDiscordClient()
-    run_post(con, cfg, client, None, NOW)
-    assert numbers(client) == []
-
-
-def test_2000文字を超えて収まらない文面は投稿せず_失敗として報告する(con, cfg):
-    configure(cfg)
-    candidate(con, 1, importance=2, check_text="あ" * 2500)
-    candidate(con, 2, importance=1)
-    client = FakeDiscordClient()
-
-    report = run_post(con, cfg, client, None, NOW)
-
-    assert numbers(client) == ["0002"]  # 他の候補は投稿される
-    assert report.failed and "上限" in report.failures[0] and "item_0001" in report.failures[0]
-    assert report.not_posted_candidates == 1  # 投稿できなかった分は未投稿として残る
-
-
-def test_1件の投稿の失敗で全体を止めない(con, cfg):
-    configure(cfg)
-    candidate(con, 1, importance=3, check_text="失敗させる項目")
-    candidate(con, 2, importance=2)
-    client = FakeDiscordClient(fail_post_when=lambda c: "失敗させる項目" in c)
-
-    report = run_post(con, cfg, client, None, NOW)
-
-    assert numbers(client) == ["0002"] and report.failed
-    assert [p.item_id for p in repo.list_discord_posts(con, "new_candidate")] == ["item_0002"]  # 失敗は記録しない
-
-
-def test_話者の対応付けは会議ごとに1回だけ投稿する(con, cfg):
-    configure(cfg)
-    setup_conversation(con)
-    client = FakeDiscordClient()
-
-    first = run_post(con, cfg, client, None, NOW)
-    second = run_post(con, cfg, client, None, NOW)
-
-    samples = [c for c in client.contents() if c.startswith("【話者の対応付け】")]
-    assert len(samples) == 1 and "00=self 01=kouhai_a" in samples[0]
-    assert first.posted == {"speaker_sample": 1} and second.posted == {}
-    post = repo.list_discord_posts(con, "speaker_sample")[0]
-    assert post.conversation_id == CID and post.channel_id == "111"
-
-
-def test_self_が決まっている会議には話者の対応付けを投稿しない(con, cfg):
-    configure(cfg)
-    setup_conversation(con)
-    repo.set_speaker_map(con, CID, "SPEAKER_00", "self")
-    client = FakeDiscordClient()
-    run_post(con, cfg, client, None, NOW)
-    assert client.contents() == []
-
-
-def test_束ね結果は複数ファイルの会議だけ投稿する(con, cfg):
-    configure(cfg)
-    repo.insert_conversation(con, make_conversation("single"))
-    repo.insert_conversation(con, make_conversation("bundled", source_files=["a.m4a", "b.m4a"]))
-    client = FakeDiscordClient()
-    run_post(con, cfg, client, None, NOW)
-    run_post(con, cfg, client, None, NOW)
-    bundles = [c for c in client.contents() if c.startswith("【束ね結果】")]
-    assert len(bundles) == 1 and "bundled" in bundles[0]
-
-
-def test_チャンネルIDが空なら何もせず_設定が必要だと出す(con, cfg):
-    candidate(con, 1, importance=2)
-    client = FakeDiscordClient()
-    report = run_post(con, cfg, client, None, NOW)
-    assert client.posted == [] and report.skipped_for_config
-    assert "設定が必要" in report.messages[0]
-
-
-def test_review_だけ空なら矛盾だけ_contradictions_だけ空なら候補だけ投稿する(con, cfg):
-    configure(cfg, review="", contra="222")
-    candidate(con, 1, importance=2)
-    client = FakeDiscordClient()
-    report = run_post(con, cfg, client, None, NOW)
-    assert numbers(client) == [] and any("review_channel_id が空" in m for m in report.messages)
-
-    configure(cfg, review="111", contra="")
-    report = run_post(con, cfg, client, None, NOW)
-    assert numbers(client) == ["0001"] and any("contradictions_channel_id が空" in m for m in report.messages)
-
-
-# --- 文字起こしが読めなかった抽出結果（CLAUDE.md 7章の案A） ---------------------------------
-#
-# これらは reusable = False なので照合の対象から外れ、knowledge_items にならない。投稿するのは、
-# 発話したのが利用者本人であり、壊れた引用を見れば自分が何と言ったか分かるためである。
-# 投稿しなければ、同じ発話が繰り返し失われ続ける（「箇条書き」「感嘆符」は頻出語である）。
-
-UNCLEAR_HEAD = "【文字起こしが読めませんでした】"
-
-
-def unclear_messages(client: FakeDiscordClient) -> list[str]:
-    return [c for c in client.contents() if c.startswith(UNCLEAR_HEAD)]
-
-
-def add_unclear(con, request_id: str, quote: str, model: str, **kw):
-    return add_request(
-        con, request_id, quote=quote, model=model, reusable=False,
-        transcription_unclear=True, **kw,
+def handler(system, user, model_cls, name):
+    if model_cls is Overview:
+        return Overview(overview="定例の日程を決めた会議。")
+    return ChunkMinutes(
+        topics=[Topic(title="日程", points=["水曜日の午後"])],
+        decisions=["定例は水曜日の午後にする"],
+        todos=[Todo(task="資料を用意する", owner="SPEAKER_01", due="金曜日"), Todo(task="会場を探す")],
+        open_issues=["会場"],
     )
 
 
-def test_文字起こしが読めなかった抽出結果を_review_に投稿する(con, cfg):
-    configure(cfg)
-    cfg.extract.ollama.model = "m"
-    setup_conversation(con)
-    add_unclear(con, "r1", "3つ目簡単フォーイスなんか減らしてください", "m",
-                summary="「簡単フォーイス」を減らすことを求めた")
-    client = FakeDiscordClient()
-
-    run_post(con, cfg, client, None, NOW)
-
-    posted = unclear_messages(client)
-    assert len(posted) == 1
-    # 引用は直さずそのまま出す。直すのは利用者で、そのための投稿である
-    assert "簡単フォーイス" in posted[0]
-    # チェック項目案は書かない。書けないことがこの投稿の内容である
-    assert "チェック項目案" not in posted[0]
+def make_minutes(con, cfg, cid=CID, chat_handler=handler):
+    repo.insert_conversation(con, make_conversation(cid, transcribed_at=datetime(2026, 9, 21), duration_sec=600.0))
+    repo.replace_utterances(con, cid, make_utterances(10))
+    return generate_minutes(con, cfg, cid, FakeJsonChat(chat_handler), NOW, lambda m: None)
 
 
-def test_投稿は_request_id_で記録され_次回は投稿しない(con, cfg):
-    # discord_posts に item_id では記録できない（knowledge_items にならないため）。
-    configure(cfg)
-    cfg.extract.ollama.model = "m"
-    setup_conversation(con)
-    add_unclear(con, "r1", "過剰書きにして", "m")
-    client = FakeDiscordClient()
-
-    run_post(con, cfg, client, None, NOW)
-    rows = repo.list_discord_posts(con, repo.POST_TRANSCRIPTION_UNCLEAR)
-    assert [p.request_id for p in rows] == ["r1"]
-    assert rows[0].item_id is None and rows[0].conversation_id == CID
-
-    run_post(con, cfg, client, None, NOW)  # 2回目
-    assert len(unclear_messages(client)) == 1  # 増えない
+def markdown(cfg, cid=CID):
+    return (cfg.paths.minutes / f"{cid}.md").read_text(encoding="utf-8")
 
 
-def test_上限の件数までしか投稿しない(con, cfg):
-    configure(cfg)
-    cfg.extract.ollama.model = "m"
-    cfg.discord.max_transcription_unclear_per_run = 2
-    setup_conversation(con)
-    for i in range(5):
-        add_unclear(con, f"r{i}", f"壊れた引用{i}", "m")
-    client = FakeDiscordClient()
-
-    run_post(con, cfg, client, None, NOW)
-
-    assert len(unclear_messages(client)) == 2
+# --- 本文 ----------------------------------------------------------------------------------------
 
 
-def test_別のモデルで抽出した分は投稿しない(con, cfg):
-    # 設定を変えて2回抽出した場合、いまの設定が指すモデルの分だけを投稿する。
-    configure(cfg)
-    cfg.extract.ollama.model = "m"
-    setup_conversation(con)
-    add_unclear(con, "r1", "いまの設定のモデル", "m")
-    add_unclear(con, "r2", "別の設定のモデル", "other")
-    client = FakeDiscordClient()
-
-    run_post(con, cfg, client, None, NOW)
-
-    posted = unclear_messages(client)
-    assert len(posted) == 1 and "いまの設定のモデル" in posted[0]
-
-
-def test_文字起こしが読めた抽出結果は投稿しない(con, cfg):
-    configure(cfg)
-    cfg.extract.ollama.model = "m"
-    setup_conversation(con)
-    add_request(con, "r1", quote="結論を先に書いて", model="m")  # transcription_unclear は False
-    client = FakeDiscordClient()
-
-    run_post(con, cfg, client, None, NOW)
-
-    assert unclear_messages(client) == []
+def test_本文は見出し_概要_決定事項_ToDo(con, cfg):
+    make_minutes(con, cfg)
+    text = build_post_text(markdown(cfg), CID)
+    assert text.startswith(f"**議事録 {CID}**（2026-09-20 19:30）")
+    assert "**概要**\n定例の日程を決めた会議。" in text
+    assert "**決定事項**\n- 定例は水曜日の午後にする" in text
+    # Discord は Markdown の表を表示しないので、ToDo は箇条書きに直す
+    assert "- 資料を用意する（担当: SPEAKER_01、期限: 金曜日）" in text
+    assert "- 会場を探す（担当: 記載なし、期限: 記載なし）" in text
+    assert "|" not in text
+    # 議題・未決事項・文字起こしは本文に入れない(添付ファイルにある)
+    assert "日程" not in text.split("**概要**")[0] and "未決" not in text and "発話0" not in text
+    assert len(text) <= DISCORD_LIMIT
 
 
-def test_チェック項目として使える行は_読めなかった側には投稿しない(con, cfg):
-    """二重投稿を止める（2026-11-04 実機で見つかった不具合）。
-
-    「文字起こしが壊れていること」と「チェック項目として使えること」は独立している。実機では、
-    「箇条書き」が「過剰書き」に化けた発話に対して、モデルが transcription_unclear = true と
-    judge したうえで、文脈から趣旨を取り pass_criterion まで作った（reusable = true）。
-    両方の経路に流すと、同じ発話が #review に2回出る。そして新規候補の文面には壊れた引用が
-    入っているので、利用者は既にそれを見てスレッドで直せる。この種別の投稿は何も足さない。
-    """
-    configure(cfg)
-    cfg.extract.ollama.model = "m"
-    setup_conversation(con)
-    add_request(
-        con, "r1", quote="過剰書きでいいんで見出しのすぐ下に書いて", model="m",
-        reusable=True, transcription_unclear=True,
+def test_2000文字を超えたら末尾を切って_続きは添付ファイルと書く(con, cfg):
+    long_handler = lambda s, u, m, n: (  # noqa: E731
+        Overview(overview="あ" * 300) if m is Overview else ChunkMinutes(decisions=[f"決定{i}" + "い" * 60 for i in range(60)])
     )
+    make_minutes(con, cfg, chat_handler=long_handler)
+    text = build_post_text(markdown(cfg), CID)
+    assert len(text) <= DISCORD_LIMIT
+    assert text.endswith(CONTINUED_NOTICE) and "（続きは添付ファイル）" in text
+    assert text.startswith(f"**議事録 {CID}**")  # 先頭(見出し・概要)は残る
+
+
+def test_ちょうど上限なら切らない():
+    md = "# 議事録 x\n\n- 日時: 2026-09-20 19:30\n\n## 概要\n\n" + "あ" * 100 + "\n\n## 決定事項\n\nなし\n\n## ToDo\n\nなし\n"
+    text = build_post_text(md, "x")
+    assert CONTINUED_NOTICE not in text
+    cut = build_post_text(md, "x", limit=len(text) - 1)
+    assert cut.endswith(CONTINUED_NOTICE) and len(cut) <= len(text) - 1
+
+
+def test_節が_なし_のときも本文を作れる():
+    md = "# 議事録 x\n\n- 日時: 2026-09-20 19:30\n\n## 概要\n\n概要です\n\n## 決定事項\n\nなし\n\n## ToDo\n\nなし\n\n## 付録: 文字起こし\n"
+    text = build_post_text(md, "x")
+    assert "**決定事項**\nなし" in text and "**ToDo**\nなし" in text
+
+
+# --- 投稿 ----------------------------------------------------------------------------------------
+
+
+def test_議事録を本文とファイル1つで投稿し_投稿済みにする(con, cfg):
+    cfg.discord.minutes_channel_id = "111"
+    make_minutes(con, cfg)
     client = FakeDiscordClient()
 
-    run_post(con, cfg, client, None, NOW)
+    report = run_post(con, cfg, client, NOW)
 
-    assert unclear_messages(client) == []
-    assert repo.list_discord_posts(con, repo.POST_TRANSCRIPTION_UNCLEAR) == []
+    assert report.posted == [CID] and not report.failed
+    channel, content, message_id = client.posted[0]
+    assert channel == "111" and content == build_post_text(markdown(cfg), CID)
+    filename, data = client.files[message_id]
+    assert filename == f"{CID}.md" and data.decode("utf-8") == markdown(cfg)  # Markdown 全体を添付する
+    row = repo.get_minutes(con, CID)
+    assert row.discord_message_id == message_id and row.posted_at == NOW
 
 
-def test_読めずチェック項目にもならない行だけを投稿する(con, cfg):
-    configure(cfg)
-    cfg.extract.ollama.model = "m"
-    setup_conversation(con)
-    add_request(con, "r1", quote="過剰書きで書いて", model="m",
-                reusable=True, transcription_unclear=True)   # 新規候補の側に出る
-    add_request(con, "r2", quote="3つ目簡単フォーイスなんか減らして", model="m",
-                reusable=False, transcription_unclear=True)  # こちらだけ
+def test_投稿済みは再投稿しない(con, cfg):
+    cfg.discord.minutes_channel_id = "111"
+    make_minutes(con, cfg)
     client = FakeDiscordClient()
+    run_post(con, cfg, client, NOW)
+    run_post(con, cfg, client, NOW)
+    assert len(client.posted) == 1
 
-    run_post(con, cfg, client, None, NOW)
 
-    posted = unclear_messages(client)
-    assert len(posted) == 1 and "簡単フォーイス" in posted[0]
+def test_議事録を作り直しても自動では再投稿しない(con, cfg):
+    cfg.discord.minutes_channel_id = "111"
+    make_minutes(con, cfg)
+    client = FakeDiscordClient()
+    run_post(con, cfg, client, NOW)
+    generate_minutes(con, cfg, CID, FakeJsonChat(handler), datetime(2026, 11, 7), lambda m: None)
+    run_post(con, cfg, client, NOW)
+    assert len(client.posted) == 1
+
+
+def test_1件の投稿に失敗しても残りは投稿し_失敗した議事録は未投稿のまま残す(con, cfg):
+    cfg.discord.minutes_channel_id = "111"
+    make_minutes(con, cfg, "20260920_1930_f2f_teirei")
+    make_minutes(con, cfg, "20260921_1930_f2f_teirei")
+    client = FakeDiscordClient(fail_post_when=lambda c: "20260920_1930" in c)
+
+    report = run_post(con, cfg, client, NOW)
+
+    assert report.posted == ["20260921_1930_f2f_teirei"]
+    assert len(report.failures) == 1 and "20260920_1930_f2f_teirei" in report.failures[0] and report.failed
+    assert [m.conversation_id for m in repo.list_unposted_minutes(con)] == ["20260920_1930_f2f_teirei"]
+    # 次回の実行で再試行される
+    report2 = run_post(con, cfg, FakeDiscordClient(), NOW)
+    assert report2.posted == ["20260920_1930_f2f_teirei"]
+
+
+def test_議事録のファイルが無ければ失敗として残し_他は続ける(con, cfg):
+    cfg.discord.minutes_channel_id = "111"
+    make_minutes(con, cfg, "20260920_1930_f2f_teirei")
+    make_minutes(con, cfg, "20260921_1930_f2f_teirei")
+    (cfg.paths.minutes / "20260920_1930_f2f_teirei.md").unlink()
+    report = run_post(con, cfg, FakeDiscordClient(), NOW)
+    assert report.posted == ["20260921_1930_f2f_teirei"]
+    assert "読めません" in report.failures[0]
+
+
+def test_チャンネルIDが空なら何も投稿せず設定が必要と伝える(con, cfg):
+    make_minutes(con, cfg)
+    client = FakeDiscordClient()
+    report = run_post(con, cfg, client, NOW)
+    assert client.posted == [] and report.skipped_for_config and "minutes_channel_id" in report.messages[0]
+    assert repo.get_minutes(con, CID).posted_at is None
+
+
+# --- post_command ----------------------------------------------------------------------------------
+
+
+def test_post_command_は設定が空なら_0_を返す_トークンも要らない(con, cfg, monkeypatch):
+    monkeypatch.delenv(TOKEN_ENV, raising=False)
+    make_minutes(con, cfg)
+    out: list[str] = []
+    assert post_command(con, cfg, echo=out.append) == 0
+    assert any("minutes_channel_id" in m for m in out)
+
+
+def test_post_command_は未投稿が無ければトークンが無くても_0(con, cfg, monkeypatch):
+    monkeypatch.delenv(TOKEN_ENV, raising=False)
+    cfg.discord.minutes_channel_id = "111"
+    out: list[str] = []
+    assert post_command(con, cfg, echo=out.append) == 0
+    assert any("未投稿の議事録はありません" in m for m in out)
+
+
+def test_post_command_は未投稿があってトークンが無ければ案内して失敗する(con, cfg, monkeypatch):
+    monkeypatch.delenv(TOKEN_ENV, raising=False)
+    cfg.discord.minutes_channel_id = "111"
+    make_minutes(con, cfg)
+    with pytest.raises(RuntimeError, match=TOKEN_ENV):
+        post_command(con, cfg, echo=lambda m: None)
+
+
+def test_post_command_は投稿に失敗したものがあれば_1(con, cfg):
+    cfg.discord.minutes_channel_id = "111"
+    make_minutes(con, cfg)
+    out: list[str] = []
+    code = post_command(con, cfg, FakeDiscordClient(fail_post_when=lambda c: True), out.append, NOW)
+    assert code == 1 and any(m.startswith("失敗:") for m in out)
+    code_ok = post_command(con, cfg, FakeDiscordClient(), out.append, NOW)
+    assert code_ok == 0 and any("投稿: 1 件" in m for m in out)
+
+
+def test_DiscordError_がクライアントから漏れても_1_を返す(con, cfg):
+    class Broken:
+        def post_file(self, *a):
+            raise DiscordError("ログインできません")
+
+    cfg.discord.minutes_channel_id = "111"
+    make_minutes(con, cfg)
+    out: list[str] = []
+    assert post_command(con, cfg, Broken(), out.append, NOW) == 1
+    assert any("ログインできません" in m for m in out)
+
+
+# --- CLI -----------------------------------------------------------------------------------------------
+
+
+def test_discord_post_コマンドと_minutes_コマンド(tmp_path, monkeypatch):
+    from kijun import cli
+    from kijun.llm import chat as chat_module
+
+    cfg_path = tmp_path / "c.toml"
+    cfg_path.write_text(
+        f'[paths]\ndb = "{(tmp_path / "k.duckdb").as_posix()}"\nminutes = "{(tmp_path / "md").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    base = ["--config", str(cfg_path)]
+    runner = CliRunner()
+    assert runner.invoke(cli.app, [*base, "db", "init"]).exit_code == 0
+    con = repo.connect(tmp_path / "k.duckdb")
+    repo.insert_conversation(con, make_conversation(CID, transcribed_at=datetime(2026, 9, 21), duration_sec=600.0))
+    repo.replace_utterances(con, CID, make_utterances(10))
+    con.close()
+    monkeypatch.setattr(chat_module, "OllamaJsonChat", lambda cfg: FakeJsonChat(handler))
+
+    r = runner.invoke(cli.app, [*base, "minutes", "--pending"])
+    assert r.exit_code == 0, r.output
+    assert "議事録を保存しました" in r.output and (tmp_path / "md" / f"{CID}.md").exists()
+    r = runner.invoke(cli.app, [*base, "minutes", "--pending"])
+    assert "対象の会議がありません" in r.output  # 2回目は議事録のある会議を作り直さない
+    r = runner.invoke(cli.app, [*base, "minutes", "--conversation", CID])
+    assert r.exit_code == 0 and "議事録を保存しました" in r.output  # 指定すれば作り直せる
+
+    monkeypatch.setattr(chat_module, "OllamaJsonChat", lambda cfg: FakeJsonChat(lambda *a: __import__("kijun.llm.chat", fromlist=["x"]).LlmError("接続拒否")))
+    r = runner.invoke(cli.app, [*base, "minutes", "--conversation", CID])
+    assert r.exit_code == 1 and "議事録を作れませんでした" in r.output
+
+    r = runner.invoke(cli.app, [*base, "discord", "post"])  # チャンネルIDが空
+    assert r.exit_code == 0 and "minutes_channel_id" in r.output

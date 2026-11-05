@@ -9,18 +9,7 @@ from kijun.db import migrate, repo
 from kijun.models import Utterance
 from tests.conftest import make_conversation
 
-EXPECTED_TABLES = {
-    "schema_version",
-    "conversations",
-    "utterances",
-    "extracted_requests",
-    "knowledge_items",
-    "item_evidence",
-    "review_log",
-    "speaker_map",
-    "discord_posts",
-    "embeddings",
-}
+EXPECTED_TABLES = {"schema_version", "conversations", "utterances", "minutes"}
 
 
 def columns(con, table: str) -> list[str]:
@@ -30,15 +19,13 @@ def columns(con, table: str) -> list[str]:
     ).fetchall()]
 
 
-def test_8テーブルと追加の2テーブルとビューができる(con):
+def test_新しい_DB_には議事録に必要なテーブルだけができる(con):
     tables = {r[0] for r in con.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE'"
     ).fetchall()}
-    assert tables == EXPECTED_TABLES
-    views = {r[0] for r in con.execute(
-        "SELECT table_name FROM information_schema.tables WHERE table_type = 'VIEW'"
-    ).fetchall()}
-    assert views == {"v_weekly_metrics"}
+    assert tables == EXPECTED_TABLES  # チェックリスト時代のテーブルは作らない
+    views = con.execute("SELECT count(*) FROM information_schema.tables WHERE table_type = 'VIEW'").fetchone()[0]
+    assert views == 0
 
 
 def test_conversations_は_setting_を2列に分けている(con):
@@ -50,23 +37,10 @@ def test_conversations_は_setting_を2列に分けている(con):
     ]
 
 
-def test_extracted_requests_の列は計画書どおり(con):
-    assert columns(con, "extracted_requests") == [
-        "request_id", "conversation_id", "seq_from", "seq_to", "speaker_from_label",
-        "speaker_to_label", "direction", "counterpart_role", "artifact_type", "quote",
-        "request_summary", "stated_reason", "applies_when", "reusable", "pass_criterion",
-        "transcription_unclear", "source_type", "model_name", "extracted_at",
-        "stated_reason_unverified", "applies_when_unverified",
-    ]
-
-
-def test_knowledge_items_と_embeddings_の列(con):
-    assert columns(con, "knowledge_items") == [
-        "item_id", "artifact_type", "check_text", "pass_criterion", "reason", "applies_when",
-        "not_applies_when", "importance", "status", "version", "updated_at",
-    ]
-    assert columns(con, "embeddings") == [
-        "owner_type", "owner_id", "model_name", "text_hash", "dim", "vector", "created_at",
+def test_utterances_と_minutes_の列(con):
+    assert columns(con, "utterances") == ["conversation_id", "seq", "speaker_label", "start_sec", "end_sec", "text"]
+    assert columns(con, "minutes") == [
+        "conversation_id", "path", "model_name", "created_at", "discord_message_id", "posted_at",
     ]
 
 
@@ -74,7 +48,7 @@ def test_スキーマの適用は何度でも安全で_バージョン行は1つ
     migrate.apply_schema(con)
     migrate.apply_schema(con)
     assert con.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 1
-    assert migrate.current_version(con) == migrate.SCHEMA_VERSION == 4
+    assert migrate.current_version(con) == migrate.SCHEMA_VERSION == 5
 
 
 def test_適用前のバージョンは_None(tmp_path):
@@ -114,113 +88,37 @@ def test_発話は入れ直せる(con):
     assert repo.get_utterances(con, "c1") == u2
 
 
-def test_重要度は_1から3だけ(con):
-    item = repo.KnowledgeItemRow("i1", None, "x", None, None, None, None, 4, "candidate", 1, datetime.now())
-    with pytest.raises(duckdb.ConstraintException):
-        repo.insert_knowledge_item(con, item)
+# --- minutes ------------------------------------------------------------------------------
 
 
-def test_item_id_の採番(con):
-    assert repo.next_item_id(con) == "item_0001"
-    repo.insert_knowledge_item(
-        con, repo.KnowledgeItemRow("item_0007", None, "x", None, None, None, None, None, "candidate", 1, datetime.now())
-    )
-    assert repo.next_item_id(con) == "item_0008"
+def test_議事録の記録と投稿済みの記録(con):
+    t1, t2 = datetime(2026, 11, 6, 1, 0), datetime(2026, 11, 6, 2, 0)
+    repo.upsert_minutes(con, "c1", "data/minutes/c1.md", "qwen3.5:9b", t1)
+    got = repo.get_minutes(con, "c1")
+    assert got == repo.MinutesRow("c1", "data/minutes/c1.md", "qwen3.5:9b", t1, None, None)
+    assert [m.conversation_id for m in repo.list_unposted_minutes(con)] == ["c1"]
+
+    repo.mark_minutes_posted(con, "c1", "m123", t2)
+    assert repo.list_unposted_minutes(con) == []
+    posted = repo.get_minutes(con, "c1")
+    assert posted.discord_message_id == "m123" and posted.posted_at == t2
 
 
-def test_ベクトルは次元数が違っても保存できる(con):
-    import numpy as np
-
-    now = datetime.now()
-    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("テキストA", np.array([1, 2, 3], dtype=np.float32))}, now)
-    repo.put_embeddings(con, "knowledge_item", "m2", {"a": ("テキストA", np.arange(1024, dtype=np.float32))}, now)
-    got = repo.get_embeddings(con, "knowledge_item", {"a": "テキストA", "b": "テキストB"}, "m")
-    assert list(got) == ["a"] and got["a"].tolist() == [1.0, 2.0, 3.0]
-    assert con.execute("SELECT dim FROM embeddings ORDER BY dim").fetchall() == [(3,), (1024,)]
-    # 上書き
-    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("テキストA", np.array([9, 9, 9], dtype=np.float32))}, now)
-    assert repo.get_embeddings(con, "knowledge_item", {"a": "テキストA"}, "m")["a"].tolist() == [9.0, 9.0, 9.0]
-    assert con.execute("SELECT count(*) FROM embeddings WHERE model_name = 'm'").fetchone()[0] == 1
+def test_議事録を作り直しても投稿済みの記録は残る(con):
+    t1, t2, t3 = datetime(2026, 11, 6, 1), datetime(2026, 11, 6, 2), datetime(2026, 11, 7, 1)
+    repo.upsert_minutes(con, "c1", "a.md", "m1", t1)
+    repo.mark_minutes_posted(con, "c1", "m123", t2)
+    repo.upsert_minutes(con, "c1", "b.md", "m2", t3)  # 作り直し
+    got = repo.get_minutes(con, "c1")
+    assert (got.path, got.model_name, got.created_at) == ("b.md", "m2", t3)
+    assert got.discord_message_id == "m123" and got.posted_at == t2  # 自動では再投稿されない
+    assert repo.list_unposted_minutes(con) == []
+    assert con.execute("SELECT count(*) FROM minutes").fetchone()[0] == 1
 
 
-def test_モデル名が違うベクトルは返さない(con):
-    import numpy as np
-
-    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("T", np.ones(3, dtype=np.float32))}, datetime.now())
-    assert repo.get_embeddings(con, "knowledge_item", {"a": "T"}, "other") == {}
-
-
-def test_テキストが変わったベクトルは返さない(con):
-    import numpy as np
-
-    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("古い文言", np.ones(3, dtype=np.float32))}, datetime.now())
-    assert "a" in repo.get_embeddings(con, "knowledge_item", {"a": "古い文言"}, "m")
-    assert repo.get_embeddings(con, "knowledge_item", {"a": "修正後の文言"}, "m") == {}
-
-
-def test_text_hash_は_NFKC_で正規化した_SHA256(con):
-    import hashlib
-
-    # 全角と半角の違い、合成済みと結合文字の違いでは、ハッシュが変わらない
-    assert repo.text_hash("ＡＢＣ１２３ ｶﾀｶﾅ") == repo.text_hash("ABC123 カタカナ")
-    assert repo.text_hash("が") == repo.text_hash("か\u3099")
-    assert repo.text_hash("a") != repo.text_hash("b")
-    assert repo.text_hash("abc") == hashlib.sha256(b"abc").hexdigest()
-    assert len(repo.text_hash("x")) == 64
-
-    import numpy as np
-
-    repo.put_embeddings(con, "knowledge_item", "m", {"a": ("ＡＢＣ", np.ones(3, dtype=np.float32))}, datetime.now())
-    assert con.execute("SELECT text_hash FROM embeddings").fetchone()[0] == repo.text_hash("ABC")
-    assert "a" in repo.get_embeddings(con, "knowledge_item", {"a": "ABC"}, "m")  # 全角と半角の違いでは再計算しない
-
-
-def test_review_log_の連番とビューが使える(con):
-    assert con.execute("SELECT nextval('review_log_seq')").fetchone()[0] == 1
-    repo.insert_conversation(con, make_conversation())
-    rows = con.execute("SELECT model_name, conversations, requests, reusable_ratio FROM v_weekly_metrics").fetchall()
-    assert rows == [(None, 1, 0, None)]
-
-
-def _req(conv: str, request_id: str, model: str, reusable: bool) -> repo.RequestRow:
-    return repo.RequestRow(
-        request_id=request_id, conversation_id=conv, seq_from=1, seq_to=1, speaker_from_label="SPEAKER_00",
-        speaker_to_label=None, direction=None, counterpart_role=None, artifact_type=None, quote="q",
-        request_summary="s", stated_reason=None, applies_when=None, reusable=reusable, pass_criterion=None,
-        source_type="live_conversation", model_name=model, extracted_at=datetime(2026, 9, 21),
-    )
-
-
-def test_ビューは抽出モデルごとに分かれ_会議を二重に数えない(con):
-    # 同じ会議を、量子化の違う2つの設定で抽出した場合（compare が比較する状況）
-    repo.insert_conversation(con, make_conversation("c1"))
-    repo.insert_requests(
-        con,
-        [
-            _req("c1", "c1#q4#1", "q4", True),
-            _req("c1", "c1#q4#2", "q4", True),
-            _req("c1", "c1#q4#3", "q4", False),
-            _req("c1", "c1#q8#1", "q8", True),
-            _req("c1", "c1#q8#2", "q8", False),
-        ],
-    )
-    rows = con.execute(
-        "SELECT model_name, conversations, requests, requests_per_conversation, reusable_ratio "
-        "FROM v_weekly_metrics ORDER BY model_name"
-    ).fetchall()
-    assert len(rows) == 2  # 1つの会議を2モデルで抽出すると2行
-    q4, q8 = rows
-    assert q8 == ("q8", 1, 2, 2.0, 0.5)  # 各行が、その会議を1回だけ数える
-    assert q4[:4] == ("q4", 1, 3, 3.0)
-    assert q4[4] == pytest.approx(2 / 3)  # モデルごとに正しい割合（小数）
-
-
-def test_抽出が0件の会議は_model_name_が_NULL_の行として出る(con):
-    repo.insert_conversation(con, make_conversation("c1"))
-    repo.insert_conversation(con, make_conversation("c2"))
-    repo.insert_requests(con, [_req("c1", "c1#q4#1", "q4", True)])
-    rows = con.execute(
-        "SELECT setting_format, model_name, conversations, requests, reusable_ratio "
-        "FROM v_weekly_metrics ORDER BY model_name NULLS LAST"
-    ).fetchall()
-    assert rows == [("f2f", "q4", 1, 1, 1.0), ("f2f", None, 1, 0, None)]
+def test_議事録の無い文字起こし済みの会議だけが対象になる(con):
+    repo.insert_conversation(con, make_conversation("c1"))  # 文字起こし前
+    repo.insert_conversation(con, make_conversation("c2", transcribed_at=datetime(2026, 9, 21)))
+    repo.insert_conversation(con, make_conversation("c3", transcribed_at=datetime(2026, 9, 21)))
+    repo.upsert_minutes(con, "c3", "c3.md", "m", datetime(2026, 9, 22))
+    assert [c.conversation_id for c in repo.list_conversations_without_minutes(con)] == ["c2"]

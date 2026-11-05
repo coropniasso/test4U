@@ -34,12 +34,14 @@ from kijun.doctor import (
     stretched_chunk,
     unload_model,
 )
-from kijun.extract.ollama_impl import build_payload
-from kijun.extract.tokens import tokens_for_minutes
+from kijun.llm.chat import OllamaJsonChat
+from kijun.llm.tokens import tokens_for_minutes
+from kijun.minutes.models import ChunkMinutes
+from kijun.minutes.prompt import build_chunk_messages
 from kijun.transport import HttpResponse, TransportError
 from tests.fakes import ollama_body
 
-GOOD_JSON = json.dumps({"items": []})
+GOOD_JSON = json.dumps({"topics": [], "decisions": [], "todos": [], "open_issues": []})
 GIB = 1024**3
 
 
@@ -105,21 +107,22 @@ def test_stretched_chunk_は指定したトークン数に近い長さになる(
     cfg = Config()
     chunk = stretched_chunk(cfg, 2000)
     chars = sum(len(u.text) for u in chunk.utterances)
-    assert abs(chars * cfg.extract.tokens_per_character - 2000) < 120 * cfg.extract.tokens_per_character
+    assert abs(chars * cfg.minutes.tokens_per_character - 2000) < 120 * cfg.minutes.tokens_per_character
     assert chunk.seq_to == len(chunk.utterances) - 1
 
 
-def test_doctor_payload_は抽出が送るものと_keep_alive_だけが違う():
+def test_doctor_payload_は議事録の生成が送るものと_keep_alive_だけが違う():
     cfg = Config()
     chunk = sample_chunk()
-    extract = build_payload(cfg, chunk)
+    system, user = build_chunk_messages(chunk)
+    extract = OllamaJsonChat(cfg.llm, object()).build_payload(system, user, ChunkMinutes)
     doctor = doctor_payload(cfg, chunk, with_schema=True)
     assert extract["keep_alive"] == "0" and doctor["keep_alive"] == DOCTOR_KEEP_ALIVE == "2m"
     assert {**doctor, "keep_alive": "0"} == extract
     # format の有無は引数で決まる(設定の enforces_json_schema によらない)
-    cfg.extract.ollama.enforces_json_schema = False
+    cfg.llm.enforces_json_schema = False
     assert "format" in doctor_payload(cfg, chunk, with_schema=True)
-    cfg.extract.ollama.enforces_json_schema = True
+    cfg.llm.enforces_json_schema = True
     assert "format" not in doctor_payload(cfg, chunk, with_schema=False)
 
 
@@ -139,7 +142,7 @@ def test_検査1_モデルがあれば良():
 
 def test_検査1_タグを省いた名前は_latest_に解決する():
     cfg = Config()
-    cfg.extract.ollama.model = "qwen3"
+    cfg.llm.model = "qwen3"
     assert check_models(FakeServer(tags_response=(200, tags("qwen3:latest"))), cfg).status == STATUS_OK
 
 
@@ -166,12 +169,12 @@ def test_検査1_HTTP_エラーと_JSON_でない応答は失敗():
 def test_検査2_適合すれば良_format_と_keep_alive_と_num_ctx_を付けて送る():
     server = FakeServer(chat=[(200, ollama_body(GOOD_JSON))])
     cfg = Config()
-    cfg.extract.ollama.enforces_json_schema = False  # 設定が偽でも、検査2は format を付けて測る
+    cfg.llm.enforces_json_schema = False  # 設定が偽でも、検査2は format を付けて測る
     r = check_schema_enforcement(server, cfg)
     assert r.status == STATUS_OK and r.detail["classification"] == OUTPUT_DIRECT_JSON
     payload = server.posts[0]["payload"]
     assert "format" in payload and payload["keep_alive"] == "2m"
-    assert payload["options"]["num_ctx"] == cfg.extract.ollama.num_ctx
+    assert payload["options"]["num_ctx"] == cfg.llm.num_ctx
 
 
 def test_検査2_前置きがあれば注意_enforces_json_schema_を_false_にする推奨():
@@ -233,7 +236,7 @@ def test_検査3_接続不可と_HTTP_エラーは失敗():
 
 def test_検査3_タグを省いたモデル名は_latest_として探す():
     cfg = Config()
-    cfg.extract.ollama.model = "qwen3"
+    cfg.llm.model = "qwen3"
     assert check_gpu(FakeServer(ps_response=(200, ps(model="qwen3:latest"))), cfg).status == STATUS_OK
 
 
@@ -259,7 +262,7 @@ def test_検査4_chunk_minutes_相当の入力で_tokens_per_sec_を出す():
     sent = server.posts[0]["payload"]
     assert sent["keep_alive"] == "2m"
     user_chars = len(sent["messages"][1]["content"])
-    expected = tokens_for_minutes(cfg.extract.chunk_minutes, cfg.extract.tokens_per_meeting_minute) / cfg.extract.tokens_per_character
+    expected = tokens_for_minutes(cfg.minutes.chunk_minutes, cfg.minutes.tokens_per_meeting_minute) / cfg.minutes.tokens_per_character
     assert abs(user_chars - expected) < expected * 0.3
 
 
@@ -285,7 +288,7 @@ def test_検査5_上限未満なら良_tokens_per_character_の実測を出す()
     speed = speed_result(prompt_eval_count=3000)
     r = check_truncation(cfg, speed)
     assert r.status == STATUS_OK
-    limit = cfg.extract.ollama.num_ctx - cfg.extract.ollama.num_predict
+    limit = cfg.llm.num_ctx - cfg.llm.num_predict
     assert r.detail["limit"] == limit and r.detail["input_tokens"] == 3000
     chars = speed.detail["measurements"][0]["input_chars"]
     assert r.detail["tokens_per_character_measured"] == round(3000 / chars, 4)
@@ -294,7 +297,7 @@ def test_検査5_上限未満なら良_tokens_per_character_の実測を出す()
 
 def test_検査5_上限に達していれば失敗():
     cfg = Config()
-    limit = cfg.extract.ollama.num_ctx - cfg.extract.ollama.num_predict
+    limit = cfg.llm.num_ctx - cfg.llm.num_predict
     r = check_truncation(cfg, speed_result(prompt_eval_count=limit))
     assert r.status == STATUS_ERROR and "先頭を捨てた疑い" in r.summary
     assert check_truncation(cfg, speed_result(prompt_eval_count=limit - 1)).status == STATUS_OK
@@ -322,14 +325,14 @@ def measurement(**kw) -> dict:
 
 
 def test_2時間の会議の見込み_チャンク数と実測から計算する():
-    cfg = Config()  # chunk 12 分・overlap 1 分 → 歩幅 11 分。(120 - 1) / 11 = 10.8 → 11 チャンク
+    cfg = Config()  # chunk 15 分・重なり 0 → 120 / 15 = 8 チャンク。概要の1回を足して 9 回呼ぶ
     whole = estimate_whole_meeting(cfg, measurement(), [{"load_sec": 5.0}])
-    assert whole["chunks"] == 11 and whole["reload_each_chunk"] is True and whole["load_sec_assumed"] == 5.0
-    assert whole["measured_sec"] == round(11 * (40.0 + 5.0))  # keep_alive が "0" なので毎チャンク読み込む
+    assert whole["chunks"] == 8 and whole["calls"] == 9 and whole["reload_each_chunk"] is True and whole["load_sec_assumed"] == 5.0
+    assert whole["measured_sec"] == round(9 * (40.0 + 5.0))  # keep_alive が "0" なので毎チャンク読み込む
     # 最悪値: 読み込み 5 + 入力 3 + num_predict 8192 ÷ 30 tokens/s
     assert whole["slowest_tokens_per_sec"] == 30.0
     per_chunk = 5.0 + 3.0 + 8192 / 30.0
-    assert whole["worst_per_chunk_sec"] == round(per_chunk) and whole["worst_sec"] == round(11 * per_chunk)
+    assert whole["worst_per_chunk_sec"] == round(per_chunk) and whole["worst_sec"] == round(9 * per_chunk)
 
 
 def test_最も遅い測定値を使う():
@@ -347,9 +350,9 @@ def test_出力が短い測定は速度に使わない():
 
 def test_keep_alive_が_0_でなければ読み込みを足さない():
     cfg = Config()
-    cfg.extract.ollama.keep_alive = "5m"
+    cfg.llm.keep_alive = "5m"
     whole = estimate_whole_meeting(cfg, measurement(), [{"load_sec": 5.0}])
-    assert whole["reload_each_chunk"] is False and whole["measured_sec"] == round(11 * 40.0)
+    assert whole["reload_each_chunk"] is False and whole["measured_sec"] == round(9 * 40.0)
 
 
 def test_速度を出せるだけの出力が無ければ最悪値は出さない():
@@ -374,7 +377,7 @@ def test_推奨値_enforces_json_schema_は検査2の結果に従う():
 
 def test_推奨値_測れなかった項目は現在の値のまま():
     cfg = Config()
-    cfg.extract.ollama.enforces_json_schema = False
+    cfg.llm.enforces_json_schema = False
     report, _ = full_report(tags_response=(200, tags("x")))  # 検査1が失敗し、以降は未実行
     assert report.recommendations["enforces_json_schema"]["value"] is True  # Config() の値
     assert report.recommendations["timeout_sec"]["value"] == 1800
@@ -400,10 +403,10 @@ def test_推奨値_timeout_sec_は最悪値の1_5倍_下限600秒():
 
 
 def test_推奨値_検査5が失敗したら_chunk_minutes_を半分にする():
-    limit = Config().extract.ollama.num_ctx - Config().extract.ollama.num_predict
+    limit = Config().llm.num_ctx - Config().llm.num_predict
     report, _ = full_report(chat=[(200, ollama_body(GOOD_JSON)), (200, speed_body(prompt_eval_count=limit))])
     assert report.get("truncation").status == STATUS_ERROR
-    assert report.recommendations["chunk_minutes"]["value"] == Config().extract.chunk_minutes // 2
+    assert report.recommendations["chunk_minutes"]["value"] == Config().minutes.chunk_minutes // 2
 
 
 def test_推奨値_出力が短ければ測定の3倍を勧め_最悪値は計算しない():
@@ -454,7 +457,7 @@ def test_結果の_JSON_とファイル名():
     report, _ = full_report()
     data = json.loads(report.to_json())
     assert data["model"] == "qwen3.5:9b" and len(data["checks"]) == 5
-    assert data["unload"]["ok"] is True and data["whole_meeting"]["chunks"] == 11
+    assert data["unload"]["ok"] is True and data["whole_meeting"]["chunks"] == 8
     cfg = Config()
     path = report_path(cfg, datetime(2026, 11, 5, 23, 30, 15))
     assert path.name == "ollama_20261105_233015.json" and path.parent.name == "doctor"
@@ -481,13 +484,13 @@ def test_build_recommendations_は検査が1つも無くても落ちない():
 
 
 def test_ollama_api_の_url_は末尾のスラッシュを除く():
-    cfg = Config().extract.ollama
+    cfg = Config().llm
     cfg.base_url = "http://127.0.0.1:11434/"
     assert ollama_api.url_of(cfg, ollama_api.PS_PATH) == "http://127.0.0.1:11434/api/ps"
 
 
 @pytest.mark.parametrize("count,expected", [(8191, False), (8192, True), (9000, True), (None, False)])
 def test_入力の切り捨ての判定は_num_ctx_から_num_predict_を引いた値(count, expected):
-    cfg = Config().extract.ollama  # num_ctx 16384 - num_predict 8192 = 8192
+    cfg = Config().llm  # num_ctx 16384 - num_predict 8192 = 8192
     reply = ollama_api.ChatReply("", 0, "stop", count, 1, 1.0, 1.0, None, None, 1.0)
     assert ollama_api.input_was_truncated(cfg, reply) is expected
