@@ -69,7 +69,7 @@ class ReadReport:
 
 
 def count_unprocessed(con: duckdb.DuckDBPyConnection) -> int:
-    """読み取り待ちの投稿の件数。夜間バッチが、返信の振り分け(LLM)のために Strata を起動するかの判断に使う。"""
+    """読み取り待ちの投稿の件数。夜間バッチが、返信の振り分け(LLM)を使う手順を始める前にゲームの実行を確かめるかの判断に使う。"""
     return len(repo.list_discord_posts(con, unprocessed_only=True))
 
 

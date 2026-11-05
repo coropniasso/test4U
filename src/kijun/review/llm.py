@@ -1,19 +1,22 @@
 """抽出以外の LLM の用途(重要度の判定、返信の振り分け、話者の対応付け)が共有する呼び出し(仕様 1-3)。
 
-抽出と同じ Strata のサーバーに、同じ `transport.py` の境界を通して投げる。
-`Extractor` は再利用しない(入出力のスキーマが違うため)。再利用するのは次の3つ。
+抽出と同じ Ollama に、同じ `transport.py` の境界を通して投げる。`Extractor` は再利用しない
+(入出力のスキーマが違うため)。再利用するのは次の3つ。
 - HttpTransport(偽の応答でテストできる)
-- config.extract.strata の設定(接続先、JSON スキーマの強制の有無、時間切れ)
+- config.extract.ollama の設定(接続先、モデル、num_ctx、JSON スキーマの強制の有無、時間切れ)
 - repair.py(出力は必ず修復を通してから検証する。原則2-3)
+
+呼び出し側は `JsonChat`(Protocol)だけを知る。Ollama への依存は `OllamaJsonChat` に閉じる。
 """
 
 from __future__ import annotations
 
 import sys
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from kijun import ollama_api
 from kijun.config import Config
 from kijun.extract.repair import UnrepairableJsonError, parse_model_with_repair
 from kijun.transport import HttpTransport, HttpxTransport, TransportError
@@ -32,69 +35,61 @@ class ReviewLlmError(Exception):
     """
 
 
-class StrataJsonChat:
-    """Strata に system / user のメッセージを投げ、JSON を model_cls として受け取る。"""
+class JsonChat(Protocol):
+    def ask(self, system: str, user: str, model_cls: type[ModelT], schema_name: str) -> ModelT:
+        """system / user のメッセージを投げ、JSON を model_cls として受け取る。失敗したら ReviewLlmError。"""
+        ...
+
+
+class OllamaJsonChat:
+    """Ollama に system / user のメッセージを投げ、JSON を model_cls として受け取る。"""
 
     def __init__(self, cfg: Config, transport: HttpTransport | None = None) -> None:
-        self._strata = cfg.extract.strata
+        self._ollama = cfg.extract.ollama
         self._transport = transport or HttpxTransport()
 
     @property
     def chat_url(self) -> str:
-        return f"{self._strata.base_url}{self._strata.chat_path}"
+        return ollama_api.url_of(self._ollama, ollama_api.CHAT_PATH)
 
     def build_payload(self, system: str, user: str, model_cls: type[BaseModel], schema_name: str) -> dict:
-        payload: dict = {
-            "model": self._strata.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": 0,
-            "stream": False,
-        }
-        if self._strata.enforces_json_schema:
-            # 対応していないサーバーが 400 を返す可能性があるので、保証すると設定されたときだけ付ける。
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": schema_name,
-                    "schema": model_cls.model_json_schema(),
-                    "strict": True,
-                },
-            }
-        return payload
+        # schema_name は Ollama の format には使わない(スキーマそのものを渡す)。エラー表示と警告の識別に使う。
+        return ollama_api.build_chat_payload(self._ollama, system, user, model_cls.model_json_schema())
 
-    def _content(self, payload: dict) -> str:
+    def _reply(self, payload: dict) -> ollama_api.ChatReply:
         try:
-            response = self._transport.post(self.chat_url, payload, self._strata.timeout_sec)
+            response = self._transport.post(self.chat_url, payload, self._ollama.timeout_sec)
         except TransportError as e:
             raise ReviewLlmError(
-                f"Strata に要求を送れませんでした({self.chat_url}): {e}"
+                f"Ollama に要求を送れませんでした({self.chat_url}): {e}\n"
+                + ollama_api.connection_hint(self._ollama)
             ) from e
         if not response.ok:
             head = response.text[:300].replace("\n", " ")
-            raise ReviewLlmError(f"Strata が HTTP {response.status_code} を返しました: {head}")
+            raise ReviewLlmError(f"Ollama が HTTP {response.status_code} を返しました: {head}")
         try:
-            return response.json()["choices"][0]["message"]["content"]
-        except (TransportError, KeyError, IndexError, TypeError) as e:
-            raise ReviewLlmError(
-                "Strata の応答が OpenAI 互換の形(choices[0].message.content)ではありません。"
-                "`uv run kijun doctor` でパスを確認してください。"
-            ) from e
+            return ollama_api.parse_chat_reply(response)
+        except ollama_api.OllamaError as e:
+            raise ReviewLlmError(str(e)) from e
 
     def ask(self, system: str, user: str, model_cls: type[ModelT], schema_name: str) -> ModelT:
-        """問い合わせて model_cls として受け取る。読めなければ1回だけ投げ直し、それでも読めなければ ReviewLlmError。"""
+        """問い合わせて model_cls として受け取る。読めなければ1回だけ投げ直し、それでも読めなければ ReviewLlmError。
+
+        入力が文脈長を超えて切り捨てられた疑いがあれば、投げ直さずに ReviewLlmError にする
+        (投げ直しても同じ入力なので、同じように切り捨てられる)。
+        """
         payload = self.build_payload(system, user, model_cls, schema_name)
         last_error: Exception | None = None
         for attempt in range(1, 2 + RETRY_COUNT):
-            text = self._content(payload)
+            reply = self._reply(payload)
+            if ollama_api.input_was_truncated(self._ollama, reply):
+                raise ReviewLlmError(f"{schema_name}: {ollama_api.truncation_message(self._ollama, reply)}")
             try:
-                result, outcome = parse_model_with_repair(text, model_cls)
+                result, outcome = parse_model_with_repair(reply.content, model_cls)
             except UnrepairableJsonError as e:
                 last_error = e
                 print(
-                    f"警告: Strata の出力を JSON として読めませんでした({attempt} 回目、{schema_name}): {e}",
+                    f"警告: Ollama の出力を JSON として読めませんでした({attempt} 回目、{schema_name}): {e}",
                     file=sys.stderr,
                 )
                 continue
@@ -104,4 +99,4 @@ class StrataJsonChat:
                     file=sys.stderr,
                 )
             return result
-        raise ReviewLlmError(f"Strata の出力が {1 + RETRY_COUNT} 回とも読めませんでした: {last_error}")
+        raise ReviewLlmError(f"Ollama の出力が {1 + RETRY_COUNT} 回とも読めませんでした: {last_error}")

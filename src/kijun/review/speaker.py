@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from kijun.db import repo
 from kijun.discord.base import Reply
-from kijun.review.llm import ReviewLlmError, StrataJsonChat
+from kijun.review.llm import JsonChat, ReviewLlmError
 
 # `00=self`、`SPEAKER_01 = kouhai_a` のような1組
 _PAIR = re.compile(r"(?:SPEAKER_)?(\d{2})\s*=\s*([A-Za-z0-9_]+)", re.IGNORECASE)
@@ -101,8 +101,8 @@ JSON だけを返してください。前置き、説明、コードフェンス
 """
 
 
-class StrataSpeakerInterpreter:
-    def __init__(self, chat: StrataJsonChat) -> None:
+class LlmSpeakerInterpreter:
+    def __init__(self, chat: JsonChat) -> None:
         self._chat = chat
 
     def interpret(self, text: str, labels: list[str]) -> dict[str, str]:

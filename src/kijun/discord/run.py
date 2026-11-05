@@ -4,7 +4,7 @@
 夜間バッチが順に起動し、処理が終われば接続を閉じる。bot は常駐しない。
 
 DiscordClient と LLM の実装は引数で受け取るので、テストでは偽の実装を渡せる。
-実際の実装(discord.py、Strata)は build_* が作る。
+実際の実装(discord.py、Ollama)は build_* が作る。
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ from kijun.deps import MissingDependencyError
 from kijun.discord.base import DiscordClient, DiscordError
 from kijun.discord.post import PostReport, run_post
 from kijun.discord.read import ReadReport, run_read
-from kijun.review.importance import StrataImportanceJudge
-from kijun.review.llm import StrataJsonChat
-from kijun.review.reply import StrataReplyRouter
-from kijun.review.speaker import StrataSpeakerInterpreter
+from kijun.review.importance import LlmImportanceJudge
+from kijun.review.llm import OllamaJsonChat
+from kijun.review.reply import LlmReplyRouter
+from kijun.review.speaker import LlmSpeakerInterpreter
 from kijun.transport import HttpTransport
 
 TOKEN_ENV = "DISCORD_BOT_TOKEN"
@@ -46,25 +46,25 @@ def build_client(cfg: Config) -> DiscordClient:
 
 @dataclass
 class LlmParts:
-    """Strata を使う3つの部品。httpx が入っていないときは、すべて None(LLM を使えない)。"""
+    """Ollama を使う3つの部品。httpx が入っていないときは、すべて None(LLM を使えない)。"""
 
-    router: StrataReplyRouter | None = None
-    interpreter: StrataSpeakerInterpreter | None = None
-    judge: StrataImportanceJudge | None = None
+    router: LlmReplyRouter | None = None
+    interpreter: LlmSpeakerInterpreter | None = None
+    judge: LlmImportanceJudge | None = None
 
 
 def build_llm(cfg: Config, transport: HttpTransport | None = None) -> LlmParts:
-    """Strata の部品を作る。
+    """Ollama の部品を作る。
 
     httpx が無いときは、止めずに LLM 無しで続ける。返信は原文だけ記録して未処理に残り、
     重要度は NULL のまま投稿される(判定できないものを推測で埋めない)。
     """
     try:
-        chat = StrataJsonChat(cfg, transport)
+        chat = OllamaJsonChat(cfg, transport)
     except MissingDependencyError as e:
         print(f"警告: LLM を使えません。LLM 無しで続けます: {e}", file=sys.stderr)
         return LlmParts()
-    return LlmParts(StrataReplyRouter(chat), StrataSpeakerInterpreter(chat), StrataImportanceJudge(chat))
+    return LlmParts(LlmReplyRouter(chat), LlmSpeakerInterpreter(chat), LlmImportanceJudge(chat))
 
 
 def print_read_report(report: ReadReport, echo: Callable[[str], None]) -> None:

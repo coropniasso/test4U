@@ -1,6 +1,6 @@
-"""重要度の判定・返信の振り分け・話者の解釈の Strata 実装(仕様 1-3、2-5、2-6、原則2-3)。
+"""重要度の判定・返信の振り分け・話者の解釈の Ollama 実装(仕様 1-3、2-5、2-6、原則2-3)。
 
-実際の Strata には接続せず、偽の HttpTransport に壊れた JSON を返させて、修復を通ることを確認する。
+実際の Ollama には接続せず、偽の HttpTransport に壊れた JSON を返させて、修復を通ることを確認する。
 """
 
 from __future__ import annotations
@@ -11,21 +11,21 @@ import pytest
 
 from kijun.db import repo
 from kijun.review.importance import (
-    ImportanceVerdict, StrataImportanceJudge, build_user_message, propose_importance,
+    ImportanceVerdict, LlmImportanceJudge, build_user_message, propose_importance,
 )
-from kijun.review.llm import ReviewLlmError, StrataJsonChat
-from kijun.review.reply import RoutedEntry, StrataReplyRouter, build_user_message as reply_message, process_reply
-from kijun.review.speaker import StrataSpeakerInterpreter
+from kijun.review.llm import OllamaJsonChat, ReviewLlmError
+from kijun.review.reply import LlmReplyRouter, RoutedEntry, build_user_message as reply_message, process_reply
+from kijun.review.speaker import LlmSpeakerInterpreter
 from kijun.transport import TransportError
-from tests.fakes import FakeChatTransport
+from tests.fakes import FakeOllamaTransport, ollama_body
 from tests.review_helpers import CID, NOW, add_item, candidate, reply, setup_conversation
 
 GOOD = json.dumps({"importance": 3, "rationale": "読み手が行動を取れなくなるため"}, ensure_ascii=False)
 
 
 def judge(cfg, contents):
-    transport = FakeChatTransport(contents)
-    return StrataImportanceJudge(StrataJsonChat(cfg, transport)), transport
+    transport = FakeOllamaTransport(contents)
+    return LlmImportanceJudge(OllamaJsonChat(cfg, transport)), transport
 
 
 def test_重要度の判定はそのまま読める出力を受け取る(cfg):
@@ -33,9 +33,15 @@ def test_重要度の判定はそのまま読める出力を受け取る(cfg):
     verdict = j.judge("冒頭に行動を書くか", ["最初に書いて"])
     assert verdict == ImportanceVerdict(importance=3, rationale="読み手が行動を取れなくなるため")
     sent = transport.posts[0]
-    assert sent["url"] == "http://localhost:8080/v1/chat/completions"
-    assert "最初に書いて" in sent["payload"]["messages"][1]["content"]
-    assert "response_format" not in sent["payload"]  # enforces_json_schema = false が既定
+    # num_ctx と keep_alive をリクエストごとに送れる /api/chat を使う(OpenAI 互換の /v1 は使わない)
+    assert sent["url"] == "http://127.0.0.1:11434/api/chat"
+    payload = sent["payload"]
+    assert payload["model"] == cfg.extract.ollama.model
+    assert payload["stream"] is False and payload["keep_alive"] == "0"
+    assert payload["options"] == {"temperature": 0, "num_ctx": 16384, "num_predict": 8192}
+    assert "最初に書いて" in payload["messages"][1]["content"]
+    assert "think" not in payload  # think = None が既定なので送らない
+    assert "response_format" not in payload
 
 
 def test_コードフェンスと前置きの付いた出力も修復して読める(cfg):
@@ -43,11 +49,40 @@ def test_コードフェンスと前置きの付いた出力も修復して読�
     assert j.judge("x", []).importance == 3
 
 
-def test_スキーマを強制すると設定したときだけ_response_format_を送る(cfg):
-    cfg.extract.strata.enforces_json_schema = True
+def test_format_にスキーマを渡す_既定は渡す(cfg):
     j, transport = judge(cfg, [GOOD])
     j.judge("x", [])
-    assert transport.posts[0]["payload"]["response_format"]["json_schema"]["name"] == "importance"
+    assert transport.posts[0]["payload"]["format"] == ImportanceVerdict.model_json_schema()
+
+
+def test_enforces_json_schema_が偽なら_format_を送らない(cfg):
+    cfg.extract.ollama.enforces_json_schema = False
+    j, transport = judge(cfg, [GOOD])
+    j.judge("x", [])
+    assert "format" not in transport.posts[0]["payload"]
+
+
+def test_think_は設定したときだけ送る(cfg):
+    for value in (True, False):
+        cfg.extract.ollama.think = value
+        j, transport = judge(cfg, [GOOD])
+        j.judge("x", [])
+        assert transport.posts[0]["payload"]["think"] is value
+
+
+def test_入力が上限に達したら_投げ直さずに_ReviewLlmError(cfg):
+    # Ollama は入力が num_ctx を超えると、エラーを出さずに先頭を捨てる。num_ctx - num_predict に達したら疑う。
+    limit = cfg.extract.ollama.num_ctx - cfg.extract.ollama.num_predict
+    j, transport = judge(cfg, [(200, ollama_body(GOOD, prompt_eval_count=limit))])
+    with pytest.raises(ReviewLlmError, match="切り捨て|捨てる"):
+        j.judge("x", [])
+    assert len(transport.posts) == 1
+
+
+def test_入力が上限に達していなければ読める(cfg):
+    limit = cfg.extract.ollama.num_ctx - cfg.extract.ollama.num_predict
+    j, _ = judge(cfg, [(200, ollama_body(GOOD, prompt_eval_count=limit - 1))])
+    assert j.judge("x", []).importance == 3
 
 
 def test_読めない出力は1回だけ投げ直し_それでも読めなければ_ReviewLlmError(cfg):
@@ -70,14 +105,15 @@ def test_範囲外の重要度は読めない出力として扱う(cfg):
 
 def test_接続できなければ_ReviewLlmError(cfg):
     j, _ = judge(cfg, [TransportError("接続拒否")])
-    with pytest.raises(ReviewLlmError, match="送れませんでした"):
+    with pytest.raises(ReviewLlmError, match="送れませんでした") as e:
         j.judge("x", [])
+    assert "ollama list" in str(e.value)
 
 
 def test_HTTP_エラーと形の違う応答も_ReviewLlmError(cfg):
     with pytest.raises(ReviewLlmError, match="HTTP 500"):
         judge(cfg, [(500, "boom")])[0].judge("x", [])
-    with pytest.raises(ReviewLlmError, match="OpenAI 互換"):
+    with pytest.raises(ReviewLlmError, match="/api/chat の形"):
         judge(cfg, [(200, '{"result": 1}')])[0].judge("x", [])
 
 
@@ -114,8 +150,8 @@ def test_プロンプトは推測で補わないことを指示している():
 
 
 def router(cfg, contents):
-    transport = FakeChatTransport(contents)
-    return StrataReplyRouter(StrataJsonChat(cfg, transport)), transport
+    transport = FakeOllamaTransport(contents)
+    return LlmReplyRouter(OllamaJsonChat(cfg, transport)), transport
 
 
 def test_返信の振り分けは_items_を持つオブジェクトも素の配列も受け取れる(cfg):
@@ -144,7 +180,7 @@ def test_矛盾の投稿では_A_と_B_の両方の項目をプロンプトに�
     assert "項目A" in text and "文言A" in text and "項目B" in text and "文言B" in text
 
 
-def test_Strata_の振り分けを通した返信が_review_log_に原文付きで残る(con, cfg):
+def test_Ollama_の振り分けを通した返信が_review_log_に原文付きで残る(con, cfg):
     candidate(con, 1)
     body = json.dumps({"items": [{"column": "applies_when", "text": "社外向け", "target": None}]}, ensure_ascii=False)
     r, _ = router(cfg, [f"結果です\n{body}"])
@@ -157,8 +193,8 @@ def test_Strata_の振り分けを通した返信が_review_log_に原文付き�
 
 
 def test_話者の解釈は番号を正規化し_人物ラベルを小文字にする(cfg):
-    transport = FakeChatTransport([json.dumps({"items": [{"speaker": "00", "person": "self"}, {"speaker": "SPEAKER_01", "person": "Kouhai_A"}]})])
-    interp = StrataSpeakerInterpreter(StrataJsonChat(cfg, transport))
+    transport = FakeOllamaTransport([json.dumps({"items": [{"speaker": "00", "person": "self"}, {"speaker": "SPEAKER_01", "person": "Kouhai_A"}]})])
+    interp = LlmSpeakerInterpreter(OllamaJsonChat(cfg, transport))
     assert interp.interpret("00は自分、01は後輩A", ["SPEAKER_00", "SPEAKER_01"]) == {
         "SPEAKER_00": "self", "SPEAKER_01": "kouhai_a",
     }

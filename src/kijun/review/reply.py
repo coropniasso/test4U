@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from kijun.db import repo
 from kijun.db.repo import KnowledgeItemRow
 from kijun.discord.base import Reply
-from kijun.review.llm import ReviewLlmError, StrataJsonChat
+from kijun.review.llm import JsonChat, ReviewLlmError
 
 COLUMN_REASON = "reason"
 COLUMN_APPLIES_WHEN = "applies_when"
@@ -113,8 +113,8 @@ def build_user_message(
     return f"{items}\n\nユーザーの返信:\n{reply_text}"
 
 
-class StrataReplyRouter:
-    def __init__(self, chat: StrataJsonChat) -> None:
+class LlmReplyRouter:
+    def __init__(self, chat: JsonChat) -> None:
         self._chat = chat
 
     def route(

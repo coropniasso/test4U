@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from kijun.db import repo
 from kijun.db.repo import KnowledgeItemRow
-from kijun.review.llm import ReviewLlmError, StrataJsonChat
+from kijun.review.llm import JsonChat, ReviewLlmError
 
 # 根拠として LLM に見せる発言の最大件数(仕様 2-5)
 MAX_EVIDENCE_QUOTES = 3
@@ -70,8 +70,8 @@ def build_user_message(check_text: str, quotes: list[str]) -> str:
     return "\n".join(lines)
 
 
-class StrataImportanceJudge:
-    def __init__(self, chat: StrataJsonChat) -> None:
+class LlmImportanceJudge:
+    def __init__(self, chat: JsonChat) -> None:
         self._chat = chat
 
     def judge(self, check_text: str, quotes: list[str]) -> ImportanceVerdict:

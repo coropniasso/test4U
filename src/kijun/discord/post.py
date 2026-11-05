@@ -45,7 +45,7 @@ def pending_candidates(con: duckdb.DuckDBPyConnection) -> list[KnowledgeItemRow]
 
 
 def count_candidates_needing_importance(con: duckdb.DuckDBPyConnection) -> int:
-    """投稿前に重要度の判定(LLM)が要る項目の件数。夜間バッチが Strata を起動するかの判断に使う。"""
+    """投稿前に重要度の判定(LLM)が要る項目の件数。夜間バッチが、LLM を使う手順を始める前にゲームの実行を確かめるかの判断に使う。"""
     return sum(1 for i in pending_candidates(con) if i.importance is None)
 
 
