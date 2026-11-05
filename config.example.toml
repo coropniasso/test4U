@@ -1,0 +1,170 @@
+[paths]
+# Windows の実機では "C:/Users/<ユーザー名>/iCloudDrive/Recordings/inbox" を書く。
+# 区切りは / で書く（Python では / でも動き、TOML のエスケープを避けられる）。
+inbox      = "./data/inbox"
+processed  = "./data/processed"
+transcripts = "./data/transcripts"
+db         = "./data/kijun.duckdb"
+# 議事録（Markdown。<会議ID>.md）を置く場所。
+minutes = "./data/minutes"
+
+[settings]
+# ファイル名の <形式>。この2つ以外は解析を失敗させる。
+formats = ["f2f", "call"]
+# ファイル名の <種類>。運用しながら追加する。ここに無い種類は、警告を出したうえでそのまま記録する
+# （拒否しない理由は、CLAUDE.md 4-2 に「運用しながら追加」と書いてあるため）。
+kinds = ["teirei", "sagyou", "zatsudan"]
+
+[bundle]
+# CLAUDE.md 4-7。前のファイルの終了時刻から次のファイルの開始時刻までが
+# この分数以内で、かつ同じ日であれば、同じ conversation_id にする。
+gap_minutes = 30
+# 形式または種類が違うファイルは束ねない。false にすると形式・種類を無視して束ねる。
+require_same_setting = true
+
+[transcribe]
+backend = "faster_whisper"
+model = "large-v3"
+# faster-whisper の compute_type。RTX 4070 Ti では float16 を使う。
+# VRAM が足りない場合は int8_float16 にする。
+compute_type = "float16"
+device = "cuda"
+language = "ja"
+# faster-whisper の VAD（Silero による無音区間の除去）。**既定は false**（2026-11-05 に true から変更）。
+# true にすると、iPhone で録音した Discord の通話（36分）で発話の約 2/3 を非音声として捨てた
+# （同じ音声・同じモデルで 2,967 文字 = 82 文字/分。false では 9,348 文字 = 260 文字/分）。
+# 1本の通話での観測であり、対面の録音で false が良いかは再測定していない。
+vad_filter = false
+# 直前の区間の本文を次の区間の文脈に使うか。VAD を切ると無音部分で幻聴（「ご視聴ありがとうございました」など）が
+# 出やすく、true だとそれが次の区間へ連鎖するので false にする。
+condition_on_previous_text = false
+# 単語の時刻から、この秒数以上の無音を挟む区間を幻聴とみなして飛ばす（faster-whisper の
+# hallucination_silence_threshold）。0 なら使わない。0 より大きいと word_timestamps が自動で有効になり、
+# 所要時間が約 1.2 倍になる（36分の音声で 119 秒 → 148 秒）。2.0 は 1 本の通話に基づく設計者の初期値。
+hallucination_silence_threshold = 2.0
+# 幻聴の除去規則。区間の「話者区間との重なりの割合」が drop_max_speaker_overlap 未満、かつ
+# avg_logprob が drop_max_avg_logprob 未満なら除く。除いた区間は文字起こしの JSON の
+# dropped_segments に残り、transcribe の実行時にも表示される。
+# drop_max_speaker_overlap = 0 なら除去しない。0.3 / -0.5 は 1 本の通話に基づく設計者の初期値。
+drop_max_speaker_overlap = 0.3
+drop_max_avg_logprob = -0.5
+# faster-whisper に渡す Silero VAD のパラメータ。vad_filter = true のときだけ使う（既定の false では使われない）。
+# **既定のままでは区間が切れないことが実機で分かった**（2026-11-04。34.2分の通話で 564.8 秒の
+# 区間が1つ出て、中身は3文字だった）。faster-whisper は max_speech_duration_s を既定で無制限に
+# し、min_silence_duration_ms（既定2000）より短い無音では区間を切らない。PC のスピーカー出力を
+# iPhone で録る方法では室内の音が常に入るので、2秒続く無音が現れず、区間が延々とつながる。
+#
+# vad_max_speech_duration_sec: Silero が1つの発話区間として許す長さの上限（秒）。0 は上限なし。
+#   既定 30.0 は max_utterance_sec に合わせた値で、実測に基づくものではない。Silero は上限に
+#   達する前の最後の無音で切るので、文の途中で切るとは限らない。
+#   **区間の長さを抑えるのはこの設定であり、max_utterance_sec ではない。**
+vad_max_speech_duration_sec = 30.0
+# 音声だと判定する確率の下限。上げると、小さい音や雑音を音声と見なさなくなる。
+vad_threshold = 0.5
+# 区間を切る無音の長さ（ミリ秒）。faster-whisper の既定は 2000。
+vad_min_silence_duration_ms = 2000
+# 区間の前後に付ける余白（ミリ秒）。faster-whisper の既定は 400。
+vad_speech_pad_ms = 400
+# 同一話者の連続する区間で、前の区間の終了から次の区間の開始までの間隔がこの秒数未満なら、1つの発話に結合する。
+# 話者が不明（None）の区間どうしは、同じ話者と判断できないので結合しない。
+# 既定の 2.0 は設計者が 2 本の録音で測った値で、ユーザーが 2026-11-05 に承認した。word_timestamps が有効だと
+# 1人の話の中の間が 0.4〜2.6 秒の間隔として現れ、0.4 では細かく割れる（2分の独話が 23 発話。2.0 では 7 発話。
+# 36分の通話は 255 → 136 発話）。
+min_utterance_sec = 2.0
+# 結合した発話の長さ（終了時刻 - 開始時刻）がこの秒数を超えないようにする。超えそうなら結合せず、次の発話として始める。
+# 目的は2つ。(1) 抽出結果の seq_from / seq_to が録音のどの位置を指すかの精度を保つ。
+# (2) 1つの発話が extract.chunk_minutes を超えて、抽出が失敗するのを防ぐ。
+# 1つの文字起こし区間そのものがこの秒数より長い場合は、区間の内部の時刻が分からないので分割せず、そのまま1つの発話にする。
+# 0 は「上限なし」（従来の挙動）。
+max_utterance_sec = 30.0
+# faster-whisper の hotwords に渡す語の一覧。誤認識された頻出語を正しく取らせるための手段。
+# 空なら渡さない。次の2語は、CLAUDE.md 7章に「箇条書き」→「過剰書き」、「感嘆符」→「簡単フォーイス」
+# と誤認識された語として記録されているので、書くならこの2語から始める。
+#     hotwords = ["箇条書き", "感嘆符"]
+# **既定は空にしてある。** 効果は未検証で、その語を実際には言っていない箇所に当てはめる副作用がある。
+# 同じ音声を hotwords あり・なしで文字起こしし直して確かめてから書く（手順は docs/implementation-plan.md）。
+hotwords = []
+
+[diarize]
+backend = "pyannote"
+model = "pyannote/speaker-diarization-3.1"
+device = "cuda"
+# 話者数が分かっている場合はその人数を書く。0 なら pyannote が推定する（TOML には null が無いため、0 を「指定なし」として扱う）。
+num_speakers = 0
+
+[llm]
+# 議事録の生成が使う Ollama(2026-11-05 に抽出の背面を Ollama にした設定を、2026-11-06 に [extract.ollama] から移した)。
+# localhost ではなく数字で書く。Windows では localhost が IPv6 の ::1 に解決されることがあり、
+# サーバーが IPv4 だけで待ち受けていると接続拒否になる(チェックリスト時代の CLAUDE.md 4-4 で踏んだ問題)。
+base_url = "http://127.0.0.1:11434"
+# 2026-11-05 にユーザーが決定(qwen3:14b と比べた測定は docs/history/checklist-era-CLAUDE.md 7章・10章)。
+# 存在するかは `ollama list` で確認する。議事録の生成に適するかは未測定(CLAUDE.md 7章)。
+model = "qwen3.5:9b"
+# 文脈長(入力 + 出力)。リクエストごとに options.num_ctx で送る。
+# 送らないと Ollama の既定になり、入力が黙って先頭から切り捨てられる。
+# 大きくすると KV キャッシュが増えて VRAM を使う。GPU に収まらなくなったかは doctor の検査3で見る。
+num_ctx = 16384
+# 出力の上限(推論を含む)。options.num_predict で送る。1024 未満は拒否される。
+# think を有効にしたモデルは答えの前に推論を書き、それも数える。小さすぎると推論の途中で切れて
+# JSON が1文字も出ない。1チャンクの所要時間の最悪値は num_predict ÷ 観測された最も遅い生成速度。
+num_predict = 8192
+# Qwen の推論モード。TOML には null が無いので、「書かない」ことで未指定(think を送らず、
+# モデルの既定に任せる)を表す。true / false を書くと、その値を送る。
+# **qwen3.5:9b では下の行のコメントを外して think = false を書く。** 2026-11-05 にユーザーが
+# qwen3.5:9b・think = false に決めた。qwen3.5:9b は think を書かないと推論し、
+# num_predict 8192 を推論で使い切って JSON が出なかった。コードの既定を false にしないのは、think に
+# 対応しないモデル(HTTP 400 になる)で、「書かない」ことで think を送らない選択を残すため。
+# think = false
+# 応答のたびにモデルを VRAM に置いておく時間。"0" なら応答のたびに下ろす。
+# "0" にする理由は、faster-whisper・pyannote と LLM を同時に VRAM に載せないため
+# (docs/history/implementation-plan.md 原則2-2)。"5m" のような値にすると、文字起こしの手順の時点で
+# LLM が VRAM に残り得る。代わりに応答のたびにモデルの読み込みが入る。
+keep_alive = "0"
+# 1リクエストの打ち切り時間(秒)。モデルの読み込みを含む。
+# kijun doctor の推奨値で置き換える。
+timeout_sec = 1800
+# format にスキーマを渡すか。渡すと Ollama が出力をスキーマに適合させる。
+# 出力は必ず修復(llm/repair.py)を通してから検証するので、true でも修復は働く。
+# kijun doctor の検査2が「読めない」と出たら false にする。
+enforces_json_schema = true
+
+[minutes]
+# 議事録の生成(CLAUDE.md「議事録の生成」)。発話を chunk_minutes 分ごと(重なり 0)に分けて Ollama に投げる。
+# 推奨・未確定(2026-11-06 設計者の初期値。実測に基づかない)。
+# 目安: 15 分 × tokens_per_meeting_minute 180 ≒ 2,700 トークン + システムプロンプト + num_predict 8192
+# が num_ctx 16384 に収まる。収まらない設定は読み込みで拒否される(入力が黙って切り捨てられるのを防ぐため)。
+# kijun doctor の検査4で、この長さの入力の所要時間を測る。
+chunk_minutes = 15
+# 入力トークン数の概算の係数。既定値は Strata(Qwen3.8-Flash-Next)での実測1点からの推測で、
+# Ollama で使うモデルのトークナイザには当てはまらない。kijun doctor の検査4・5が実測値を出すので置き換える。
+# tokens_per_character: Strata での実測 1,646 ÷ 約3,141文字 ≒ 0.52 に少し余裕を持たせた値。
+# tokens_per_meeting_minute: 1分の会議の文字起こしの入力トークン数の概算。
+tokens_per_character = 0.55
+tokens_per_meeting_minute = 180
+
+[retention]
+# 文字起こしが完了してからこの日数が経った音声を削除する（CLAUDE.md 2章）。
+audio_days = 30
+
+[discord]
+# 議事録を投稿するチャンネルのID(数字の文字列)。空文字なら `kijun discord post` は何も投稿せず、
+# 設定が必要であることを出して正常終了する。
+# チャンネルは、プロジェクトのサーバーではなくユーザー個人のサーバーに作る(CLAUDE.md 2章)。
+# bot のトークンは設定ファイルに書かず、環境変数 DISCORD_BOT_TOKEN で渡す。
+minutes_channel_id = ""
+
+[batch]
+# 各手順の記録（<日時>.json）を置く場所。
+log_dir = "./data/batch_logs"
+# 夜間バッチの開始時刻（HH:MM）。kijun batch install-task が --time を省略されたときに使う。
+task_time = "23:30"
+# この中のどれかのプロセスが動いている間は、GPU を使う手順を始めない（ゲームとの競合を避けるため）。
+# 名前はタスクマネージャーの「詳細」タブに出る実行ファイル名（大文字小文字は区別しない）。
+# 推奨・未確定：ゲームを起動した状態で「詳細」タブを見て、自分の環境の実行ファイル名を書く。
+# 空なら検出を行わない。例（実際の名前は環境で確認すること）: ["LeagueClient.exe"]
+defer_if_running = []
+# 延期中に再確認する間隔（分）。
+defer_check_interval_min = 30
+# 延期する時間の上限（時間。バッチ全体の合計）。超えたら、その夜のバッチは GPU を使う手順を
+# 飛ばして終わる。飛ばした会議は翌晩に未処理として拾われる。0 なら待たずに飛ばす。
+defer_max_hours = 4
