@@ -178,7 +178,7 @@ def doctor_payload(cfg: Config, chunk: Chunk, with_schema: bool) -> dict:
     """
     payload = copy.deepcopy(build_payload(cfg, chunk))
     if with_schema:
-        payload["format"] = ExtractionResult.model_json_schema()
+        payload["format"] = ollama_api.require_all_properties(ExtractionResult.model_json_schema())
     else:
         payload.pop("format", None)
     payload["keep_alive"] = DOCTOR_KEEP_ALIVE

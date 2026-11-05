@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from kijun.ollama_api import require_all_properties
 from kijun.db import repo
 from kijun.review.importance import (
     ImportanceVerdict, LlmImportanceJudge, build_user_message, propose_importance,
@@ -52,7 +53,7 @@ def test_コードフェンスと前置きの付いた出力も修復して読�
 def test_format_にスキーマを渡す_既定は渡す(cfg):
     j, transport = judge(cfg, [GOOD])
     j.judge("x", [])
-    assert transport.posts[0]["payload"]["format"] == ImportanceVerdict.model_json_schema()
+    assert transport.posts[0]["payload"]["format"] == require_all_properties(ImportanceVerdict.model_json_schema())
 
 
 def test_enforces_json_schema_が偽なら_format_を送らない(cfg):

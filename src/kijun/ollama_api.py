@@ -33,6 +33,36 @@ def url_of(cfg: OllamaConfig, path: str) -> str:
     return f"{cfg.base_url.rstrip('/')}{path}"
 
 
+def require_all_properties(schema: dict) -> dict:
+    """スキーマの中のすべてのオブジェクトで、properties の全項目を required にした写しを返す。
+
+    pydantic は既定値のある項目（例: ExtractedRequest.transcription_unclear）を required に入れない。
+    Ollama はスキーマに従って出力を制約するので、required でない項目は出さなくてよいことになる。
+    2026-11-06 の実測で、qwen3.5:9b は transcription_unclear を一度も出さなかった（f2f 5件・call 14件の
+    すべてで欠けていた）。欠けると既定値の false で読まれ、文字起こしが壊れた発話の投稿（CLAUDE.md 7章の案A）が
+    一度も出ない。必須にすると、f2f の「過剰書き」の発話に true を付けた。
+
+    受け取る側（pydantic の検証）は変えない。既定値はそのまま残るので、項目の無い古い JSON も読める。
+    """
+    import copy
+
+    out = copy.deepcopy(schema)
+
+    def walk(node):
+        if isinstance(node, dict):
+            props = node.get("properties")
+            if isinstance(props, dict):
+                node["required"] = list(props)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(out)
+    return out
+
+
 def build_chat_payload(
     cfg: OllamaConfig,
     system: str,
@@ -43,6 +73,7 @@ def build_chat_payload(
     """1回分の /api/chat のリクエストの本文を作る。
 
     - schema を渡し、かつ cfg.enforces_json_schema が真のときだけ format にスキーマを付ける。
+      付けるときは全項目を required にする（require_all_properties。既定値のある項目をモデルが省くため）。
     - cfg.think が None なら think を送らない（モデルの既定に任せる）。
     - keep_alive を渡すと、設定の値の代わりにそれを送る（doctor が検査の間だけ "2m" にするため）。
     """
@@ -57,7 +88,7 @@ def build_chat_payload(
         "options": {"temperature": 0, "num_ctx": cfg.num_ctx, "num_predict": cfg.num_predict},
     }
     if schema is not None and cfg.enforces_json_schema:
-        payload["format"] = schema
+        payload["format"] = require_all_properties(schema)
     if cfg.think is not None:
         payload["think"] = cfg.think
     return payload

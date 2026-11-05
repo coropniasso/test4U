@@ -23,6 +23,7 @@ from kijun.extract.prompt import build_messages
 from kijun.extract.repair import ACTION_REMOVED_PROSE_BEFORE, ACTION_WRAPPED_ARRAY_IN_ITEMS
 from kijun.extract.ollama_impl import OllamaExtractor, build_payload
 from kijun.transport import TransportError
+from kijun.ollama_api import require_all_properties
 from tests.conftest import make_utterances
 from tests.fakes import FakeOllamaTransport, ollama_body
 
@@ -202,7 +203,9 @@ def test_Ollama_のリクエストの形():
     assert payload["stream"] is False
     assert payload["keep_alive"] == "0"
     assert payload["options"] == {"temperature": 0, "num_ctx": 16384, "num_predict": 8192}
-    assert payload["format"] == ExtractionResult.model_json_schema()
+    # 既定値のある項目もモデルに必ず出させるため、全項目を required にしたスキーマを送る
+    assert payload["format"] == require_all_properties(ExtractionResult.model_json_schema())
+    assert "transcription_unclear" in payload["format"]["$defs"]["ExtractedRequest"]["required"]
     assert "think" not in payload  # None は送らない(モデルの既定に任せる)
     assert set(payload) == {"model", "messages", "stream", "keep_alive", "options", "format"}
     system, user = build_messages(a_chunk(), cfg)
@@ -568,3 +571,15 @@ def test_VadOptions_の項目名を取り出す():
     assert vad_option_names(types.SimpleNamespace()) is None
     # データクラスでない場合も None
     assert vad_option_names(types.SimpleNamespace(VadOptions=object)) is None
+
+
+def test_require_all_properties_は既定値のある項目も必須にし_元のスキーマを変えない():
+    """2026-11-06 の実測: transcription_unclear が required でないと、qwen3.5:9b はこの項目を出さなかった。"""
+    original = ExtractionResult.model_json_schema()
+    assert "transcription_unclear" not in original["$defs"]["ExtractedRequest"]["required"]
+    strict = require_all_properties(original)
+    item = strict["$defs"]["ExtractedRequest"]
+    assert set(item["required"]) == set(item["properties"])
+    assert strict["required"] == ["items"]
+    # 写しを返す(pydantic が返した辞書を書き換えない)
+    assert "transcription_unclear" not in original["$defs"]["ExtractedRequest"]["required"]

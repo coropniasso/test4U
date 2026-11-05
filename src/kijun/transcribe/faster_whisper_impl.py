@@ -112,7 +112,8 @@ class FasterWhisperTranscriber:
             # vad_filter が false のときは渡さない（使われないうえ、版によっては検証される）。
             if self._cfg.vad_filter and self._vad_parameters:
                 kwargs["vad_parameters"] = self._vad_parameters
-            segments, _info = self._model.transcribe(audio, **kwargs)            # segments は generator。モデルを解放した後に評価されて落ちないよう、ここで list にする。
+            segments, _info = self._model.transcribe(audio, **kwargs)
+            # segments は generator。モデルを解放した後に評価されて落ちないよう、ここで list にする。
             one_file = [
                 TranscribedSegment(
                     start_sec=s.start,
