@@ -97,11 +97,22 @@ def read_failed_chunk_count(path: Path) -> int | None:
     return len(json.loads(path.read_text(encoding="utf-8")).get("failed_chunks", []))
 
 
+def request_id_model(model_name: str) -> str:
+    """request_id に入れるモデル名。使える文字（英数字と . _ + -）以外を - に置き換える。
+
+    Ollama のモデル名には ':' が入る（qwen3.5:9b）し、取得元つきの名前には '/' も入る。
+    設定 run_label が英数字と . _ - に限られているのは「request_id にも入るから」なので、
+    request_id の文字の規則をモデル名にも揃える。extracted_requests.model_name の列には、
+    置き換えない元の名前（':' を含む）を入れる。'+' は model_name と run_label をつなぐ記号で、残す。
+    """
+    return re.sub(r"[^A-Za-z0-9._+-]", "-", model_name)
+
+
 def _to_row(
     item: ExtractedRequest, conversation_id: str, model_name: str, number: int, at: datetime
 ) -> repo.RequestRow:
     return repo.RequestRow(
-        request_id=f"{conversation_id}#{model_name}#{number}",
+        request_id=f"{conversation_id}#{request_id_model(model_name)}#{number}",
         conversation_id=conversation_id,
         seq_from=item.seq_from,
         seq_to=item.seq_to,
@@ -129,9 +140,9 @@ def check_chunk_input_size(
 ) -> str | None:
     """チャンクの推定入力トークン数が上限を超えていれば、警告の文を返す。
 
-    max_input_tokens が None（設定の 0 = 未確認）のときは検査しない。推測で止めないため。
+    max_input_tokens が None のときは検査しない。推測で止めないため。
     超えていても処理は止めない。概算が外れている可能性があるので、実際に投げて
-    サーバーの返事を見る方が確かだからである。
+    Ollama が返す prompt_eval_count を見る方が確かだからである（ollama_impl が検査する）。
     """
     if max_input_tokens is None:
         return None
@@ -141,17 +152,17 @@ def check_chunk_input_size(
         return None
     return (
         f"チャンク {chunk.index + 1}（発話 {chunk.seq_from}〜{chunk.seq_to}）の推定入力は "
-        f"約 {estimated} トークンで、設定の extract.strata.max_input_tokens "
-        f"（{max_input_tokens}）を超えています。"
-        f"extract.chunk_minutes（現在 {cfg.extract.chunk_minutes}）を下げるか、"
-        "`uv run kijun doctor` で上限を実測し直してください。"
+        f"約 {estimated} トークンで、入力に使える上限（extract.ollama.num_ctx - num_predict = "
+        f"{max_input_tokens}）を超える見込みです。"
+        f"extract.chunk_minutes（現在 {cfg.extract.chunk_minutes}）を下げるか、num_ctx を上げてください。"
+        "概算の係数は `uv run kijun doctor` で実測し直せます。"
     )
 
 
 def _usage_text(usage: dict | None) -> str:
     """完了の表示に入れる入力・出力のトークン数。取れなければその旨を返す。"""
     if not usage or usage.get("prompt_tokens") is None or usage.get("completion_tokens") is None:
-        return "トークン数は取れず（サーバーが usage を返さない）"
+        return "トークン数は取れず（Ollama が prompt_eval_count / eval_count を返さない）"
     return f"入力 {usage['prompt_tokens']} トークン、出力 {usage['completion_tokens']} トークン"
 
 

@@ -223,7 +223,7 @@ def add_unclear(con, request_id: str, quote: str, model: str, **kw):
 
 def test_文字起こしが読めなかった抽出結果を_review_に投稿する(con, cfg):
     configure(cfg)
-    cfg.extract.strata.model = "m"
+    cfg.extract.ollama.model = "m"
     setup_conversation(con)
     add_unclear(con, "r1", "3つ目簡単フォーイスなんか減らしてください", "m",
                 summary="「簡単フォーイス」を減らすことを求めた")
@@ -242,7 +242,7 @@ def test_文字起こしが読めなかった抽出結果を_review_に投稿す
 def test_投稿は_request_id_で記録され_次回は投稿しない(con, cfg):
     # discord_posts に item_id では記録できない（knowledge_items にならないため）。
     configure(cfg)
-    cfg.extract.strata.model = "m"
+    cfg.extract.ollama.model = "m"
     setup_conversation(con)
     add_unclear(con, "r1", "過剰書きにして", "m")
     client = FakeDiscordClient()
@@ -258,7 +258,7 @@ def test_投稿は_request_id_で記録され_次回は投稿しない(con, cfg)
 
 def test_上限の件数までしか投稿しない(con, cfg):
     configure(cfg)
-    cfg.extract.strata.model = "m"
+    cfg.extract.ollama.model = "m"
     cfg.discord.max_transcription_unclear_per_run = 2
     setup_conversation(con)
     for i in range(5):
@@ -273,7 +273,7 @@ def test_上限の件数までしか投稿しない(con, cfg):
 def test_別のモデルで抽出した分は投稿しない(con, cfg):
     # 設定を変えて2回抽出した場合、いまの設定が指すモデルの分だけを投稿する。
     configure(cfg)
-    cfg.extract.strata.model = "m"
+    cfg.extract.ollama.model = "m"
     setup_conversation(con)
     add_unclear(con, "r1", "いまの設定のモデル", "m")
     add_unclear(con, "r2", "別の設定のモデル", "other")
@@ -287,7 +287,7 @@ def test_別のモデルで抽出した分は投稿しない(con, cfg):
 
 def test_文字起こしが読めた抽出結果は投稿しない(con, cfg):
     configure(cfg)
-    cfg.extract.strata.model = "m"
+    cfg.extract.ollama.model = "m"
     setup_conversation(con)
     add_request(con, "r1", quote="結論を先に書いて", model="m")  # transcription_unclear は False
     client = FakeDiscordClient()

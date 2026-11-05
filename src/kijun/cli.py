@@ -1,6 +1,6 @@
 """kijun のサブコマンド（計画書 第12節）。
 
-GPU・ネットワークに触る実装（faster-whisper、pyannote、Strata、sentence-transformers）は、
+GPU・ネットワークに触る実装（faster-whisper、pyannote、Ollama、sentence-transformers）は、
 サブコマンドの実行時に初めて import する。`kijun --help` は、これらが入っていなくても動く。
 """
 
@@ -17,6 +17,7 @@ from typing import Annotated
 
 import typer
 
+from kijun import ollama_api
 from kijun.config import Config, ConfigError, load_config
 from kijun.db import migrate, repo
 from kijun.deps import MissingDependencyError
@@ -42,9 +43,9 @@ app.add_typer(batch_app, name="batch")
 
 
 class Provider(str, Enum):
-    """抽出の背面。2026-11-03 の決定で Strata のみ。将来背面を足すときの受け皿として残す。"""
+    """抽出の背面。2026-11-05 の決定で Ollama のみ。将来背面を足すときの受け皿として残す。"""
 
-    strata = "strata"
+    ollama = "ollama"
 
 
 ConversationOpt = Annotated[
@@ -113,11 +114,11 @@ def _build_diarizer(cfg: Config):
 
 
 def _build_extractor(cfg: Config, provider: Provider):
-    if provider != Provider.strata:
+    if provider != Provider.ollama:
         raise _fail(f"未対応の extract.provider です: {provider.value}")
-    from kijun.extract.strata_impl import StrataExtractor
+    from kijun.extract.ollama_impl import OllamaExtractor
 
-    return StrataExtractor(cfg)
+    return OllamaExtractor(cfg)
 
 
 def _build_embedder(cfg: Config):
@@ -349,10 +350,10 @@ def doctor(
     ctx: typer.Context,
     out: Annotated[
         Path | None,
-        typer.Option("--out", help="結果の JSON の保存先。省略すると data/doctor/strata_<日時>.json。"),
+        typer.Option("--out", help="結果の JSON の保存先。省略すると data/doctor/ollama_<日時>.json。"),
     ] = None,
 ) -> None:
-    """推論サーバー（Strata）を実測し、config.toml に書くべき値を出す。"""
+    """推論サーバー（Ollama）を実測し、GPU に収まっているかと config.toml に書くべき値を出す。"""
     from kijun.doctor import STATUS_ERROR, format_report, report_path, run_doctor
     from kijun.transport import HttpxTransport
 
@@ -496,11 +497,11 @@ def batch_run(
             typer.echo("\n--dry-run のため、何も実行していません。")
             return
         transport = None
-        if cfg.extract.strata.start_command:
+        if ollama_api.keeps_model_loaded(cfg.extract.ollama):
             from kijun.transport import HttpxTransport
 
-            transport = HttpxTransport()  # Strata の応答を待つのに使う
-        result = run_batch(cfg, ctx.obj, SubprocessRunner(), transport, echo=typer.echo)  # type: ignore[arg-type]
+            transport = HttpxTransport()  # keep_alive が "0" 以外のとき、モデルを下ろす要求に使う
+        result = run_batch(cfg, ctx.obj, SubprocessRunner(), echo=typer.echo, transport=transport)
         log_path = write_log(cfg, result)
         typer.echo("\n" + format_summary(result))
         typer.echo(f"\n記録を保存しました: {log_path}")
@@ -511,7 +512,10 @@ def batch_run(
 @batch_app.command("install-task")
 def batch_install_task(
     ctx: typer.Context,
-    time: Annotated[str, typer.Option("--time", help="毎日実行する時刻(HH:MM)。")] = "23:30",
+    time: Annotated[
+        str | None,
+        typer.Option("--time", help="毎日実行する時刻(HH:MM)。省略すると設定の batch.task_time。"),
+    ] = None,
     out: Annotated[
         Path | None, typer.Option("--out", help="XML の保存先。省略すると ./kijun-nightly-task.xml。")
     ] = None,
@@ -522,7 +526,8 @@ def batch_install_task(
     from kijun.batch.task_xml import TASK_NAME, build_task_xml, schtasks_command
 
     with _errors():
-        _config(ctx)  # 設定ファイルの誤りを先に報告する
+        cfg = _config(ctx)  # 設定ファイルの誤りを先に報告する
+        time = time or cfg.batch.task_time
         config_args = f'--config "{Path(ctx.obj).resolve()}" ' if ctx.obj else ""
         uv = shutil.which("uv") or "uv"
         try:

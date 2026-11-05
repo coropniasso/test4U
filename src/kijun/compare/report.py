@@ -1,8 +1,8 @@
 """同じ会議を2回抽出した結果の比較表（作業表 #5、計画書 第8節）。
 
-2026-11-03 の決定で抽出の背面は Strata のみになったので、この表は「Qwen 対 Claude」ではなく
-**同じ Strata で設定を変えた2回の実行**を比べる道具である。比べる対象になるのは、
-量子化の違い、chunk_minutes の違い、enforces_json_schema の違いなど、
+2026-11-03 の決定で抽出の背面は1つ(2026-11-05 から Ollama)になったので、この表は「Qwen 対 Claude」ではなく
+**同じ背面で設定を変えた2回の実行**を比べる道具である。比べる対象になるのは、
+モデルの違い、think の違い、chunk_minutes の違い、enforces_json_schema の違いなど、
 extracted_requests.model_name を変えて2回抽出した結果である。
 
 承認件数はユーザーがレビューして初めて決まる数字なので、このレポートでは出せない。
@@ -139,7 +139,7 @@ def select_models(
     """比較するモデルを決める。
 
     requested（CLI の --model）があればそれを使う。無ければ、抽出結果があるモデルをすべて使い、
-    設定が指す model_name（extract.strata.model に run_label を付けたもの）があればそれを左（A）に置く。
+    設定が指す model_name（extract.ollama.model に run_label を付けたもの）があればそれを左（A）に置く。
 
     背面が1つになったので、設定から2つのモデル名を読むことはできない。比較したい2回の実行は、
     設定を変えて抽出した結果として DB に別々の model_name で入っているので、
@@ -256,9 +256,9 @@ def build_report(
         f"| {_cell(a_name)} |  |",
         f"| {_cell(b_name)} |  |",
         "",
-        "2026-11-03 の決定で抽出の背面は Strata のみになったため、CLAUDE.md 4-4 にあった"
+        "2026-11-03 の決定で抽出の背面は1つになったため、CLAUDE.md 4-4 にあった"
         "「Qwen の承認件数が Claude の8割以上なら一本化」という判断手順は使えません。"
-        "この表は、同じ Strata で設定（量子化、chunk_minutes、enforces_json_schema）を変えた"
+        "この表は、同じ背面で設定（モデル、think、chunk_minutes、enforces_json_schema）を変えた"
         "2回の実行のどちらを採るかを決めるために使います。"
         "承認件数そのものを指標として記録するには、CLAUDE.md 6章の"
         "「LLM の提案文言を修正せず承認した割合」が必要で、その測定には #7（Discord、第2弾）が要ります。",

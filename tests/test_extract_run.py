@@ -15,6 +15,17 @@ CID = "20260920_1930_f2f_teirei"
 NOW = datetime(2026, 9, 21, 0, 0)
 
 
+@pytest.fixture(autouse=True)
+def _チャンクは25分_重複2分(cfg):
+    """このファイルの期待値(チャンク1が seq 23 から始まる等)は、25分・重複2分で書いてある。
+
+    既定値(12分・重複1分)とは独立に、チャンク分割の挙動を検査するための固定。代入は設定の検査を通らないので、
+    入力が num_ctx に収まるかの検査(tests/test_config.py)には影響しない。
+    """
+    cfg.extract.chunk_minutes = 25
+    cfg.extract.overlap_minutes = 2
+
+
 @pytest.fixture
 def conv(con):
     repo.insert_conversation(con, make_conversation(CID))
@@ -227,3 +238,37 @@ def test_失敗の表示にチャンクの番号が入る(con, cfg, conv, capsys
     run_extraction(con, cfg, conv, FakeExtractor({0: [make_item(1, quote="a")]}, fail_chunks={1}), now=NOW)
     err = capsys.readouterr().err
     assert "失敗: チャンク 2/" in err
+
+
+def test_モデル名の_コロン_は_DB_に残し_request_id_では置き換える(con, cfg, conv):
+    # Ollama のモデル名には ':' が入る。model_name の列には元の名前を入れ(compare や match が一致を見るため)、
+    # request_id は使える文字(英数字と . _ + -)に揃える。run_label の規則と同じ理由。
+    extractor = FakeExtractor({0: [make_item(1, quote="a")]}, model_name="qwen3.5:9b+think")
+    run_extraction(con, cfg, conv, extractor, now=NOW)
+    row = repo.get_requests(con, conv)[0]
+    assert row.model_name == "qwen3.5:9b+think"
+    assert row.request_id == f"{CID}#qwen3.5-9b+think#1"
+    assert repo.get_requests(con, conv, "qwen3.5:9b+think")  # 元の名前で引ける
+
+
+def test_request_id_model_は使えない文字を置き換える():
+    from kijun.extract.run import request_id_model
+
+    assert request_id_model("qwen3.5:9b") == "qwen3.5-9b"
+    assert request_id_model("hf.co/org/model:Q4_K_M+nothink") == "hf.co-org-model-Q4_K_M+nothink"
+    assert request_id_model("plain-name_1.0") == "plain-name_1.0"
+
+
+def test_モデル名に_コロン_があっても_extract_logs_のファイル名は安全(cfg):
+    path = extract_log_path(cfg, CID, "qwen3.5:9b+think")
+    assert ":" not in path.name and path.name == f"{CID}__qwen3.5_9b_think.json"
+
+
+def test_入力長の警告は_num_ctx_を案内する(cfg):
+    from kijun.extract.chunk import split_into_chunks
+    from kijun.extract.run import check_chunk_input_size
+
+    chunk = split_into_chunks(make_utterances(5), 12, 1)[0]
+    warning = check_chunk_input_size(chunk, cfg, 10)
+    assert warning is not None and "num_ctx" in warning and "chunk_minutes" in warning
+    assert "strata" not in warning.lower()

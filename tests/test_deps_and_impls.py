@@ -1,6 +1,6 @@
 """重い依存を使う実装クラスが、依存が無くても import でき、入れ方を示すエラーを出すことを検査する。
 
-また、偽の HTTP 層を差し込んで、Strata の実装がリクエストの形と再試行・修復を正しく行うことを
+また、偽の HTTP 層を差し込んで、Ollama の実装がリクエストの形と再試行・修復を正しく行うことを
 検査する（実際の通信はしない）。
 """
 
@@ -21,14 +21,17 @@ from kijun.extract.chunk import split_into_chunks
 from kijun.extract.models import ExtractionResult
 from kijun.extract.prompt import build_messages
 from kijun.extract.repair import ACTION_REMOVED_PROSE_BEFORE, ACTION_WRAPPED_ARRAY_IN_ITEMS
-from kijun.extract.strata_impl import StrataExtractor
-from kijun.transport import HttpResponse, TransportError
+from kijun.extract.ollama_impl import OllamaExtractor, build_payload
+from kijun.transport import TransportError
 from tests.conftest import make_utterances
+from tests.fakes import FakeOllamaTransport, ollama_body
 
 IMPL_MODULES = [
     "kijun.transcribe.faster_whisper_impl",
     "kijun.transcribe.pyannote_impl",
-    "kijun.extract.strata_impl",
+    "kijun.extract.ollama_impl",
+    "kijun.review.llm",
+    "kijun.batch.defer",
     "kijun.match.e5_impl",
     "kijun.transport",
     "kijun.doctor",
@@ -50,7 +53,7 @@ def test_実装モジュールは重い依存を_import_せずに_import_でき�
 
 def test_anthropic_に依存しない():
     """抽出から Claude API が消えたので、anthropic は import されない。"""
-    code = "import sys\nimport kijun.cli\nimport kijun.extract.strata_impl\nassert 'anthropic' not in sys.modules\n"
+    code = "import sys\nimport kijun.cli\nimport kijun.extract.ollama_impl\nassert 'anthropic' not in sys.modules\n"
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
@@ -91,7 +94,7 @@ def test_import_optional_は入れ方を示す(monkeypatch):
             "transcribe",
             "pyannote.audio",
         ),
-        (lambda c: StrataExtractor(c), "extract", "httpx"),
+        (lambda c: OllamaExtractor(c), "extract", "httpx"),
         (
             lambda c: __import__("kijun.match.e5_impl", fromlist=["x"]).E5Embedder(c.match),
             "match",
@@ -151,7 +154,7 @@ def test_モデル読み込みが失敗したときも3つのURLを案内する(
     assert "4.x" in msg
 
 
-# --- Strata ---------------------------------------------------------------------------------
+# --- Ollama ---------------------------------------------------------------------------------
 
 ITEM = {
     "seq_from": 0,
@@ -170,70 +173,38 @@ ITEM = {
 EMPTY = json.dumps({"items": []})
 ONE_ITEM = json.dumps({"items": [ITEM]}, ensure_ascii=False)
 
-
-class FakeTransport:
-    """決めた応答を順に返す偽の HTTP 層。送ったリクエストを記録する。"""
-
-    def __init__(self, responses: list, elapsed_sec: float = 1.0) -> None:
-        self._responses = list(responses)
-        self._elapsed = elapsed_sec
-        self.posts: list[dict] = []
-        self.gets: list[str] = []
-
-    def _next(self) -> HttpResponse:
-        item = self._responses.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        if isinstance(item, HttpResponse):
-            return item
-        status, text = item
-        return HttpResponse(status_code=status, text=text, elapsed_sec=self._elapsed)
-
-    def get(self, url: str, timeout_sec: float) -> HttpResponse:
-        self.gets.append(url)
-        return self._next()
-
-    def post(self, url: str, payload: dict, timeout_sec: float) -> HttpResponse:
-        self.posts.append({"url": url, "payload": payload, "timeout_sec": timeout_sec})
-        return self._next()
-
-
-def chat_body(content: str) -> str:
-    return json.dumps({"choices": [{"message": {"content": content}}]}, ensure_ascii=False)
-
-
-def chat_body_with_usage(content: str, prompt: int = 100, completion: int = 20) -> str:
-    return json.dumps(
-        {
-            "choices": [{"message": {"content": content}}],
-            "usage": {"prompt_tokens": prompt, "completion_tokens": completion},
-        },
-        ensure_ascii=False,
-    )
+LIMIT = Config().extract.ollama.num_ctx - Config().extract.ollama.num_predict  # 8192
 
 
 def a_chunk():
-    return split_into_chunks(make_utterances(5), 25, 2)[0]
+    return split_into_chunks(make_utterances(5), 12, 1)[0]
 
 
-def test_Strata_のリクエストの形():
-    transport = FakeTransport([(200, chat_body(EMPTY))])
+def ok(content: str, **kw) -> tuple[int, str]:
+    return 200, ollama_body(content, **kw)
+
+
+def test_Ollama_のリクエストの形():
+    transport = FakeOllamaTransport([ok(EMPTY)])
     cfg = Config()
-    ex = StrataExtractor(cfg, transport)
-    assert ex.model_name == "qwen3.8-flash-next"
-    assert ex.enforces_json_schema is False
-    assert ex.max_input_tokens is None  # 設定の 0 は未確認なので None
+    ex = OllamaExtractor(cfg, transport)
+    assert ex.model_name == "qwen3.5:9b"
+    assert ex.enforces_json_schema is True
+    assert ex.max_input_tokens == LIMIT  # 入力に使える上限は num_ctx - num_predict
     assert ex.extract(a_chunk()).items == []
 
     post = transport.posts[0]
-    assert post["url"] == "http://localhost:8080/v1/chat/completions"
-    assert post["timeout_sec"] == 3600
+    # OpenAI 互換の /v1/chat/completions ではなく、num_ctx と keep_alive を送れるネイティブ API を使う
+    assert post["url"] == "http://127.0.0.1:11434/api/chat"
+    assert post["timeout_sec"] == 1800
     payload = post["payload"]
-    assert payload["model"] == "qwen3.8-flash-next"
-    assert payload["temperature"] == 0
+    assert payload["model"] == "qwen3.5:9b"
     assert payload["stream"] is False
-    # 保証しないと宣言されているので response_format は付けない
-    assert "response_format" not in payload
+    assert payload["keep_alive"] == "0"
+    assert payload["options"] == {"temperature": 0, "num_ctx": 16384, "num_predict": 8192}
+    assert payload["format"] == ExtractionResult.model_json_schema()
+    assert "think" not in payload  # None は送らない(モデルの既定に任せる)
+    assert set(payload) == {"model", "messages", "stream", "keep_alive", "options", "format"}
     system, user = build_messages(a_chunk(), cfg)
     assert payload["messages"] == [
         {"role": "system", "content": system},
@@ -241,113 +212,144 @@ def test_Strata_のリクエストの形():
     ]
 
 
-def test_max_tokens_を既定で送る():
-    # 既定値 20000 は実測 13,050 トークンに余裕を持たせた値。上限が無いと n_ctx まで走り得る。
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    StrataExtractor(Config(), transport).extract(a_chunk())
-    assert transport.posts[0]["payload"]["max_tokens"] == 20000
-
-
-def test_max_tokens_が_0_なら送らない():
+def test_build_payload_は抽出が送るものと同じ形を返す():
+    # doctor.py と scripts/measure_extraction.py が同じ関数を使う。
+    transport = FakeOllamaTransport([ok(EMPTY)])
     cfg = Config()
-    cfg.extract.strata.max_tokens = 0
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    StrataExtractor(cfg, transport).extract(a_chunk())
-    assert "max_tokens" not in transport.posts[0]["payload"]
-
-
-def test_finish_reason_が_length_なら標準エラーに出し_例外にはしない(capsys):
-    body = json.dumps(
-        {"choices": [{"message": {"content": '{"items": []}'}, "finish_reason": "length"}]}
-    )
-    transport = FakeTransport([(200, body)])
-    assert StrataExtractor(Config(), transport).extract(a_chunk()).items == []
-    err = capsys.readouterr().err
-    assert "max_tokens に達して切れた" in err and "extract.strata.max_tokens" in err
-
-
-def test_finish_reason_が_stop_なら警告しない(capsys):
-    body = json.dumps(
-        {"choices": [{"message": {"content": '{"items": []}'}, "finish_reason": "stop"}]}
-    )
-    StrataExtractor(Config(), FakeTransport([(200, body)])).extract(a_chunk())
-    assert "max_tokens に達して" not in capsys.readouterr().err
-
-
-def test_content_が_null_なら読めない出力として扱う():
-    body = json.dumps({"choices": [{"message": {"content": None}, "finish_reason": "stop"}]})
-    transport = FakeTransport([(200, body), (200, body)])
-    with pytest.raises(ExtractionError, match="2 回とも"):
-        StrataExtractor(Config(), transport).extract(a_chunk())
-
-
-def test_max_tokens_で切れて1件も読めなければ_投げ直さずに失敗する():
-    # Strata は max_tokens の約4分の1を答え用に取り置くので、ここに来るのは答えがその分に
-    # 収まらなかった場合、つまり設定の問題である。投げ直さないのは出力が決定的だからではなく
-    # （同一ペイロード・temperature 0 で completion_tokens が 13,050 と 48,764 以上の実測がある）、
-    # 1回の投げ直しに最大 max_tokens 分の生成時間（14 tokens/s なら約 1,400 秒）がかかるためである。
-    body = json.dumps({"choices": [{"message": {"content": None}, "finish_reason": "length"}]})
-    transport = FakeTransport([(200, body), (200, body)])
-    with pytest.raises(ExtractionError, match="max_tokens") as e:
-        StrataExtractor(Config(), transport).extract(a_chunk())
-    assert "答え用に取り置く" in str(e.value) and "していません" in str(e.value)
-    assert len(transport.posts) == 1  # 2回目は投げない
-
-
-def test_max_tokens_で切れても1件でも読めれば_修復して返す():
-    # 末尾が切れていても完全な要素があれば repair.py が切り詰めて返す。失敗にはしない。
-    broken = '{"items": [' + json.dumps(ITEM, ensure_ascii=False) + ', {"seq_from": 1, "quo'
-    body = json.dumps({"choices": [{"message": {"content": broken}, "finish_reason": "length"}]})
-    transport = FakeTransport([(200, body)])
-    result = StrataExtractor(Config(), transport).extract(a_chunk())
-    assert len(result.items) == 1
-    assert len(transport.posts) == 1
+    OllamaExtractor(cfg, transport).extract(a_chunk())
+    assert build_payload(cfg, a_chunk()) == transport.posts[0]["payload"]
 
 
 def test_プロンプトの文面は_prompt_py_のものをそのまま使う():
-    transport = FakeTransport([(200, chat_body(EMPTY))])
+    transport = FakeOllamaTransport([ok(EMPTY)])
     cfg = Config()
-    StrataExtractor(cfg, transport).extract(a_chunk())
+    OllamaExtractor(cfg, transport).extract(a_chunk())
     system = transport.posts[0]["payload"]["messages"][0]["content"]
     assert system == build_messages(a_chunk(), cfg)[0]
     assert "推測" in system and "Yes か No で判定できる" in system
 
 
-def test_スキーマ適合を保証すると宣言したときだけ_response_format_を付ける():
+def test_スキーマ適合を保証しないと設定したときは_format_を付けない():
     cfg = Config()
-    cfg.extract.strata.enforces_json_schema = True
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    ex = StrataExtractor(cfg, transport)
-    assert ex.enforces_json_schema is True
+    cfg.extract.ollama.enforces_json_schema = False
+    transport = FakeOllamaTransport([ok(EMPTY)])
+    ex = OllamaExtractor(cfg, transport)
+    assert ex.enforces_json_schema is False
     ex.extract(a_chunk())
-    fmt = transport.posts[0]["payload"]["response_format"]
-    assert fmt["type"] == "json_schema"
-    assert fmt["json_schema"]["name"] == "extraction"
-    assert fmt["json_schema"]["strict"] is True
-    assert fmt["json_schema"]["schema"] == ExtractionResult.model_json_schema()
+    assert "format" not in transport.posts[0]["payload"]
 
 
-def test_max_input_tokens_は設定の値をそのまま属性にする():
+@pytest.mark.parametrize("value", [True, False])
+def test_think_は設定したときだけ送る(value):
     cfg = Config()
-    cfg.extract.strata.max_input_tokens = 50000
-    assert StrataExtractor(cfg, FakeTransport([])).max_input_tokens == 50000
+    cfg.extract.ollama.think = value
+    transport = FakeOllamaTransport([ok(EMPTY)])
+    OllamaExtractor(cfg, transport).extract(a_chunk())
+    assert transport.posts[0]["payload"]["think"] is value
 
 
-def test_chat_path_と_base_url_は設定で変えられる():
+def test_推論の文字数を標準エラーに出す_本文は保存しない(capsys):
+    transport = FakeOllamaTransport([ok(EMPTY, thinking="あ" * 321)])
     cfg = Config()
-    cfg.extract.strata.base_url = "http://192.168.1.5:9000"
-    cfg.extract.strata.chat_path = "/openai/v1/chat/completions"
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    StrataExtractor(cfg, transport).extract(a_chunk())
-    assert transport.posts[0]["url"] == "http://192.168.1.5:9000/openai/v1/chat/completions"
+    cfg.extract.ollama.think = True
+    ex = OllamaExtractor(cfg, transport)
+    ex.extract(a_chunk())
+    err = capsys.readouterr().err
+    assert "推論 321 文字" in err
+    assert "あああ" not in err
+    assert ex.last_usage == {"prompt_tokens": 100, "completion_tokens": 20}
+
+
+def test_num_ctx_num_predict_keep_alive_は設定の値を送る():
+    cfg = Config()
+    cfg.extract.ollama.num_ctx = 12000
+    cfg.extract.ollama.num_predict = 2048
+    cfg.extract.ollama.keep_alive = "5m"
+    transport = FakeOllamaTransport([ok(EMPTY)])
+    ex = OllamaExtractor(cfg, transport)
+    assert ex.max_input_tokens == 12000 - 2048
+    ex.extract(a_chunk())
+    payload = transport.posts[0]["payload"]
+    assert payload["options"]["num_ctx"] == 12000 and payload["options"]["num_predict"] == 2048
+    assert payload["keep_alive"] == "5m"
+
+
+def test_base_url_は設定で変えられる():
+    cfg = Config()
+    cfg.extract.ollama.base_url = "http://192.168.1.5:11434/"
+    transport = FakeOllamaTransport([ok(EMPTY)])
+    OllamaExtractor(cfg, transport).extract(a_chunk())
+    assert transport.posts[0]["url"] == "http://192.168.1.5:11434/api/chat"
+
+
+# --- 出力が切れた・入力が切り捨てられた場合 --------------------------------------------------------
+
+
+def test_done_reason_が_length_なら標準エラーに出し_読めれば例外にはしない(capsys):
+    transport = FakeOllamaTransport([ok('{"items": []}', done_reason="length")])
+    assert OllamaExtractor(Config(), transport).extract(a_chunk()).items == []
+    err = capsys.readouterr().err
+    assert "num_predict に達して切れた" in err and "extract.ollama.num_predict" in err
+
+
+def test_done_reason_が_stop_なら警告しない(capsys):
+    OllamaExtractor(Config(), FakeOllamaTransport([ok('{"items": []}')])).extract(a_chunk())
+    assert "num_predict に達して" not in capsys.readouterr().err
+
+
+def test_num_predict_で切れて1件も読めなければ_投げ直さずに失敗する():
+    # think を有効にしたモデルでは、推論も num_predict に数えられる。推論の途中で切れると content が空になる。
+    transport = FakeOllamaTransport([ok("", done_reason="length", thinking="考え中")])
+    with pytest.raises(ExtractionError, match="num_predict") as e:
+        OllamaExtractor(Config(), transport).extract(a_chunk())
+    assert "推論も num_predict に数えられ" in str(e.value) and "していません" in str(e.value)
+    assert len(transport.posts) == 1  # 2回目は投げない
+
+
+def test_num_predict_で切れても1件でも読めれば_修復して返す():
+    broken = '{"items": [' + json.dumps(ITEM, ensure_ascii=False) + ', {"seq_from": 1, "quo'
+    transport = FakeOllamaTransport([ok(broken, done_reason="length")])
+    result = OllamaExtractor(Config(), transport).extract(a_chunk())
+    assert len(result.items) == 1
+    assert len(transport.posts) == 1
+
+
+def test_content_が_null_なら読めない出力として扱う():
+    body = ollama_body(None, done_reason="stop")
+    transport = FakeOllamaTransport([(200, body), (200, body)])
+    with pytest.raises(ExtractionError, match="2 回とも"):
+        OllamaExtractor(Config(), transport).extract(a_chunk())
+
+
+def test_入力が上限に達したら_ExtractionError_で_投げ直さない():
+    # Ollama は入力が文脈長を超えると、エラーを出さずに先頭を捨てる。捨てられた入力から抽出すると
+    # 捨てられた発話が静かに消える(原則2-4「失うより止める」)。
+    transport = FakeOllamaTransport([ok(EMPTY, prompt_eval_count=LIMIT)])
+    with pytest.raises(ExtractionError) as e:
+        OllamaExtractor(Config(), transport).extract(a_chunk())
+    msg = str(e.value)
+    assert str(LIMIT) in msg and "先頭を捨てる" in msg and "chunk_minutes" in msg and "num_ctx" in msg
+    assert len(transport.posts) == 1
+
+
+def test_入力が上限に達する直前なら読める():
+    transport = FakeOllamaTransport([ok(EMPTY, prompt_eval_count=LIMIT - 1)])
+    assert OllamaExtractor(Config(), transport).extract(a_chunk()).items == []
+
+
+def test_prompt_eval_count_が返らなければ確認できないことを出して続ける(capsys):
+    transport = FakeOllamaTransport([ok(EMPTY, prompt_eval_count=None, eval_count=None)])
+    assert OllamaExtractor(Config(), transport).extract(a_chunk()).items == []
+    err = capsys.readouterr().err
+    assert "確認できません" in err and "トークン数は記録できません" in err
 
 
 # --- 修復と再試行 -----------------------------------------------------------------------------
 
 
 def test_前置きつきの出力を修復して読み_修復の記録を残す(capsys):
-    transport = FakeTransport([(200, chat_body("はい、結果です。\n" + ONE_ITEM))])
-    ex = StrataExtractor(Config(), transport)
+    transport = FakeOllamaTransport(["はい、結果です。\n" + ONE_ITEM])
+    ex = OllamaExtractor(Config(), transport)
     result = ex.extract(a_chunk())
 
     assert len(result.items) == 1
@@ -359,16 +361,24 @@ def test_前置きつきの出力を修復して読み_修復の記録を残す(
     assert "修復しました" in capsys.readouterr().err
 
 
+def test_format_を付けていても_repair_を通す():
+    # enforces_json_schema が真でも、出力は必ず修復を通してから検証する。
+    cfg = Config()
+    assert cfg.extract.ollama.enforces_json_schema is True
+    ex = OllamaExtractor(cfg, FakeOllamaTransport(["```json\n" + ONE_ITEM + "\n```"]))
+    assert len(ex.extract(a_chunk()).items) == 1
+    assert ex.repair_events
+
+
 def test_トップレベルが配列の出力も読める():
-    transport = FakeTransport([(200, chat_body(json.dumps([ITEM], ensure_ascii=False)))])
-    ex = StrataExtractor(Config(), transport)
+    transport = FakeOllamaTransport([json.dumps([ITEM], ensure_ascii=False)])
+    ex = OllamaExtractor(Config(), transport)
     assert len(ex.extract(a_chunk()).items) == 1
     assert ex.repair_events[0].actions == [ACTION_WRAPPED_ARRAY_IN_ITEMS]
 
 
 def test_修復が要らなかったときは記録を残さない():
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    ex = StrataExtractor(Config(), transport)
+    ex = OllamaExtractor(Config(), FakeOllamaTransport([EMPTY]))
     ex.extract(a_chunk())
     assert ex.repair_events == []
 
@@ -376,130 +386,118 @@ def test_修復が要らなかったときは記録を残さない():
 def test_末尾が切れた出力は捨てた件数を記録する():
     full = json.dumps({"items": [ITEM, ITEM]}, ensure_ascii=False)
     cut = full[: full.rindex("{") + 30]
-    transport = FakeTransport([(200, chat_body(cut))])
-    ex = StrataExtractor(Config(), transport)
+    ex = OllamaExtractor(Config(), FakeOllamaTransport([cut]))
     assert len(ex.extract(a_chunk()).items) == 1
     assert ex.repair_events[0].truncated_items == 1
 
 
 def test_読めない出力は1回だけ投げ直す(capsys):
-    transport = FakeTransport([(200, chat_body("抽出できませんでした")), (200, chat_body(EMPTY))])
-    ex = StrataExtractor(Config(), transport)
+    transport = FakeOllamaTransport(["抽出できませんでした", EMPTY])
+    ex = OllamaExtractor(Config(), transport)
     assert ex.extract(a_chunk()).items == []
     assert len(transport.posts) == 2
     assert "警告" in capsys.readouterr().err
 
 
 def test_2回とも読めなければ_ExtractionError():
-    transport = FakeTransport([(200, chat_body("だめ1")), (200, chat_body("だめ2")), (200, chat_body(EMPTY))])
-    ex = StrataExtractor(Config(), transport)
+    transport = FakeOllamaTransport(["だめ1", "だめ2", EMPTY])
+    ex = OllamaExtractor(Config(), transport)
     with pytest.raises(ExtractionError, match="2 回とも"):
         ex.extract(a_chunk())
     assert len(transport.posts) == 2  # 3回目は投げない
 
 
 def test_投げ直しても同じリクエストを送る():
-    transport = FakeTransport([(200, chat_body("だめ")), (200, chat_body(EMPTY))])
-    StrataExtractor(Config(), transport).extract(a_chunk())
+    transport = FakeOllamaTransport(["だめ", EMPTY])
+    OllamaExtractor(Config(), transport).extract(a_chunk())
     assert transport.posts[0]["payload"] == transport.posts[1]["payload"]
 
 
 # --- 失敗の扱い -------------------------------------------------------------------------------
 
 
-def test_接続できなければ_doctor_を案内する():
-    transport = FakeTransport([TransportError("接続拒否")])
+def test_接続できなければ_起動とモデルと_doctor_を案内する():
+    transport = FakeOllamaTransport([TransportError("接続拒否")])
     with pytest.raises(ExtractionError) as e:
-        StrataExtractor(Config(), transport).extract(a_chunk())
-    assert "kijun doctor" in str(e.value) and "送れませんでした" in str(e.value)
+        OllamaExtractor(Config(), transport).extract(a_chunk())
+    msg = str(e.value)
+    assert "送れませんでした" in msg and "タスクトレイ" in msg and "ollama list" in msg and "kijun doctor" in msg
+
+
+def test_HTTP_404_はモデルの取得を案内する():
+    transport = FakeOllamaTransport([(404, json.dumps({"error": "model 'qwen3.5:9b' not found"}))])
+    with pytest.raises(ExtractionError) as e:
+        OllamaExtractor(Config(), transport).extract(a_chunk())
+    assert "HTTP 404" in str(e.value) and "ollama pull qwen3.5:9b" in str(e.value)
+
+
+def test_HTTP_400_で_think_が理由なら_think_を外すよう案内する():
+    cfg = Config()
+    cfg.extract.ollama.think = True
+    transport = FakeOllamaTransport([(400, json.dumps({"error": "qwen3.5:9b does not support thinking"}))])
+    with pytest.raises(ExtractionError) as e:
+        OllamaExtractor(cfg, transport).extract(a_chunk())
+    assert "HTTP 400" in str(e.value) and "extract.ollama.think を書かない" in str(e.value)
+
+
+def test_think_を送っていなければ_400_でも_think_を外す案内は出さない():
+    transport = FakeOllamaTransport([(400, json.dumps({"error": "bad request: think"}))])
+    with pytest.raises(ExtractionError) as e:
+        OllamaExtractor(Config(), transport).extract(a_chunk())
+    assert "HTTP 400" in str(e.value) and "extract.ollama.think を書かない" not in str(e.value)
 
 
 def test_HTTP_エラーは状態コードと本文を出す():
-    transport = FakeTransport([(400, '{"error": "response_format is not supported"}')])
+    transport = FakeOllamaTransport([(500, json.dumps({"error": "boom"}))])
     with pytest.raises(ExtractionError) as e:
-        StrataExtractor(Config(), transport).extract(a_chunk())
-    assert "HTTP 400" in str(e.value) and "response_format" in str(e.value)
+        OllamaExtractor(Config(), transport).extract(a_chunk())
+    assert "HTTP 500" in str(e.value) and "boom" in str(e.value)
 
 
-def test_応答の形が_OpenAI_互換でなければ_chat_path_を疑うよう案内する():
-    transport = FakeTransport([(200, json.dumps({"content": "x"}))])
+def test_応答の形が_Ollama_の_api_chat_でなければ_base_url_を疑うよう案内する():
+    # OpenAI 互換の形(choices)が返ってきた場合も、Ollama の形ではない。
+    transport = FakeOllamaTransport([(200, json.dumps({"choices": [{"message": {"content": "x"}}]}))])
     with pytest.raises(ExtractionError) as e:
-        StrataExtractor(Config(), transport).extract(a_chunk())
-    assert "chat_path" in str(e.value) and "choices" in str(e.value)
+        OllamaExtractor(Config(), transport).extract(a_chunk())
+    assert "base_url" in str(e.value) and "message" in str(e.value)
 
 
 def test_応答が_JSON_でなければ_ExtractionError():
-    transport = FakeTransport([(200, "<html>404</html>")])
+    transport = FakeOllamaTransport([(200, "<html>404</html>")])
     with pytest.raises(ExtractionError):
-        StrataExtractor(Config(), transport).extract(a_chunk())
+        OllamaExtractor(Config(), transport).extract(a_chunk())
 
 
-def test_usage_があればトークン数を出す(capsys):
-    transport = FakeTransport([(200, chat_body_with_usage(EMPTY, 1234, 56))])
-    StrataExtractor(Config(), transport).extract(a_chunk())
+def test_使用量があればトークン数と速度を出す(capsys):
+    transport = FakeOllamaTransport([ok(EMPTY, prompt_eval_count=1234, eval_count=56, eval_sec=2.0)])
+    OllamaExtractor(Config(), transport).extract(a_chunk())
     err = capsys.readouterr().err
-    assert "1234" in err and "56" in err
+    assert "1234" in err and "56" in err and "28.0 tokens/s" in err
 
 
-def test_usage_が無ければそのことを出す(capsys):
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    StrataExtractor(Config(), transport).extract(a_chunk())
-    assert "usage を返さない" in capsys.readouterr().err
-
-
-def test_last_usage_に直近の_usage_を残す():
-    transport = FakeTransport([(200, chat_body_with_usage(EMPTY, 2325, 13050))])
-    ex = StrataExtractor(Config(), transport)
+def test_last_usage_に直近の使用量を残す():
+    transport = FakeOllamaTransport([ok(EMPTY, prompt_eval_count=2325, eval_count=1305)])
+    ex = OllamaExtractor(Config(), transport)
     assert ex.last_usage is None
     ex.extract(a_chunk())
-    assert ex.last_usage == {"prompt_tokens": 2325, "completion_tokens": 13050}
-
-
-def test_usage_が無ければ_last_usage_は_None():
-    ex = StrataExtractor(Config(), FakeTransport([(200, chat_body(EMPTY))]))
-    ex.extract(a_chunk())
-    assert ex.last_usage is None
-
-
-def test_reasoning_effort_は既定で_medium_を明示して送る():
-    # 既定が medium なのは 2026-11-04 のユーザーの決定（実測を見て所要時間を取った）。
-    # 明示して送るのは、送らないとテンプレートの既定（xhigh）になり、設定から挙動が読めなくなるため。
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    StrataExtractor(Config(), transport).extract(a_chunk())
-    assert transport.posts[0]["payload"]["reasoning_effort"] == "medium"
-
-
-def test_reasoning_effort_を空文字にすれば送らない():
-    cfg = Config()
-    cfg.extract.strata.reasoning_effort = ""
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    StrataExtractor(cfg, transport).extract(a_chunk())
-    assert "reasoning_effort" not in transport.posts[0]["payload"]
-
-
-def test_reasoning_effort_を書いたらそのまま送る():
-    cfg = Config()
-    cfg.extract.strata.reasoning_effort = "xhigh"
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    StrataExtractor(cfg, transport).extract(a_chunk())
-    assert transport.posts[0]["payload"]["reasoning_effort"] == "xhigh"
+    assert ex.last_usage == {"prompt_tokens": 2325, "completion_tokens": 1305}
 
 
 def test_run_label_が_model_name_に付く():
     # 設定を変えた2回の抽出を同じ会議の中に並べて残すための印。これが無いと2回目の extract が
     # 1回目の行を削除し、kijun compare が比較できない。
     cfg = Config()
-    cfg.extract.run_label = "medium"
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    ex = StrataExtractor(cfg, transport)
-    assert ex.model_name == f"{cfg.extract.strata.model}+medium"
+    cfg.extract.run_label = "think"
+    transport = FakeOllamaTransport([ok(EMPTY)])
+    ex = OllamaExtractor(cfg, transport)
+    assert ex.model_name == "qwen3.5:9b+think"
     ex.extract(a_chunk())
-    # API に送るモデルIDには印を付けない（サーバーが知らない名前になる）。
-    assert transport.posts[0]["payload"]["model"] == cfg.extract.strata.model
+    # API に送るモデルIDには印を付けない(Ollama が知らない名前になる)。
+    assert transport.posts[0]["payload"]["model"] == "qwen3.5:9b"
 
 
-def test_run_label_が空なら_model_name_はモデルIDのまま():
-    assert StrataExtractor(Config(), FakeTransport([])).model_name == Config().extract.strata.model
+def test_run_label_が空なら_model_name_はモデル名のまま():
+    assert OllamaExtractor(Config(), FakeOllamaTransport([])).model_name == "qwen3.5:9b"
 
 
 def test_match_が使う_model_name_は_extract_が書くものと一致する():
@@ -507,21 +505,6 @@ def test_match_が使う_model_name_は_extract_が書くものと一致する()
     from kijun.cli import Provider, _provider_model
 
     cfg = Config()
-    cfg.extract.run_label = "xhigh"
-    _p, model_name = _provider_model(cfg, Provider.strata)
-    assert model_name == StrataExtractor(cfg, FakeTransport([])).model_name
-
-
-def test_reasoning_budget_tokens_は既定で送らない():
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    StrataExtractor(Config(), transport).extract(a_chunk())
-    assert "reasoning_budget_tokens" not in transport.posts[0]["payload"]
-
-
-def test_reasoning_budget_tokens_を書いたらそのまま送る():
-    # max_tokens（答えを含む全体の上限）と推論の量を別々に決めるための手段。
-    cfg = Config()
-    cfg.extract.strata.reasoning_budget_tokens = 8000
-    transport = FakeTransport([(200, chat_body(EMPTY))])
-    StrataExtractor(cfg, transport).extract(a_chunk())
-    assert transport.posts[0]["payload"]["reasoning_budget_tokens"] == 8000
+    cfg.extract.run_label = "think"
+    _p, model_name = _provider_model(cfg, Provider.ollama)
+    assert model_name == OllamaExtractor(cfg, FakeOllamaTransport([])).model_name

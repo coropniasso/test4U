@@ -247,24 +247,51 @@ class FakeSpeakerInterpreter:
         return dict(self._responses.get(text, {}))
 
 
-class FakeChatTransport:
-    """OpenAI 互換の応答(choices[0].message.content)を順に返す偽の HttpTransport。
+def ollama_body(
+    content: str | None,
+    *,
+    thinking: str | None = None,
+    done_reason: str | None = "stop",
+    prompt_eval_count: int | None = 100,
+    eval_count: int | None = 20,
+    eval_sec: float = 1.0,
+    load_sec: float = 0.5,
+    prompt_eval_sec: float = 0.2,
+    total_sec: float = 2.0,
+) -> str:
+    """Ollama の POST /api/chat(stream: false)の応答の本文。None の項目は含めない。"""
+    import json
 
-    contents の要素が文字列なら、その本文を 200 で返す。Exception なら送出する。(status, text) なら
-    そのまま返す。足りなくなったら最後の応答を繰り返す。投げられた payload を記録する。
+    message: dict = {"role": "assistant", "content": content}
+    if thinking is not None:
+        message["thinking"] = thinking
+    body: dict = {"model": "m", "message": message, "done": True}
+    if done_reason is not None:
+        body["done_reason"] = done_reason
+    if prompt_eval_count is not None:
+        body["prompt_eval_count"] = prompt_eval_count
+    if eval_count is not None:
+        body["eval_count"] = eval_count
+    body["eval_duration"] = int(eval_sec * 1e9)
+    body["load_duration"] = int(load_sec * 1e9)
+    body["prompt_eval_duration"] = int(prompt_eval_sec * 1e9)
+    body["total_duration"] = int(total_sec * 1e9)
+    return json.dumps(body, ensure_ascii=False)
+
+
+class FakeOllamaTransport:
+    """Ollama の /api/chat の応答を順に返す偽の HttpTransport。
+
+    contents の要素が文字列なら、その本文を ollama_body で包んで 200 で返す。Exception なら送出する。
+    (status, text) ならそのまま返す。足りなくなったら最後の応答を繰り返す。投げられた payload を記録する。
     """
 
     def __init__(self, contents: list) -> None:
-        import json
-
         from kijun.transport import HttpResponse
 
-        self._json, self._response = json, HttpResponse
+        self._response = HttpResponse
         self._contents = list(contents)
         self.posts: list[dict] = []
-        self.gets: list[str] = []
-        self.get_error: Exception | None = None
-        self.get_ready_after: int = 0  # この回数だけ get を失敗させてから成功させる
 
     def post(self, url: str, payload: dict, timeout_sec: float):
         self.posts.append({"url": url, "payload": payload, "timeout_sec": timeout_sec})
@@ -273,16 +300,10 @@ class FakeChatTransport:
             raise item
         if isinstance(item, tuple):
             return self._response(item[0], item[1], 0.1)
-        body = self._json.dumps({"choices": [{"message": {"content": item}}]}, ensure_ascii=False)
-        return self._response(200, body, 0.1)
+        return self._response(200, ollama_body(item), 0.1)
 
-    def get(self, url: str, timeout_sec: float):
-        from kijun.transport import TransportError
-
-        self.gets.append(url)
-        if self.get_error is not None or len(self.gets) <= self.get_ready_after:
-            raise self.get_error or TransportError("まだ応答しません")
-        return self._response(200, '{"data": []}', 0.1)
+    def get(self, url: str, timeout_sec: float):  # pragma: no cover - 使われたら誤り
+        raise AssertionError("このテストでは GET を使わない")
 
 
 class FakeCommandRunner:
@@ -335,3 +356,22 @@ class FakeCommandRunner:
             else:
                 out.append(c)
         return out
+
+
+class FakeProcessLister:
+    """呼ばれるたびに、決めた順で「動いているプロセス名」を返す偽の ProcessLister。
+
+    sequence の要素は、名前の集合(小文字に直して返す)か、ProcessListError にする例外。
+    足りなくなったら最後の要素を繰り返す。呼ばれた回数を calls に数える。
+    """
+
+    def __init__(self, sequence: list) -> None:
+        self._sequence = list(sequence)
+        self.calls = 0
+
+    def running_names(self) -> set[str]:
+        self.calls += 1
+        item = self._sequence[0] if len(self._sequence) == 1 else self._sequence.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return {n.lower() for n in item}

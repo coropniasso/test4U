@@ -30,7 +30,7 @@ def row(request_id, model, seq_from, quote, reason=None, applies=None, criterion
     )
 
 
-# 同じ Strata で設定を変えた2回の実行を比較する（量子化の違いを想定したモデル名）
+# 同じ Ollama で設定を変えた2回の実行を比較する（モデルの違いを想定したモデル名）
 QWEN, CLAUDE = "qwen3.8-flash-next-q4", "qwen3.8-flash-next-q8"
 
 
@@ -84,7 +84,7 @@ def test_対応付けは1対1():
 
 
 def test_モデルの選択_設定のモデルを左に置く(cfg):
-    cfg.extract.strata.model = QWEN
+    cfg.extract.ollama.model = QWEN
     assert select_models([CLAUDE, QWEN], cfg) == [QWEN, CLAUDE]
 
 
@@ -93,7 +93,7 @@ def test_モデルの選択_設定のモデルが無ければ抽出結果のあ�
 
 
 def test_モデルの選択_明示した指定が優先される(cfg):
-    cfg.extract.strata.model = QWEN
+    cfg.extract.ollama.model = QWEN
     assert select_models([QWEN, CLAUDE], cfg, ["a", "b"]) == ["a", "b"]
 
 

@@ -6,7 +6,8 @@
 既定値（0.55 と 180）は実測1点からの推測である。実機の doctor の記録で、estimated_input_tokens = 4,711
 （係数 1.5）に対し実際の input_tokens = 1,646 で、約2.9倍の過大評価だった（Qwen3.8-Flash-Next は
 51B の n-gram 埋め込みテーブルを持つため、日本語のトークン効率が高いと考えられる）。
-`uv run kijun doctor` が tokens_per_character を実測して推奨値に出すので、それで置き換える。
+この値は Strata での測定で、Ollama で使うモデルのトークナイザには当てはまらない（2026-11-05 に背面を
+Ollama に移した）。`uv run kijun doctor` が tokens_per_character を実測して推奨値に出すので、それで置き換える。
 
 係数をここ1か所の関数に通すのは、run.py の入力長の警告と doctor.py の入力の引き伸ばしで
 同じ値を使うためである。

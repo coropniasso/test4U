@@ -1,11 +1,11 @@
 """抽出のインターフェース。
 
-推論サーバー（Strata）に触る実装は、この Protocol の背後に置く。
+推論サーバー（Ollama）に触る実装は、この Protocol の背後に置く。
 テストでは tests/fakes.py の FakeExtractor を使う。
 
 Protocol に enforces_json_schema と max_input_tokens を持たせる理由：
-背面がスキーマへの適合を保証するかどうか、1リクエストに何トークン入るかは、背面によって違う。
-Strata がどちらを満たすかは確認できていない（`uv run kijun doctor` で実測する）。
+背面がスキーマへの適合を保証するかどうか、1リクエストに何トークン入るかは、背面や設定によって違う。
+Ollama がスキーマに適合させるかは `uv run kijun doctor` の検査2で確かめる。
 背面ごとの挙動を呼び出し側にハードコードせず、実装に宣言させる。
 """
 
@@ -43,19 +43,19 @@ class RepairEvent:
 
 
 class Extractor(Protocol):
-    # request_id と extracted_requests.model_name に使うモデル名（例: qwen3.8-flash-next）
+    # request_id と extracted_requests.model_name に使うモデル名（例: qwen3.5:9b）
     model_name: str
     # サーバー側が JSON スキーマへの適合を保証するか。
     # False のとき、呼び出し側は repair.py を通してから検証する。
     enforces_json_schema: bool
-    # 1リクエストで受け付ける入力トークンの上限。未確認なら None。
+    # 1リクエストで受け付ける入力トークンの上限。分からなければ None。
     # None のときは chunk_minutes の妥当性を検査しない。
     max_input_tokens: int | None
     # 出力を修復した記録。実装は空のリストで初期化し、修復するたびに追加する。
     # run.py がこれを読んで extract_logs に書く。
     repair_events: list[RepairEvent]
-    # 直近の extract() でサーバーが返した usage（{"prompt_tokens": 入力, "completion_tokens": 出力}）。
-    # サーバーが返さなかった、または背面が持たないときは None。run.py が進捗の表示に使う。
+    # 直近の extract() で Ollama が返した使用量（{"prompt_tokens": 入力, "completion_tokens": 出力}）。
+    # 返さなかった、または背面が持たないときは None。run.py が進捗の表示に使う。
     last_usage: dict | None
 
     def extract(self, chunk: Chunk) -> ExtractionResult:
