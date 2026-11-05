@@ -168,3 +168,64 @@ def test_max_utterance_sec_が_0_なら従来と同じ結果():
     segs = [seg(0, 20, "a"), seg(20.1, 40, "b"), seg(40.1, 60, "c")]
     assert merge_segments(segs, turns, 0.4, max_utterance_sec=0) == merge_segments(segs, turns, 0.4)
     assert len(merge_segments(segs, turns, 0.4, max_utterance_sec=0)) == 1
+
+
+# --- 幻聴の除去 ---------------------------------------------------------------------------------
+
+import pytest
+
+from kijun.transcribe.merge import filter_hallucinated_segments, speaker_overlap_ratio
+
+
+def lseg(start: float, end: float, logprob: float | None, text: str = "あ") -> TranscribedSegment:
+    return TranscribedSegment(start, end, text, avg_logprob=logprob)
+
+
+def test_重なりも確信度も閾値未満なら除き_理由と数値を記録する():
+    kept, dropped = filter_hallucinated_segments([lseg(10, 12, -0.58, "早送り")], [turn(0, 5, "A")], 0.3, -0.5)
+    assert kept == []
+    d = dropped[0]
+    assert (d.start_sec, d.end_sec, d.text, d.avg_logprob, d.speaker_overlap) == (10, 12, "早送り", -0.58, 0.0)
+    assert d.reason == "話者区間との重なり 0.00 < 0.3 かつ avg_logprob -0.58 < -0.5"
+
+
+def test_閾値ちょうどは残す():
+    turns = [turn(0, 3, "A")]
+    # 重なり 3/10 = 0.3 ちょうど
+    assert filter_hallucinated_segments([lseg(0, 10, -0.9)], turns, 0.3, -0.5)[1] == []
+    # avg_logprob が -0.5 ちょうど
+    assert filter_hallucinated_segments([lseg(10, 12, -0.5)], turns, 0.3, -0.5)[1] == []
+
+
+def test_閾値のすぐ下は除く():
+    turns = [turn(0, 2.9, "A")]  # 重なり 0.29
+    assert len(filter_hallucinated_segments([lseg(0, 10, -0.51)], turns, 0.3, -0.5)[1]) == 1
+
+
+def test_片方だけ満たすなら残す():
+    turns = [turn(0, 5, "A")]
+    assert filter_hallucinated_segments([lseg(10, 12, -0.32)], turns, 0.3, -0.5)[1] == []  # 確信している実発話
+    assert filter_hallucinated_segments([lseg(0, 5, -0.9)], turns, 0.3, -0.5)[1] == []  # 話者区間と重なる
+
+
+def test_重なりは話者区間の和集合で数える():
+    # 区間 0-10 に、互いに重なる 2 つの話者区間 0-8 と 4-10。足し合わせると 14/10 だが和集合では 10/10
+    s = lseg(0, 10, -0.9)
+    assert speaker_overlap_ratio(s, [turn(0, 8, "A"), turn(4, 10, "B")]) == pytest.approx(1.0)
+    # 離れた 2 つ（0-2 と 5-6）は 3/10
+    assert speaker_overlap_ratio(s, [turn(0, 2, "A"), turn(5, 6, "B")]) == pytest.approx(0.3)
+
+
+def test_話者区間が空なら何も除かない():
+    kept, dropped = filter_hallucinated_segments([lseg(0, 1, -2.0)], [], 0.3, -0.5)
+    assert len(kept) == 1 and dropped == []
+
+
+def test_avg_logprob_が_None_なら除かない():
+    kept, dropped = filter_hallucinated_segments([lseg(10, 12, None)], [turn(0, 1, "A")], 0.3, -0.5)
+    assert len(kept) == 1 and dropped == []
+
+
+def test_重なりの閾値_0_は除去を使わない():
+    kept, dropped = filter_hallucinated_segments([lseg(10, 12, -2.0)], [turn(0, 1, "A")], 0.0, -0.5)
+    assert len(kept) == 1 and dropped == []

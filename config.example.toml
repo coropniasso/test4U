@@ -28,8 +28,24 @@ model = "large-v3"
 compute_type = "float16"
 device = "cuda"
 language = "ja"
-# faster-whisper の VAD（無音区間の除去）。会議の録音では有効にする。
-vad_filter = true
+# faster-whisper の VAD（Silero による無音区間の除去）。**既定は false**（2026-11-05 に true から変更）。
+# true にすると、iPhone で録音した Discord の通話（36分）で発話の約 2/3 を非音声として捨てた
+# （同じ音声・同じモデルで 2,967 文字 = 82 文字/分。false では 9,348 文字 = 260 文字/分）。
+# 1本の通話での観測であり、対面の録音で false が良いかは再測定していない。
+vad_filter = false
+# 直前の区間の本文を次の区間の文脈に使うか。VAD を切ると無音部分で幻聴（「ご視聴ありがとうございました」など）が
+# 出やすく、true だとそれが次の区間へ連鎖するので false にする。
+condition_on_previous_text = false
+# 単語の時刻から、この秒数以上の無音を挟む区間を幻聴とみなして飛ばす（faster-whisper の
+# hallucination_silence_threshold）。0 なら使わない。0 より大きいと word_timestamps が自動で有効になり、
+# 所要時間が約 1.2 倍になる（36分の音声で 119 秒 → 148 秒）。2.0 は 1 本の通話に基づく設計者の初期値。
+hallucination_silence_threshold = 2.0
+# 幻聴の除去規則。区間の「話者区間との重なりの割合」が drop_max_speaker_overlap 未満、かつ
+# avg_logprob が drop_max_avg_logprob 未満なら除く。除いた区間は文字起こしの JSON の
+# dropped_segments に残り、transcribe の実行時にも表示される。
+# drop_max_speaker_overlap = 0 なら除去しない。0.3 / -0.5 は 1 本の通話に基づく設計者の初期値。
+drop_max_speaker_overlap = 0.3
+drop_max_avg_logprob = -0.5
 # 同一話者の連続する区間で、前の区間の終了から次の区間の開始までの間隔がこの秒数未満なら、1つの発話に結合する。
 # 話者が不明（None）の区間どうしは、同じ話者と判断できないので結合しない。
 min_utterance_sec = 0.4

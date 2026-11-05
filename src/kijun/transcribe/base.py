@@ -21,6 +21,9 @@ class TranscribedSegment:
     start_sec: float
     end_sec: float
     text: str
+    # faster-whisper の avg_logprob（区間の確信度。0 に近いほど確信している）。
+    # 幻聴の除去（merge.filter_hallucinated_segments）が使う。分からなければ None（None の区間は除かない）。
+    avg_logprob: float | None = None
 
 
 @dataclass(frozen=True)

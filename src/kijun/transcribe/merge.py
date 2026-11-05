@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from kijun.models import Utterance
 from kijun.transcribe.base import SpeakerTurn, TranscribedSegment
 
@@ -72,3 +74,86 @@ def merge_segments(
         Utterance(seq=i, speaker_label=m[0], start_sec=m[1], end_sec=m[2], text=m[3])
         for i, m in enumerate(merged)
     ]
+
+
+@dataclass(frozen=True)
+class DroppedSegment:
+    """幻聴の疑いで除いた文字起こしの区間。文字起こしの JSON の dropped_segments に残す。"""
+
+    start_sec: float
+    end_sec: float
+    text: str
+    avg_logprob: float | None
+    speaker_overlap: float
+    reason: str
+
+
+def speaker_overlap_ratio(segment: TranscribedSegment, turns: list[SpeakerTurn]) -> float:
+    """区間のうち、いずれかの話者区間に覆われている部分の割合（0〜1）。
+
+    話者区間どうしが重なることがあるので、話者区間の和集合で数える（重なりの秒数を足し合わせると
+    1 を超える）。区間の長さが 0 以下なら 0 を返す。
+    """
+    duration = segment.end_sec - segment.start_sec
+    if duration <= 0:
+        return 0.0
+    clipped = sorted(
+        (max(t.start_sec, segment.start_sec), min(t.end_sec, segment.end_sec))
+        for t in turns
+        if overlap_sec(segment.start_sec, segment.end_sec, t.start_sec, t.end_sec) > 0
+    )
+    covered = 0.0
+    cur_start: float | None = None
+    cur_end = 0.0
+    for s, e in clipped:
+        if cur_start is None:
+            cur_start, cur_end = s, e
+        elif s <= cur_end:
+            cur_end = max(cur_end, e)
+        else:
+            covered += cur_end - cur_start
+            cur_start, cur_end = s, e
+    if cur_start is not None:
+        covered += cur_end - cur_start
+    return min(1.0, covered / duration)
+
+
+def filter_hallucinated_segments(
+    segments: list[TranscribedSegment],
+    turns: list[SpeakerTurn],
+    max_speaker_overlap: float,
+    max_avg_logprob: float,
+) -> tuple[list[TranscribedSegment], list[DroppedSegment]]:
+    """幻聴の疑いがある区間を (残す区間, 除いた区間) に分ける。
+
+    除く条件：話者区間との重なりの割合が max_speaker_overlap 未満、かつ avg_logprob が
+    max_avg_logprob 未満（どちらも「未満」。ちょうど閾値の値は残す）。
+    判断できない場合は除かない：turns が空（話者分離の結果が無い）、avg_logprob が None、
+    max_speaker_overlap が 0 以下（除去を使わない設定）。
+    """
+    if not turns or max_speaker_overlap <= 0:
+        return list(segments), []
+    kept: list[TranscribedSegment] = []
+    dropped: list[DroppedSegment] = []
+    for seg in segments:
+        if seg.avg_logprob is None:
+            kept.append(seg)
+            continue
+        ratio = speaker_overlap_ratio(seg, turns)
+        if ratio < max_speaker_overlap and seg.avg_logprob < max_avg_logprob:
+            dropped.append(
+                DroppedSegment(
+                    start_sec=seg.start_sec,
+                    end_sec=seg.end_sec,
+                    text=seg.text,
+                    avg_logprob=seg.avg_logprob,
+                    speaker_overlap=ratio,
+                    reason=(
+                        f"話者区間との重なり {ratio:.2f} < {max_speaker_overlap:g} "
+                        f"かつ avg_logprob {seg.avg_logprob:.2f} < {max_avg_logprob:g}"
+                    ),
+                )
+            )
+        else:
+            kept.append(seg)
+    return kept, dropped

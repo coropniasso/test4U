@@ -50,7 +50,28 @@ class TranscribeConfig(_Section):
     compute_type: str = "float16"
     device: str = "cuda"
     language: str = "ja"
-    vad_filter: bool = True
+    # faster-whisper の Silero VAD。既定は False（2026-11-05 に True から変更した。設計者の初期値）。
+    # 理由：iPhone で録音した Discord の通話（36分）で、True だと発話の約 2/3 を非音声と判定して捨てた
+    # （同じ音声・同じモデルで 2,967 文字 = 82 文字/分。False では 9,348 文字 = 260 文字/分）。
+    # 1本の通話での観測であり、対面の録音で False が良いかは再測定していない（CLAUDE.md 7章）。
+    vad_filter: bool = False
+    # 直前の区間の本文を次の区間の文脈に使うか。既定 False。VAD を切ると無音部分で幻聴が出やすく、
+    # True だと幻聴が次の区間へ連鎖する。設計者の初期値で、1本の通話での観測に基づく。
+    condition_on_previous_text: bool = False
+    # 単語の時刻から、この秒数以上の無音を挟む区間を幻聴とみなして飛ばす（faster-whisper 1.2.1 の
+    # hallucination_silence_threshold。word_timestamps=True が必要なので、> 0 のとき自動で有効にする）。
+    # 0 なら使わない。2.0 は設計者の初期値：36分の通話で、VAD なしだと 鎧/猫/スイカ の無意味な
+    # 約12区間などが出たが、2.0 でそれらは消えた（末尾の無音の 3 区間だけ残った）。
+    hallucination_silence_threshold: float = Field(default=2.0, ge=0)
+    # 幻聴の除去規則。区間の「話者区間との重なりの割合」が drop_max_speaker_overlap 未満、かつ
+    # avg_logprob が drop_max_avg_logprob 未満なら除く。除いた区間は文字起こしの JSON の
+    # dropped_segments に残す（黙って消さない）。drop_max_speaker_overlap = 0 なら除去しない。
+    # 0.3 / -0.5 は設計者の初期値：上の 36分の通話で、末尾の幻聴 3 区間（重なり 0.00、
+    # avg_logprob は -0.5 未満）と意味の無い断片 2 件だけを除き、pyannote が拾えなかったが Whisper が
+    # 確信していた実発話（重なり 0.00、avg_logprob -0.32 や -0.08）は残した。広い測定ではない。
+    # no_speech_prob は実発話でも 0.5〜0.8 になり使えなかったので使わない。
+    drop_max_speaker_overlap: float = Field(default=0.3, ge=0, le=1)
+    drop_max_avg_logprob: float = -0.5
     min_utterance_sec: float = 0.4
     # 結合した発話の長さの上限（秒）。0 は「上限なし」。
     max_utterance_sec: float = 30.0

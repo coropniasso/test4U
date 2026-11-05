@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -19,7 +19,15 @@ from kijun.config import Config
 from kijun.db import repo
 from kijun.models import Conversation, Utterance
 from kijun.transcribe.base import Diarizer, Transcriber
-from kijun.transcribe.merge import merge_segments
+from kijun.transcribe.merge import DroppedSegment, filter_hallucinated_segments, merge_segments
+
+
+@dataclass(frozen=True)
+class TranscribeResult:
+    """文字起こしの結果。utterances は DB に入れる発話、dropped は幻聴の疑いで除いた区間。"""
+
+    utterances: list[Utterance]
+    dropped: list[DroppedSegment] = field(default_factory=list)
 
 
 def transcribe_to_utterances(
@@ -28,11 +36,21 @@ def transcribe_to_utterances(
     diarizer: Diarizer,
     min_utterance_sec: float,
     max_utterance_sec: float = 0.0,
-) -> list[Utterance]:
-    """音声から Utterance のリストを作る。DB にもファイルにも書かない。"""
+    drop_max_speaker_overlap: float = 0.0,
+    drop_max_avg_logprob: float = -0.5,
+) -> TranscribeResult:
+    """音声から発話のリストを作る。DB にもファイルにも書かない。
+
+    話者分離の後、話者の割り当てと結合の前に、幻聴の疑いがある区間を除く
+    （drop_max_speaker_overlap が 0 なら除かない）。除いた区間は dropped に返す。
+    """
     segments = transcriber.transcribe(audio_paths)
     turns = diarizer.diarize(audio_paths)
-    return merge_segments(segments, turns, min_utterance_sec, max_utterance_sec)
+    kept, dropped = filter_hallucinated_segments(
+        segments, turns, drop_max_speaker_overlap, drop_max_avg_logprob
+    )
+    utterances = merge_segments(kept, turns, min_utterance_sec, max_utterance_sec)
+    return TranscribeResult(utterances, dropped)
 
 
 def transcript_to_json(
@@ -40,6 +58,7 @@ def transcript_to_json(
     source_files: list[str],
     transcribed_at: datetime,
     utterances: list[Utterance],
+    dropped_segments: list[DroppedSegment] | None = None,
 ) -> str:
     """文字起こしの JSON 文字列を作る。
 
@@ -48,6 +67,8 @@ def transcript_to_json(
     日時は、DuckDB の TIMESTAMP と同じ精度（マイクロ秒）で往復できるよう、秒未満も含めて書く。
     conversation が None のとき（`transcribe --audio` の単発の試し実行）は、会議に属さないので
     conversation_id を null にする。この JSON は復元の対象にならない。
+    dropped_segments は、幻聴の疑いで除いた区間（黙って消さず、利用者が確かめられるよう残す）。
+    復元（restore.py）は読まないので、このキーが無い古い JSON も復元できる。
     """
     payload = {
         "conversation_id": conversation.conversation_id if conversation else None,
@@ -59,6 +80,7 @@ def transcript_to_json(
         "created_at": conversation.created_at.isoformat() if conversation else None,
         "transcribed_at": transcribed_at.isoformat(),
         "utterances": [asdict(u) for u in utterances],
+        "dropped_segments": [asdict(d) for d in (dropped_segments or [])],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -81,7 +103,7 @@ def transcribe_conversation(
     transcriber: Transcriber,
     diarizer: Diarizer,
     now: datetime | None = None,
-) -> list[Utterance]:
+) -> TranscribeResult:
     """登録済みの会議を文字起こしする。
 
     手順: 音声を探す → 文字起こしと話者分離 → utterances に書く → JSON を保存 →
@@ -96,19 +118,22 @@ def transcribe_conversation(
     now = now or datetime.now()
     audio_paths = [find_audio_file(cfg, n) for n in conv.source_files]
 
-    utterances = transcribe_to_utterances(
+    result = transcribe_to_utterances(
         audio_paths,
         transcriber,
         diarizer,
         cfg.transcribe.min_utterance_sec,
         cfg.transcribe.max_utterance_sec,
+        cfg.transcribe.drop_max_speaker_overlap,
+        cfg.transcribe.drop_max_avg_logprob,
     )
+    utterances = result.utterances
     repo.replace_utterances(con, conversation_id, utterances)
 
     cfg.paths.transcripts.mkdir(parents=True, exist_ok=True)
     json_path = cfg.paths.transcripts / f"{conversation_id}.json"
     json_path.write_text(
-        transcript_to_json(conv, conv.source_files, now, utterances),
+        transcript_to_json(conv, conv.source_files, now, utterances, result.dropped),
         encoding="utf-8",
     )
     repo.mark_transcribed(con, conversation_id, str(json_path), conv.duration_sec, now)
@@ -117,7 +142,7 @@ def transcribe_conversation(
     for p in audio_paths:
         if p.parent.resolve() != cfg.paths.processed.resolve():
             shutil.move(str(p), str(cfg.paths.processed / p.name))
-    return utterances
+    return result
 
 
 def transcribe_single_audio(
@@ -128,14 +153,23 @@ def transcribe_single_audio(
     min_utterance_sec: float,
     max_utterance_sec: float = 0.0,
     now: datetime | None = None,
-) -> list[Utterance]:
+    drop_max_speaker_overlap: float = 0.0,
+    drop_max_avg_logprob: float = -0.5,
+) -> TranscribeResult:
     """単発の試し実行（`transcribe --audio`）。DuckDB には書かず、JSON だけを保存する。音声は移動しない。"""
     now = now or datetime.now()
-    utterances = transcribe_to_utterances(
-        [audio_path], transcriber, diarizer, min_utterance_sec, max_utterance_sec
+    result = transcribe_to_utterances(
+        [audio_path],
+        transcriber,
+        diarizer,
+        min_utterance_sec,
+        max_utterance_sec,
+        drop_max_speaker_overlap,
+        drop_max_avg_logprob,
     )
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(
-        transcript_to_json(None, [audio_path.name], now, utterances), encoding="utf-8"
+        transcript_to_json(None, [audio_path.name], now, result.utterances, result.dropped),
+        encoding="utf-8",
     )
-    return utterances
+    return result

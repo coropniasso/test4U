@@ -81,7 +81,7 @@ def test_faster_whisper_impl_は_ndarray_を_transcribe_に渡す(tmp_path, monk
     received = []
 
     class FakeSeg:
-        start, end, text = 0.0, 0.5, "こんにちは"
+        start, end, text, avg_logprob = 0.0, 0.5, "こんにちは", -0.3
 
     class FakeModel:
         def __init__(self, *a, **k):
@@ -137,7 +137,7 @@ def test_pyannote_の波形は複数ファイルをつなぐ(tmp_path):
 
 def _fake_whisper(monkeypatch, seen_kwargs: list) -> None:
     class FakeSeg:
-        start, end, text = 0.0, 0.5, "こんにちは"
+        start, end, text, avg_logprob = 0.0, 0.5, "こんにちは", -0.3
 
     class FakeModel:
         def __init__(self, *a, **k):
@@ -184,3 +184,43 @@ def test_hotwords_は実在する_faster_whisper_の引数名である():
     import inspect
 
     assert "hotwords" in inspect.signature(fw.WhisperModel.transcribe).parameters
+
+
+def test_幻聴対策の引数は実在する_faster_whisper_の引数名である():
+    fw = pytest.importorskip("faster_whisper")
+    import inspect
+
+    params = inspect.signature(fw.WhisperModel.transcribe).parameters
+    for name in ("condition_on_previous_text", "hallucination_silence_threshold", "word_timestamps"):
+        assert name in params
+
+
+def test_既定では_VAD_なし_文脈連鎖なし_幻聴対策ありで_transcribe_に渡し_avg_logprob_を持ち帰る(tmp_path, monkeypatch):
+    seen: list[dict] = []
+    _fake_whisper(monkeypatch, seen)
+    import kijun.transcribe.faster_whisper_impl  # noqa: F401  (fake の差し替え後に import される)
+    from kijun.transcribe.faster_whisper_impl import FasterWhisperTranscriber
+
+    p = tmp_path / "1.wav"
+    write_wav(p, 16000, 1, 1.0)
+    segs = FasterWhisperTranscriber(Config().transcribe).transcribe([p])
+    kw = seen[0]
+    assert kw["vad_filter"] is False
+    assert kw["condition_on_previous_text"] is False
+    assert kw["hallucination_silence_threshold"] == 2.0
+    assert kw["word_timestamps"] is True
+    assert segs[0].avg_logprob == -0.3
+
+
+def test_hallucination_silence_threshold_が_0_なら_word_timestamps_も切る(tmp_path, monkeypatch):
+    seen: list[dict] = []
+    _fake_whisper(monkeypatch, seen)
+    from kijun.transcribe.faster_whisper_impl import FasterWhisperTranscriber
+
+    cfg = Config()
+    cfg.transcribe.hallucination_silence_threshold = 0
+    p = tmp_path / "1.wav"
+    write_wav(p, 16000, 1, 1.0)
+    FasterWhisperTranscriber(cfg.transcribe).transcribe([p])
+    assert seen[0]["hallucination_silence_threshold"] is None
+    assert seen[0]["word_timestamps"] is False

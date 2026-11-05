@@ -307,3 +307,34 @@ def test_CLI_壊れた_JSON_があれば終了コード_1(tmp_path):
     runner.invoke(app, [*base, "db", "init"])
     r = runner.invoke(app, [*base, "restore-transcript", "--all"])
     assert r.exit_code == 1 and "必要な項目がありません" in r.output
+
+
+def test_dropped_segments_付きの_JSON_も_キーの無い古い_JSON_も復元できる(con, cfg, tmp_path):
+    cfg.paths.inbox.mkdir(parents=True)
+    (cfg.paths.inbox / f"{CID}.m4a").write_bytes(b"audio")
+    repo.insert_conversation(con, make_conversation(CID))
+    cfg.transcribe.drop_max_speaker_overlap = 0.3
+    segs = [
+        TranscribedSegment(0.0, 2.0, "おはよう", avg_logprob=-0.1),
+        TranscribedSegment(60.0, 61.0, "早送り", avg_logprob=-0.9),
+    ]
+    transcribe_conversation(con, cfg, CID, FakeTranscriber(segs), FakeDiarizer(TURNS))
+    path = cfg.paths.transcripts / f"{CID}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert len(data["dropped_segments"]) == 1
+
+    def restore_into(name: str):
+        fresh = repo.connect(tmp_path / name)
+        migrate.apply_schema(fresh)
+        outcome = restore_transcript(fresh, path)
+        utts = repo.get_utterances(fresh, CID)
+        fresh.close()
+        return outcome, utts
+
+    outcome, with_key = restore_into("a.duckdb")
+    assert outcome.status == STATUS_RESTORED and [u.text for u in with_key] == ["おはよう"]
+
+    del data["dropped_segments"]  # 古い JSON
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    outcome, without_key = restore_into("b.duckdb")
+    assert outcome.status == STATUS_RESTORED and without_key == with_key

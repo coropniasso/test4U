@@ -43,7 +43,8 @@ class FasterWhisperTranscriber:
 
     def transcribe(self, audio_paths: list[Path]) -> list[TranscribedSegment]:
         result: list[TranscribedSegment] = []
-        offset = 0.0  # これまでに処理したファイルの長さの合計（秒）
+        halluc = self._cfg.hallucination_silence_threshold
+        offset = 0.0  #これまでに処理したファイルの長さの合計（秒）
         for path in audio_paths:
             # 自前でデコードした配列を渡す。np.ndarray なら faster-whisper は内部の decode_audio を呼ばない
             # （その関数は非公開で、PyAV の版との組み合わせで壊れたことがある）。
@@ -52,12 +53,21 @@ class FasterWhisperTranscriber:
                 audio,
                 language=self._cfg.language,
                 vad_filter=self._cfg.vad_filter,
-                word_timestamps=False,
+                condition_on_previous_text=self._cfg.condition_on_previous_text,
+                # hallucination_silence_threshold は word_timestamps=True のときだけ働く（faster-whisper の仕様）
+                word_timestamps=halluc > 0,
+                hallucination_silence_threshold=halluc if halluc > 0 else None,
                 hotwords=self._hotwords,
             )
             # segments は generator。モデルを解放した後に評価されて落ちないよう、ここで list にする。
             one_file = [
-                TranscribedSegment(start_sec=s.start, end_sec=s.end, text=s.text) for s in list(segments)
+                TranscribedSegment(
+                    start_sec=s.start,
+                    end_sec=s.end,
+                    text=s.text,
+                    avg_logprob=getattr(s, "avg_logprob", None),
+                )
+                for s in list(segments)
             ]
             result.extend(shift_items(one_file, offset))
             # info.duration ではなく、デコードした配列の長さから秒数を出す。話者分離が同じ配列の

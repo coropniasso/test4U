@@ -213,3 +213,35 @@ def test_ゲーム検出の設定の範囲():
     with pytest.raises(ValidationError, match="空の名前"):
         Config.model_validate({"batch": {"defer_if_running": ["Game.exe", " "]}})
     assert Config.model_validate({"batch": {"defer_max_hours": 0}})  # 0 は待たずに飛ばす
+
+
+def test_文字起こしの幻聴対策の既定値():
+    t = Config().transcribe
+    assert t.vad_filter is False
+    assert t.condition_on_previous_text is False
+    assert t.hallucination_silence_threshold == 2.0
+    assert (t.drop_max_speaker_overlap, t.drop_max_avg_logprob) == (0.3, -0.5)
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("drop_max_speaker_overlap", -0.1),
+        ("drop_max_speaker_overlap", 1.1),
+        ("hallucination_silence_threshold", -1),
+    ],
+)
+def test_文字起こしの幻聴対策の範囲外の値は拒否する(key, value):
+    from pydantic import ValidationError
+
+    from kijun.config import TranscribeConfig
+
+    with pytest.raises(ValidationError):
+        TranscribeConfig(**{key: value})
+
+
+def test_幻聴対策の境界値は受け付ける():
+    from kijun.config import TranscribeConfig
+
+    t = TranscribeConfig(drop_max_speaker_overlap=0, hallucination_silence_threshold=0)
+    assert t.drop_max_speaker_overlap == 0 and t.hallucination_silence_threshold == 0

@@ -35,7 +35,7 @@ def test_会議を文字起こしして_DB_と_JSON_と_processed_に反映す�
     repo.insert_conversation(con, make_conversation(CID, source_files=["a.m4a", "b.m4a"]))
     tr, di = FakeTranscriber(SEGMENTS), FakeDiarizer(TURNS)
 
-    utterances = transcribe_conversation(con, cfg, CID, tr, di, now=NOW)
+    utterances = transcribe_conversation(con, cfg, CID, tr, di, now=NOW).utterances
 
     # 同一話者の連続区間は結合され、話者が付く
     assert [(u.seq, u.speaker_label, u.text) for u in utterances] == [
@@ -67,7 +67,7 @@ def test_processed_にある音声も文字起こしし直せる(con, cfg, audio
     repo.insert_conversation(con, make_conversation(CID, source_files=["a.m4a"]))
     transcribe_conversation(con, cfg, CID, FakeTranscriber(SEGMENTS), FakeDiarizer(TURNS), now=NOW)
     # 2回目: 音声は processed にある。utterances は入れ直される
-    again = transcribe_conversation(con, cfg, CID, FakeTranscriber(SEGMENTS[:1]), FakeDiarizer(TURNS), now=NOW)
+    again = transcribe_conversation(con, cfg, CID, FakeTranscriber(SEGMENTS[:1]), FakeDiarizer(TURNS), now=NOW).utterances
     assert len(again) == 1 and len(repo.get_utterances(con, CID)) == 1
     assert (cfg.paths.processed / "a.m4a").exists()
 
@@ -98,7 +98,7 @@ def test_文字起こしが失敗したら音声は_inbox_に残る(con, cfg, au
 
 def test_単発の試し実行は_DB_に書かず_音声も動かさない(cfg, audio, tmp_path):
     out = tmp_path / "out" / "a.json"
-    utterances = transcribe_single_audio(audio[0], out, FakeTranscriber(SEGMENTS), FakeDiarizer(TURNS), 0.4, now=NOW)
+    utterances = transcribe_single_audio(audio[0], out, FakeTranscriber(SEGMENTS), FakeDiarizer(TURNS), 0.4, now=NOW).utterances
     assert len(utterances) == 2
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data["conversation_id"] is None and data["source_files"] == ["a.m4a"]
@@ -110,3 +110,46 @@ def test_find_audio_file(cfg, audio):
     assert find_audio_file(cfg, "a.m4a") == cfg.paths.inbox / "a.m4a"
     with pytest.raises(FileNotFoundError):
         find_audio_file(cfg, "zzz.m4a")
+
+
+# --- 幻聴の除去と dropped_segments -----------------------------------------------------------------
+
+
+def _halluc_segments():
+    return [
+        TranscribedSegment(0.0, 1.0, "こんにちは", avg_logprob=-0.1),
+        TranscribedSegment(30.0, 31.0, "早送り", avg_logprob=-0.7),  # 話者区間の外・確信度が低い
+    ]
+
+
+def test_幻聴は_utterances_から除き_JSON_の_dropped_segments_に残す(con, cfg, audio):
+    cfg.transcribe.drop_max_speaker_overlap = 0.3
+    repo.insert_conversation(con, make_conversation(CID, source_files=["a.m4a"]))
+    turns = [SpeakerTurn(0.0, 1.0, "SPEAKER_00")]
+    result = transcribe_conversation(con, cfg, CID, FakeTranscriber(_halluc_segments()), FakeDiarizer(turns), now=NOW)
+    assert [u.text for u in result.utterances] == ["こんにちは"]
+    assert [d.text for d in result.dropped] == ["早送り"]
+    data = json.loads((cfg.paths.transcripts / f"{CID}.json").read_text(encoding="utf-8"))
+    assert [d["text"] for d in data["dropped_segments"]] == ["早送り"]
+    assert set(data["dropped_segments"][0]) == {
+        "start_sec", "end_sec", "text", "avg_logprob", "speaker_overlap", "reason",
+    }
+    assert [u["text"] for u in data["utterances"]] == ["こんにちは"]
+
+
+def test_除去が無いときも_dropped_segments_は空のリストで入る(con, cfg, audio):
+    repo.insert_conversation(con, make_conversation(CID, source_files=["a.m4a"]))
+    transcribe_conversation(con, cfg, CID, FakeTranscriber(SEGMENTS), FakeDiarizer(TURNS), now=NOW)
+    data = json.loads((cfg.paths.transcripts / f"{CID}.json").read_text(encoding="utf-8"))
+    assert data["dropped_segments"] == []
+
+
+def test_単発の試し実行も_dropped_segments_を残す(audio, tmp_path):
+    out = tmp_path / "o.json"
+    turns = [SpeakerTurn(0.0, 1.0, "SPEAKER_00")]
+    result = transcribe_single_audio(
+        audio[0], out, FakeTranscriber(_halluc_segments()), FakeDiarizer(turns), 0.4,
+        drop_max_speaker_overlap=0.3, drop_max_avg_logprob=-0.5, now=NOW,
+    )
+    assert len(result.dropped) == 1
+    assert json.loads(out.read_text(encoding="utf-8"))["dropped_segments"][0]["text"] == "早送り"

@@ -196,6 +196,16 @@ def ingest(
 # --- transcribe --------------------------------------------------------------
 
 
+def _echo_dropped(dropped: list) -> None:
+    """幻聴の疑いで除いた区間の件数と内容を表示する。内容は文字起こしの JSON の dropped_segments にも残る。"""
+    if not dropped:
+        return
+    typer.echo("")
+    typer.echo(f"幻聴の疑いで除いた区間: {len(dropped)} 件（JSON の dropped_segments に残してあります）")
+    for d in dropped:
+        typer.echo(f"  {d.start_sec:8.1f}s  {d.text}  [{d.reason}]")
+
+
 @app.command()
 def transcribe(
     ctx: typer.Context,
@@ -224,27 +234,31 @@ def transcribe(
             transcriber = _build_transcriber(cfg)
             diarizer = _build_diarizer(cfg)
             out_path = out or (cfg.paths.transcripts / f"{audio.stem}.json")
-            utterances = transcribe_single_audio(
+            result = transcribe_single_audio(
                 audio,
                 out_path,
                 transcriber,
                 diarizer,
                 cfg.transcribe.min_utterance_sec,
                 cfg.transcribe.max_utterance_sec,
+                drop_max_speaker_overlap=cfg.transcribe.drop_max_speaker_overlap,
+                drop_max_avg_logprob=cfg.transcribe.drop_max_avg_logprob,
             )
-            for u in utterances:
+            for u in result.utterances:
                 typer.echo(
                     f"[{u.seq}] {u.start_sec:8.1f}-{u.end_sec:8.1f} {u.speaker_label or 'UNKNOWN'}: {u.text}"
                 )
+            _echo_dropped(result.dropped)
             typer.echo(f"\nJSON を保存しました: {out_path}")
         else:
             assert conversation is not None
             con = _open_db(cfg)
             transcriber = _build_transcriber(cfg)
             diarizer = _build_diarizer(cfg)
-            utterances = transcribe_conversation(con, cfg, conversation, transcriber, diarizer)
+            result = transcribe_conversation(con, cfg, conversation, transcriber, diarizer)
             con.close()
-            typer.echo(f"{conversation}: 発話 {len(utterances)} 件を保存しました。")
+            typer.echo(f"{conversation}: 発話 {len(result.utterances)} 件を保存しました。")
+            _echo_dropped(result.dropped)
         elapsed = time.monotonic() - started
         typer.echo(
             f"処理時間: {elapsed:.1f} 秒（モデルの読み込みを含む）。"
