@@ -305,10 +305,10 @@ PC がスリープしていると実行されない。タスクスケジュー�
 | 1 | iCloud for Windows の導入と `Recordings` フォルダの常時保持設定 | ユーザー | 未着手 |
 | 2 | 共有シート用ショートカットの作成と、PC の inbox に届くことの確認 | ユーザー | 未着手 |
 | 3 | 通話の録音テスト(30分) | ユーザー | 未着手 |
-| 4 | 参加者への説明(目的・保存場所・引用)の文面の見直し(2章)と、すでに録音した会議の参加者への扱いの判断 | ユーザー | 未着手 |
-| 5 | Discord bot の準備(アプリケーションの作成、トークン、個人サーバーへの招待、議事録用チャンネルの作成、`discord.minutes_channel_id` の設定、`DISCORD_BOT_TOKEN`)と、`kijun discord post` での接続確認 | ユーザー | 未着手 |
-| 6 | Ollama for Windows のインストールと `ollama pull qwen3.5:9b`、`uv run kijun doctor`(検査3が「良」であること) | ユーザー | Ollama と `qwen3.5:9b` は導入済み(2026-11-06 に `qwen3:14b` が取得済みであることも確認)。`doctor` の実行結果は未記録 |
-| 7 | `config.toml` の置き換え(`data/config.toml.proposed` を参考に、`[extract]`・`[extract.ollama]`・`[match]`・`[discord]` の古いキーを新しい構成にする) | ユーザー | 未着手 |
+| 4 | 参加者への説明(目的・保存場所・引用)の文面の見直し(2章)と、すでに録音した会議の参加者への扱いの判断 | ユーザー | 未着手。文案の下書き(3案)と、録音済みの2会議の扱いの選択肢を `docs/consent-draft.md` に置いた(2026-11-06) |
+| 5 | Discord bot の準備(アプリケーションの作成、トークン、個人サーバーへの招待、議事録用チャンネルの作成、`discord.minutes_channel_id` の設定、`DISCORD_BOT_TOKEN`)と、`kijun discord post` での接続確認 | ユーザー | 未着手。discord.py 2.7.1 は導入済み(`uv sync --extra discord` は不要)。#4 で録音済みの2会議の扱いを決めるまで `minutes_channel_id` は空のままにする(設定すると次の夜間バッチで投稿される) |
+| 6 | Ollama for Windows のインストールと `ollama pull qwen3.5:9b`、`uv run kijun doctor`(検査3が「良」であること) | ユーザー | Ollama と `qwen3.5:9b` は導入済み(2026-11-06 に `qwen3:14b` が取得済みであることも確認)。`doctor` は 2026-11-06 に5検査すべて「良」(全体が GPU に載る。5.7 GiB) |
+| 7 | `config.toml` の置き換え(`data/config.toml.proposed` を参考に、`[extract]`・`[extract.ollama]`・`[match]`・`[discord]` の古いキーを新しい構成にする) | Claude Code | **完了(2026-11-06。ユーザーの指示で置き換えた。元の設定は `data/backup/config.toml.before-minutes`。`kijun batch run --dry-run` で読み込めることを確認)** |
 | 8 | Strata のデスクトップアプリが常駐していれば終了し、必要ならアンインストールする | ユーザー | 未着手 |
 | 9 | タスクスケジューラへの登録(`kijun batch install-task` が作った XML を `schtasks /create /xml` で登録) | ユーザー | 未着手 |
 | 10 | 議事録の品質の確認と、プロンプトの調整(7章の所見を参照) | 共同 | 一部実施(2026-11-06。決定事項・聞き取れない語・担当者の規則と概要の検査を足した。7章の再測定を参照。表記の揺れと意味の重複は未解決) |
