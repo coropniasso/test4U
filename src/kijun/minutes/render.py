@@ -82,6 +82,7 @@ def render_markdown(
         f"- 長さ: {length}",
         f"- 話者: {', '.join(speakers) if speakers else EMPTY}",
         f"- 作成: {model_name}、{created_at:%Y-%m-%d %H:%M}（機械の文字起こしと要約。誤りを含む）",
+        *[f"- 注意: {w}" for w in getattr(doc, "warnings", [])],
         "",
         f"## {SECTION_OVERVIEW}",
         "",

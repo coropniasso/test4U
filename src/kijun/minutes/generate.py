@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,6 +35,9 @@ from kijun.models import Utterance
 
 NO_CONTENT_OVERVIEW = "要点として取り出せる内容がありませんでした。"
 NO_UTTERANCE_OVERVIEW = "文字起こしに発話がありませんでした。"
+
+# 決定事項が1件も無いのに、概要がこれらの語を含むときは警告する(自動では書き換えない)。
+DECISION_WORDS = ("決定", "決まっ")
 
 
 class MinutesError(Exception):
@@ -57,6 +62,7 @@ class MergedMinutes:
 class MinutesDoc:
     overview: str
     merged: MergedMinutes
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -73,13 +79,26 @@ def _clean(text: str) -> str:
     return " ".join(text.split())
 
 
-def _unique(items: list[str]) -> list[str]:
-    seen: set[str] = set()
+_IGNORED_CATEGORIES = ("P", "S", "Z", "C")  # 句読点・記号・空白・制御文字
+
+
+def _norm_key(text: str) -> str:
+    """重複判定用の鍵。NFKC に正規化し、句読点・記号・空白・制御文字を除き、英字を小文字にする。
+
+    意味の同じ文を見つけるものではない。文字が(空白と句読点を除いて)一致する文だけを同じとみなす。
+    """
+    nfkc = unicodedata.normalize("NFKC", text)
+    return "".join(c for c in nfkc if unicodedata.category(c)[0] not in _IGNORED_CATEGORIES).lower()
+
+
+def _unique(items: list[str], exclude_keys: set[str] | None = None) -> list[str]:
+    seen: set[str] = set(exclude_keys or ())
     out: list[str] = []
     for raw in items:
         text = _clean(raw)
-        if text and text not in seen:
-            seen.add(text)
+        key = _norm_key(text)
+        if key and key not in seen:
+            seen.add(key)
             out.append(text)
     return out
 
@@ -93,8 +112,9 @@ def merge_chunk_minutes(parts: list[ChunkMinutes]) -> MergedMinutes:
     """チャンクごとの結果を、時間順のまま1つにつなげる。
 
     - 議題名が完全に同じ（空白を除く）議題は、最初に出た議題にまとめ、要点を足す。
-    - 要点・決定事項・未決事項は、完全に同じ文を1つにする。
-    - ToDo は、内容・担当・期限がすべて同じものを1つにする。
+    - 要点・決定事項・未決事項は、空白と句読点を除いて一致する文を1つにする(意味の重複は判定しない)。
+    - 同じ文が決定事項と未決事項の両方にあるときは、未決事項に残し、決定事項から除く(迷ったら決定事項にしない)。
+    - ToDo は、内容(空白と句読点を除く)・担当・期限がすべて同じものを1つにする。
     - 空の文字列は捨てる。
     """
     topics: dict[str, list[str]] = {}
@@ -115,16 +135,28 @@ def merge_chunk_minutes(parts: list[ChunkMinutes]) -> MergedMinutes:
             if not task:
                 continue
             owner, due = _clean_optional(todo.owner), _clean_optional(todo.due)
-            key = (task, owner, due)
+            key = (_norm_key(task), owner, due)
             if key not in todo_keys:
                 todo_keys.add(key)
                 todos.append(Todo(task=task, owner=owner, due=due))
+    unique_open = _unique(open_issues)
     return MergedMinutes(
         topics=[Topic(title=t, points=_unique(p)) for t, p in topics.items()],
-        decisions=_unique(decisions),
+        decisions=_unique(decisions, {_norm_key(t) for t in unique_open}),
         todos=todos,
-        open_issues=_unique(open_issues),
+        open_issues=unique_open,
     )
+
+
+def check_overview(overview: str, merged: MergedMinutes) -> list[str]:
+    """概要の検査。決定事項が無いのに「決定」「決まっ」を含むなら、警告の文を返す(書き換えない)。"""
+    if merged.decisions:
+        return []
+    found = [w for w in DECISION_WORDS if w in overview]
+    if not found:
+        return []
+    words = "、".join(f"「{w}」" for w in found)
+    return [f"決定事項が無いのに、概要が {words} を含んでいます。依頼や意向を決定と書いた可能性があります。"]
 
 
 def check_chunk_input_size(chunk: Chunk, cfg: Config) -> str | None:
@@ -188,7 +220,14 @@ def build_minutes(
     if merged.is_empty:
         return MinutesDoc(NO_CONTENT_OVERVIEW, merged), len(chunks)
 
-    system, user = build_overview_messages([p.model_dump() for p in parts])
+    system, user = build_overview_messages(
+        {
+            "topics": [t.model_dump() for t in merged.topics],
+            "decisions": merged.decisions,
+            "todos": [t.model_dump() for t in merged.todos],
+            "open_issues": merged.open_issues,
+        }
+    )
     started = time.monotonic()
     try:
         overview = chat.ask(system, user, Overview, "概要")
@@ -198,7 +237,10 @@ def build_minutes(
     text = _clean(overview.overview)
     if not text:
         raise MinutesError("概要の生成が空の文字列を返しました")
-    return MinutesDoc(text, merged), len(chunks)
+    warnings = check_overview(text, merged)
+    for w in warnings:
+        log(f"警告: {w}")
+    return MinutesDoc(text, merged, warnings), len(chunks)
 
 
 def generate_minutes(

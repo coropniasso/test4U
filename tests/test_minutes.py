@@ -88,9 +88,68 @@ def test_システムプロンプトに規則が全部入っている():
 
 
 def test_概要のプロンプトは各チャンクの結果の_JSON_を渡し_文字起こしは渡さない():
-    system, user = build_overview_messages([chunk_result(0).model_dump(), chunk_result(1).model_dump()])
+    merged = merge_chunk_minutes([chunk_result(0), chunk_result(1)])
+    system, user = build_overview_messages(
+        {
+            "topics": [t.model_dump() for t in merged.topics],
+            "decisions": merged.decisions,
+            "todos": [t.model_dump() for t in merged.todos],
+            "open_issues": merged.open_issues,
+        }
+    )
     assert system == OVERVIEW_SYSTEM_PROMPT
-    assert "議題0" in user and "決定1" in user and '"part": 2' in user
+    assert "議題0" in user and "決定1" in user and "作業1" in user
+    assert "決定事項は無い" not in user  # 決定事項があるときは注意書きを付けない
+
+
+def test_決定事項が空なら概要のプロンプトに_決定事項は無い_と明示する():
+    _, user = build_overview_messages({"topics": [], "decisions": [], "todos": [{"task": "資料を送る"}], "open_issues": []})
+    assert "決定事項は無い" in user and "「決定」" in user
+
+
+def test_プロンプトは決定_聞き取れない語_担当_表記の規則を持つ():
+    for word in ["合意・決定", "迷ったら決定事項に入れない", "意味の説明を足さない", "呼びかけられただけ", "表記をそのまま"]:
+        assert word in CHUNK_SYSTEM_PROMPT, word
+    assert "13禁" not in CHUNK_SYSTEM_PROMPT  # 会議の内容を例に使わない(例の写しを防ぐ)
+    for word in ["decisions に書かれていること", "決定事項は無かった"]:
+        assert word in OVERVIEW_SYSTEM_PROMPT, word
+
+
+def test_空白と句読点を除いて一致する文は1つにする():
+    parts = [
+        ChunkMinutes(decisions=["水曜日に、実施する。"], open_issues=["場所は未定"]),
+        ChunkMinutes(decisions=["水曜日に実施する", "場所は 未定。"], todos=[Todo(task="資料を、送る"), Todo(task="資料を送る。")]),
+    ]
+    m = merge_chunk_minutes(parts)
+    assert m.decisions == ["水曜日に、実施する。"]  # 「場所は未定」は未決事項にも出るので決定事項から除く
+    assert m.open_issues == ["場所は未定"]
+    assert len(m.todos) == 1
+
+
+def test_概要が決定と書いたのに決定事項が無ければ警告し_書き換えない(cfg):
+    messages = []
+
+    def h(system, user, model_cls, name):
+        if model_cls is Overview:
+            return Overview(overview="対応が決定しました。")
+        return ChunkMinutes(todos=[Todo(task="資料を送る")])
+
+    doc, _ = build_minutes(FakeJsonChat(h), cfg, make_utterances(5), messages.append)
+    assert doc.overview == "対応が決定しました。"
+    assert len(doc.warnings) == 1 and "決定事項が無い" in doc.warnings[0]
+    assert any(m.startswith("警告:") for m in messages)
+    conv = make_conversation("20260920_1930_f2f_teirei", duration_sec=600.0)
+    assert "- 注意: 決定事項が無い" in render_markdown(conv, make_utterances(5), doc, "m", NOW)
+
+
+def test_決定事項があれば概要に決定と書いても警告しない(cfg):
+    def h(system, user, model_cls, name):
+        if model_cls is Overview:
+            return Overview(overview="水曜日に決まった。")
+        return ChunkMinutes(decisions=["水曜日にする"])
+
+    doc, _ = build_minutes(FakeJsonChat(h), cfg, make_utterances(5), quiet)
+    assert doc.warnings == []
 
 
 # --- つなぎ合わせ ------------------------------------------------------------------------------
@@ -151,7 +210,7 @@ def test_概要の入力はチャンクの結果の_JSON_で_文字起こし全�
     assert model_cls is Overview and system == OVERVIEW_SYSTEM_PROMPT
     assert "SPEAKER_01: 発話" not in user  # 発話の行は含まない
     body = json.loads(user.split("\n\n", 1)[1])
-    assert [p["part"] for p in body] == [1, 2] and body[0]["decisions"] == ["決定0"]
+    assert body["decisions"] == ["決定0", "決定1"] and set(body) == {"topics", "decisions", "todos", "open_issues"}
 
 
 def test_発話が無ければ_LLM_を呼ばない(cfg):
